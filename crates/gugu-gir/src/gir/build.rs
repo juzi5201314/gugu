@@ -94,6 +94,7 @@ struct Builder<'a> {
     tries: Vec<TryFrame>,
     live: Vec<bool>,
     written: Vec<PlaceInit>,
+    init_stores: Vec<hir::StmtId>,
     large_copies: Vec<LargeCopySite>,
     passing: PassingTable,
     return_block: BlockId,
@@ -146,6 +147,7 @@ impl<'a> Builder<'a> {
             tries: Vec::new(),
             live: Vec::new(),
             written: Vec::new(),
+            init_stores: Vec::new(),
             large_copies: Vec::new(),
             passing: PassingTable::new(module),
             return_block: BlockId(0),
@@ -301,6 +303,17 @@ impl<'a> Builder<'a> {
         self.saved = (0..self.owner.cleanup.len())
             .map(|_| SavedCleanup::Body(hir::ExprId(0)))
             .collect();
+        for expression in &self.owner.expressions {
+            if let hir::ExprKind::For {
+                initializations, ..
+            } = &expression.kind
+            {
+                for plan in initializations {
+                    self.locals[self.hir_to_gir[plan.array.index()].index()]
+                        .element_initialization = true;
+                }
+            }
+        }
         Ok(())
     }
 
@@ -322,6 +335,7 @@ impl<'a> Builder<'a> {
         let address_taken = hir_local
             .is_some_and(|local| self.owner.locals[local.index()].storage & ADDRESS_TAKEN != 0);
         self.locals.push(GirLocal {
+            element_initialization: false,
             ty,
             kind,
             mutable,

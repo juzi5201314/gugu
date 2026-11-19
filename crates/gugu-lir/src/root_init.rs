@@ -11,6 +11,7 @@ use super::pass::graph::Graph;
 
 /// 块级逐根初始化不动点 + 逐位置事件重放。
 pub struct InitSlots {
+    dynamic: Vec<bool>,
     /// 每块一个连续位图；槽根按 slot ID 顺序拼接，避免每块每槽独立分配。
     input: Vec<LiveSet>,
     offsets: Vec<usize>,
@@ -66,7 +67,14 @@ impl InitSlots {
                 break;
             }
         }
+        let mut dynamic = vec![false; body.stack_slots.len()];
+        for instruction in &body.instructions {
+            if let super::body::Op::RootInitAddr(slot) = instruction.op {
+                dynamic[slot.index()] = true;
+            }
+        }
         Self {
+            dynamic,
             input,
             events,
             offsets,
@@ -75,6 +83,9 @@ impl InitSlots {
 
     /// 该点该槽的某个根字是否已经写成指针；越界的槽或根下标视作未初始化。
     pub fn is_initialized(&self, block: BlockId, position: u32, slot: usize, bit: usize) -> bool {
+        if self.dynamic.get(slot) == Some(&true) {
+            return false;
+        }
         let Some((&start, &end)) = self.offsets.get(slot).zip(self.offsets.get(slot + 1)) else {
             return false;
         };
@@ -119,6 +130,7 @@ mod tests {
         let mut entry = LiveSet::empty(2);
         entry.set(1, true);
         let slots = InitSlots {
+            dynamic: vec![false],
             input: vec![entry],
             offsets: vec![0, 2],
             events: vec![vec![
@@ -134,5 +146,16 @@ mod tests {
         assert!(slots.is_initialized(BlockId(0), 4, 0, 1));
         assert!(!slots.is_initialized(BlockId(0), 5, 0, 1));
         assert!(!slots.is_initialized(BlockId(0), 5, 1, 0));
+    }
+
+    #[test]
+    fn dynamic_root_bytes_never_lose_the_runtime_gate() {
+        let slots = InitSlots {
+            dynamic: vec![true],
+            input: vec![LiveSet::empty(1)],
+            offsets: vec![0, 1],
+            events: vec![vec![(0, 0, 0, true)]],
+        };
+        assert!(!slots.is_initialized(BlockId(0), 1, 0, 0));
     }
 }

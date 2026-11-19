@@ -71,6 +71,7 @@ impl Builder<'_> {
                 body,
                 into_iter,
                 next,
+                ..
             } => {
                 let result = self.emit_for(id, pattern, value, body, into_iter, next)?;
                 return self.finish_expr(id, result);

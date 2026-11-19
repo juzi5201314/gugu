@@ -70,6 +70,7 @@ impl Checker<'_, '_> {
         receiver: ExprId,
         target: &Ty,
     ) {
+        self.array_init_index_borrow(receiver);
         // 非位置接收者先物化为正常对齐的临时槽；位置接收者不能绕过 packed 检查。
         let path = if expression == receiver
             && let ExprKind::Path(path) = self.arena().exprs[receiver.0 as usize].kind

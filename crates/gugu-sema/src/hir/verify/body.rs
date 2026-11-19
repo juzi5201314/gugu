@@ -226,12 +226,23 @@ impl Module {
                 body,
                 into_iter,
                 next,
+                initializations,
             } => {
                 pat(*pattern)
                     && edge(*value)
                     && edge(*body)
                     && dispatch(*into_iter)
                     && dispatch(*next)
+                    && (initializations.is_empty()
+                        || (into_iter.is_none()
+                            && next.is_none()
+                            && matches!(
+                                owner.expressions[value.index()].kind,
+                                ExprKind::Range { .. }
+                            )))
+                    && initializations
+                        .iter()
+                        .all(|plan| self.verify_array_init(owner, *pattern, *body, plan))
             }
             ExprKind::Try { body, from_value } => edge(*body) && dispatch(*from_value),
             ExprKind::TryExit {

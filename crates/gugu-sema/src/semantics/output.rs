@@ -7,7 +7,7 @@ use super::{
 };
 use crate::{Diagnostic, DiagnosticCode};
 
-pub const SCHEMA_VERSION: u32 = 21;
+pub const SCHEMA_VERSION: u32 = 25;
 
 #[derive(Clone, Debug, Default, Eq, PartialEq, serde::Serialize, serde::Deserialize)]
 pub struct CheckedSemantics {
@@ -47,6 +47,17 @@ pub struct CheckedBody {
     pub must_use: Vec<MustUseSite>,
     pub source_literals: Vec<SourceLiteral>,
     pub embed_literals: Vec<EmbedLiteral>,
+    pub array_init_loops: Vec<ArrayInitLoop>,
+}
+
+#[derive(Clone, Debug, Eq, PartialEq, serde::Serialize, serde::Deserialize)]
+pub struct ArrayInitLoop {
+    pub expression: ExprId,
+    pub store: super::super::ast::StmtId,
+    pub place: ExprId,
+    pub array_slot: usize,
+    pub index_slot: usize,
+    pub length: super::model::ArrayLength,
 }
 
 /// 丢掉必须使用的值的源码范围。诊断在 lint 级别解析之后才发射。
@@ -305,6 +316,21 @@ impl CheckedSemantics {
             };
             if !module.configured.item_active(def.item) {
                 return Err(invalid());
+            }
+            for plan in &body.array_init_loops {
+                if !matches!(
+                    module
+                        .arena
+                        .exprs
+                        .get(plan.expression.0 as usize)
+                        .map(|expr| &expr.kind),
+                    Some(super::super::ast::ExprKind::For { .. })
+                ) || !matches!(module.arena.stmts.get(plan.store.0 as usize).map(|stmt| stmt.kind), Some(super::super::ast::StmtKind::Assign { place, .. }) if place == plan.place)
+                    || plan.index_slot >= body.slots.len()
+                    || !matches!(body.slots.get(plan.array_slot), Some(Ty::Array(_, length)) if *length == plan.length)
+                {
+                    return Err(invalid());
+                }
             }
             let mut previous = None;
             for (id, ty) in &body.expressions {

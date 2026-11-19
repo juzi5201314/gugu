@@ -1,4 +1,5 @@
 //! 具体 GIR 到 LIR；变量读取由 block 参数封口，不引入 phi 或平行语义 IR。
+mod array_init;
 mod calls;
 mod comparison;
 pub(crate) mod foreign;
@@ -150,6 +151,7 @@ struct PendingBlock {
 }
 
 struct Builder<'a> {
+    dynamic_root: Option<ValueId>,
     concrete: &'a ConcreteBody,
     gir: &'a GirBody,
     module: &'a hir::Module,
@@ -298,6 +300,7 @@ pub fn lower(
         region_ends: region_ends(world, concrete.generic_body, concrete.body.blocks.len()),
         next_shared_token: 0,
         shared_promotions: vec![None; concrete.body.locals.len()],
+        dynamic_root: None,
         shared_guards: Vec::new(),
     };
     builder.prepare_storage()?;

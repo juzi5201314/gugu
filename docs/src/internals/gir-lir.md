@@ -1,5 +1,10 @@
 # GIR 与 LIR
 
+逐元素初始化证明分别合流 definitely-initialized 的交集与 maybe-initialized 的并集；
+首次写入计划只适用于所有入口均未初始化、且声明位于每个外围循环内的数组。
+planned array 的无初始化器声明重入时，GIR 先释放旧的零填充槽，再重新发出 StorageLive，
+使 LIR 在新一轮写入前重置存储与根有效位；panic 不得再次释放上轮遗留的控制字。
+
 本章规定 Gugu 的两个中间表示：GIR 是完成类型检查后的、目标无关且显式控制流的语义 IR；LIR 是完成具体布局和 ABI lowering 后、面向目标机器的 SSA IR。两者是编译器内部契约，不是序列化给第三方工具的稳定格式。
 ## stable fragment 复用与 changed-only pass
 
@@ -203,6 +208,20 @@ HIR同样提供保持源码臂优先级的 pattern matrix。GIR把它编译成�
 构造期按 [传递](../spec/passing.md) 把赋值、参数、返回、模式绑定、聚合字段、`dyn Any` 擦除与 channel send 展开为 `ValueAction` / `CowSnapshot` / `ResourceAction` / `Assign`，不另造平行 IR。位值发 `ValueAction::Copy` + `ValueCopy`；身份句柄发 `ValueAction::Copy` + `Use(Copy)`；`string` / `ByteBuffer` / `Bytes` 发 `CowSnapshot`；`ResourceCell` 先 `AcquireLease` 保护源，再对已初始化的非返回目的槽 `ReleaseLease`，最后 Assign。初始化状态按 local 下的实际投影前缀记录，不以投影池范围编号作身份；兄弟字段互不覆盖，全部字段复制完成后才将父聚合标为完整。聚合赋值与退出释放逐一处理已初始化的 resource projection。调用实参先拷到临时槽再 `MoveInternal`；LIR 把资源值复制到调用参数暂存区后用 `ValueForget` 清空来源的资源叶，不增加第二份租约。`StorageDead` 前对已初始化的 resource / 未知类别的用户与参数槽 `ReleaseLease`。资源栈槽在入口清零并保持到函数出口；正常返回与 panic 展开统一释放剩余临时租约，已经释放或移动的资源叶为零，因此不会重复释放。返回槽搬入 sret 后执行 Forget，不在 callee 中释放交给调用者的租约。含 resource 的 local 不得进入 managed closure environment。分析不确定的泛型参数走 Copy + CowSnapshot + AcquireLease。超过 64 字节的按值位结构体记入 `GirBody.large_copies`，query 外按属性求 `large_copy`（`E0056`，默认 warn；`deny`/`forbid` 使 Frontend 失败且无镜像）。
 
 内部 `MoveInternal` 消耗具体来源槽，复制传播不得把它替换成原始值槽，否则 Forget 会清空错误的资源实例并泄漏租约。`ArrayToSlice` 对数组引用取引用值本身作为 data，不能再次取保存引用的临时槽地址；长度由数组类型确定。
+
+数组初始化计划使用原绑定的正常栈或堆存储，不引入暂存数组或出口复制。存储建立时全零填充，
+栈根字节一次性置位；根扫描跳过零字，资源释放把零控制字视为无动作。只有正常范围循环出口
+将数组提升为 `PlaceInit::Whole`，后续覆盖按普通规则释放旧租约。计划 store 禁止旧目的租约释放，
+完成复制后立即结束 RHS 自有临时租约；调用结果只在正常后继记为已写入，不能因未记录而漏释放。
+
+栈根表是 enum 变体的并集，初始全零可追踪不表示以后能无条件追踪标量载荷。
+LIR query/world schema 与 body revision 为 27，合并逐根动态字节地址与 C 聚合的自然对齐约束。
+
+成功元素写入后，LIR 用 `RootInitAddr(slot)` 取得帧内逐根字节基址，计算
+`index * element_root_count + field_root_index`，再按当前活动变体复位和置位。
+发射量取决于元素形状，与外层数组长度无关；没有按下标枚举的选择 CFG。
+动态字节写入不产生静态 must 初始化证明，栈图始终保留相应 gate。堆对象继续按类型描述符
+中的 repeat/switch 程序追踪实际变体。RHS 临时值保持根直到存储完成，panic 使用既有零槽清理。
 
 place 与 value 消费共享一条表达式构造路径：字段/下标/借用消费者只构造投影，`Dereference` 调整继续延长原 place，不提前把被引用聚合复制到临时槽。真正的 value 消费才物化最终投影，并执行该值自己的传递动作。由字段取地址产生的引用因此仍指向原槽；仅为了形成 place 不应触发 `large_copy` 或 COW/resource 复制。
 

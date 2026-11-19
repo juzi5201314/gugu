@@ -542,6 +542,7 @@ fn scoped_view_fixture_is_paired() {
     let mut body = minimal_body();
     let token = LocalId(1);
     body.locals.push(body::GirLocal {
+        element_initialization: false,
         ty: crate::hir::TypeId(0),
         kind: body::LocalKind::Temporary,
         mutable: true,
@@ -591,6 +592,7 @@ fn minimal_body() -> GirBody {
         },
         generic_params: 0,
         locals: vec![body::GirLocal {
+            element_initialization: false,
             ty: crate::hir::TypeId(0),
             kind: body::LocalKind::Return,
             mutable: false,

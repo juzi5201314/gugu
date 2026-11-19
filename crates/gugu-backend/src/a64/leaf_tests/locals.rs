@@ -159,6 +159,40 @@ fn initialized_local_roots_keep_five_classes_and_dead_locals_leave_the_map() {
 }
 
 #[test]
+fn computed_root_addresses_write_frame_gates_not_payloads() {
+    for (gate, payload, expected) in [(0, 0xbeef, 0xbeef), (1, 0x2000, 0x3000)] {
+        let mut f = fixture(&[], &[Type::I64]);
+        slot(&mut f, vec![(0, Provenance::GcHeap)], 8);
+        let address = base(&mut f);
+        let value = f.constant(Type::I64, payload);
+        f.op(Op::Store(access()), &[address, value], &[]);
+        init(&mut f, 0, true);
+        let flags = f.op(Op::RootInitAddr(SlotId(0)), &[], &[Type::Ptr])[0];
+        f.body.values[flags.index()].kind = ValueType::pointer(Provenance::Raw);
+        let value = f.constant(Type::I8, gate);
+        f.op(
+            Op::Store(crate::lir::body::Access {
+                alias: AliasClass::Foreign,
+                align: 1,
+                volatile: false,
+            }),
+            &[flags, value],
+            &[],
+        );
+        poll(&mut f);
+        let value = f.op(Op::Load(access()), &[address], &[Type::I64])[0];
+        f.ret(&[value]);
+        let fragment = compile(&mut f);
+        let mut harness = Harness {
+            flags: 1,
+            gc_direct_delta: 0x1000,
+            ..Default::default()
+        };
+        assert_eq!(runtime_vm::run(&fragment, &[], &mut harness)[0], expected);
+    }
+}
+
+#[test]
 fn emitted_byte_gates_skip_uninitialized_and_reset_union_variants_in_large_frames() {
     for (gate, bytes) in [
         (None, 8),

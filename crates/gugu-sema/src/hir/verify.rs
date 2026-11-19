@@ -1,5 +1,6 @@
 use super::*;
 use crate::{Diagnostic, DiagnosticCode};
+mod array_init;
 mod body;
 mod cleanup;
 

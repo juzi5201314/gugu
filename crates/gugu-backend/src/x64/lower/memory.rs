@@ -21,6 +21,13 @@ pub(super) fn lower(
     match op {
         Op::SymbolAddr(symbol) => symbol_addr(symbol, results, builder),
         Op::StackAddr(slot) => stack_addr(*slot, results, builder),
+        Op::RootInitAddr(slot) => stack_addr(
+            crate::lir::body::SlotId(
+                slot.0 + crate::x64::reg::FRAME_INIT_BASE - crate::x64::reg::FRAME_SLOT_BASE,
+            ),
+            results,
+            builder,
+        ),
         Op::PtrOffset => ptr_offset(operands, results, builder),
         Op::Load(_) => load(operands, results, builder),
         Op::Store(_) => store(operands, builder),
@@ -62,7 +69,7 @@ fn stack_addr(
     };
     // 占位基址落在 frame 局部槽空间（`FRAME_SLOT_BASE` 之上）；分配阶段按 frame layout
     // 改写成 `[rsp + local_offset(slot)] + disp`。
-    debug_assert!(slot.0 < crate::x64::reg::FRAME_SLOT_BASE);
+    debug_assert!(slot.0 < crate::x64::reg::FRAME_INIT_BASE);
     builder.emit(
         "lea",
         MEM_R64,

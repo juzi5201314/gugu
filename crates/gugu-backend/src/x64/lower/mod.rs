@@ -139,6 +139,7 @@ pub fn domain(op: &Op) -> &'static str {
         Op::FConst(_) => "FConst",
         Op::SymbolAddr(_) => "SymbolAddr",
         Op::StackAddr(_) => "StackAddr",
+        Op::RootInitAddr(_) => "RootInitAddr",
         Op::PtrOffset => "PtrOffset",
         Op::Integer(_) => "Integer",
         Op::Float(_) => "Float",
@@ -226,6 +227,7 @@ pub fn lower_with(
         }
         Op::SymbolAddr(_)
         | Op::StackAddr(_)
+        | Op::RootInitAddr(_)
         | Op::PtrOffset
         | Op::Load(_)
         | Op::Store(_)

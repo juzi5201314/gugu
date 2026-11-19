@@ -666,6 +666,8 @@ impl Builder<'_> {
             && let Storage::Stack { slot, .. } = self.storage[place.local.index()]
         {
             self.root_init_value(slot, 0, ty, destination, None)?;
+        } else if self.gir.locals[place.local.index()].element_initialization {
+            self.initialize_array_projection(place, destination, ty)?;
         }
         Ok(())
     }

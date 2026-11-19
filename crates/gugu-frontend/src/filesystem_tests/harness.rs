@@ -1,5 +1,5 @@
 //! 进程内执行生产 LIR；仅在分配、调度和系统边界注入确定性替身。
-use super::{Boundary, Compilation, interpret_bounded};
+use super::{Boundary, Compilation, interpret_traced, root_trace};
 use crate::lir::body::{Body, CallTarget, Op, RuntimeCall, Symbol};
 use std::collections::HashMap;
 pub(super) fn word(memory: &[u8], at: u64) -> u64 {
@@ -37,6 +37,10 @@ type MachineHook =
     fn(&mut Harness<'_>, crate::runtime::RuntimeMachineOp, &[u64], &mut Vec<u8>) -> Vec<u64>;
 
 pub(super) struct Harness<'a> {
+    pub(super) root_frames: Option<root_trace::Frames>,
+    pub(super) collect_hook: Option<ParkHook>,
+    pub(super) gc_objects: std::collections::BTreeMap<u64, usize>,
+    pub(super) gc_descriptors: std::collections::BTreeMap<u64, [u8; 32]>,
     pub(super) bodies: HashMap<[u8; 32], &'a Body>,
     pub(super) heap: usize,
     sizes: HashMap<[u8; 32], u64>,
@@ -132,6 +136,10 @@ impl<'a> Harness<'a> {
             })
             .collect();
         Self {
+            root_frames: None,
+            collect_hook: None,
+            gc_objects: Default::default(),
+            gc_descriptors: Default::default(),
             names: bodies
                 .iter()
                 .filter_map(|body| {
@@ -225,13 +233,20 @@ impl<'a> Harness<'a> {
             args,
             body.signature
         );
-        interpret_bounded(
+        let frames = self.root_frames.clone();
+        interpret_traced(
             body,
             args,
             memory,
             &mut |target, args, memory| match target {
                 Boundary::Call(CallTarget::Instance(instance)) => {
                     match self.names.get(instance).copied() {
+                        Some(("std/runtime/control.gg", "collect"))
+                            if self.collect_hook.is_some() =>
+                        {
+                            self.collect_hook.unwrap()(self, memory);
+                            return vec![];
+                        }
                         Some(("std/runtime/roots.gg", "gc_types_section"))
                             if self.metadata.is_some() =>
                         {
@@ -382,6 +397,9 @@ impl<'a> Harness<'a> {
                 // 不会 panic（panic 传播即测试失败），因此固定返回 0。
                 Boundary::Call(CallTarget::Runtime(RuntimeCall::JoinPanic)) => vec![0],
                 Boundary::Call(CallTarget::Runtime(RuntimeCall::Panic)) => {
+                    if self.root_frames.is_some() {
+                        std::panic::panic_any(root_trace::InterpretedPanic);
+                    }
                     let start = usize::try_from(args[0]).unwrap();
                     let length = usize::try_from(args[1]).unwrap();
                     let message = String::from_utf8_lossy(&memory[start..start + length]);
@@ -492,6 +510,10 @@ impl<'a> Harness<'a> {
                     ..
                 }) => {
                     let at = self.allocate(memory, usize::try_from(args[0]).unwrap());
+                    if self.root_frames.is_some() {
+                        self.gc_objects.insert(at, args[0] as usize);
+                        self.gc_descriptors.insert(at, *descriptor);
+                    }
                     if *placement == crate::frontend::gir::placement::PlacementKind::Resource {
                         self.resources.push((at, *descriptor));
                     }
@@ -513,6 +535,7 @@ impl<'a> Harness<'a> {
                 other => panic!("地址函数不应跨越未登记边界 {other:?}"),
             },
             8192,
+            frames,
         )
     }
     pub(super) fn text(

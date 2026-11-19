@@ -6,6 +6,7 @@ use super::{
 };
 use crate::{Diagnostic, DiagnosticCode, Span};
 use std::collections::BTreeMap;
+mod array_init;
 mod assembly;
 mod borrow;
 mod calls;
@@ -35,6 +36,7 @@ mod source;
 struct State {
     names: BTreeMap<Symbol, usize>,
     initialized: Vec<bool>,
+    maybe_initialized: Vec<bool>,
     callables: Vec<Vec<super::model::CallableId>>,
     cleanup_paths: BTreeMap<usize, CleanupPath>,
     reachable: bool,
@@ -42,6 +44,7 @@ struct State {
 #[derive(Clone)]
 struct CleanupPath {
     initialized: Vec<bool>,
+    maybe_initialized: Vec<bool>,
     callables: Vec<Vec<super::model::CallableId>>,
     mandatory: bool,
 }
@@ -52,6 +55,8 @@ struct Slot {
     range: [u32; 2],
 }
 struct LoopState {
+    entry_slots: usize,
+    back_edges: Vec<State>,
     pack: bool,
     values: Vec<Ty>,
     exits: Vec<State>,
@@ -115,6 +120,8 @@ struct Checker<'m, 'a> {
     source_literals: Vec<super::output::SourceLiteral>,
     embed_literals: Vec<super::output::EmbedLiteral>,
     format_traits: Vec<formatting::PendingFormat>,
+    array_init_loops: Vec<super::output::ArrayInitLoop>,
+    active_array_inits: Vec<array_init::ActiveInit>,
 }
 
 pub(super) fn check(
@@ -224,6 +231,7 @@ pub(super) fn check(
                 must_use: checker.must_use_sites,
                 source_literals: checker.source_literals,
                 embed_literals: checker.embed_literals,
+                array_init_loops: checker.array_init_loops,
             });
             dependencies[module][index] = checker.dependencies;
             errors.extend(checker.errors);
@@ -309,6 +317,7 @@ impl<'m, 'a> Checker<'m, 'a> {
                 names: BTreeMap::new(),
                 cleanup_paths: BTreeMap::new(),
                 initialized: Vec::new(),
+                maybe_initialized: Vec::new(),
                 callables: Vec::new(),
                 reachable: true,
             },
@@ -357,6 +366,8 @@ impl<'m, 'a> Checker<'m, 'a> {
             embed_literals: Vec::new(),
             format_traits: Vec::new(),
             pack_elements: BTreeMap::new(),
+            array_init_loops: Vec::new(),
+            active_array_inits: Vec::new(),
         }
     }
     fn arena(&self) -> &'a AstArena {
@@ -724,6 +735,7 @@ impl<'m, 'a> Checker<'m, 'a> {
         Ty::Function(parameters, Box::new(self.return_ty.clone()))
     }
     fn slot(&mut self, name: Symbol, ty: Ty, initialized: bool, span: &Span) {
+        self.array_init_binding(name);
         let id = self.slots.len();
         self.slots.push(Slot {
             ty,
@@ -732,6 +744,7 @@ impl<'m, 'a> Checker<'m, 'a> {
             range: [span.start(), span.end()],
         });
         self.state.initialized.resize(id + 1, false);
+        self.state.maybe_initialized.resize(id + 1, false);
         self.state.callables.resize_with(id + 1, Vec::new);
         self.initialize(id, initialized);
         self.state.names.insert(name, id);
@@ -742,9 +755,12 @@ impl<'m, 'a> Checker<'m, 'a> {
             self.capture_slot(slot, false);
         }
         self.state.initialized[slot] = value;
+        self.state.maybe_initialized[slot] = value;
         for path in self.state.cleanup_paths.values_mut() {
             path.initialized.resize(self.slots.len(), false);
             path.initialized[slot] = value;
+            path.maybe_initialized.resize(self.slots.len(), false);
+            path.maybe_initialized[slot] = value;
         }
     }
     fn assign_callables(&mut self, slot: usize, origins: Vec<super::model::CallableId>) {
