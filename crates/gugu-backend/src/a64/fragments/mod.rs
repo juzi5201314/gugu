@@ -10,6 +10,7 @@ pub use coroutine::{
     Context, ContextCode, MorestackCode, MorestackMailbox, MorestackScratch, context_switch,
     morestack_or_poll,
 };
+pub(crate) use entry::darwin_main;
 pub use entry::rt0;
 pub use poll::safepoint_slow;
 
