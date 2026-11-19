@@ -43,12 +43,14 @@
 
 `[]` 参数表可以混写类型参数与 `comptime` 参数，适用于 `fn`、`struct`、`enum`、`union`、`trait`、`impl`、`type`：
 
+<!-- docs-example: gap 未解析的编译期名称 -->
 ```gugu
 struct Block[T, comptime N: int] {
     data: [T; N]
 }
 ```
 
+<!-- docs-example: gap 未解析的编译期名称 -->
 ```gugu
 impl[T: Clone, comptime N: int] Clone for [T; N] {
     fn clone(self: &Self) [T; N] {
@@ -164,6 +166,7 @@ impl[T: Clone, comptime N: int] Clone for [T; N] {
 
 除具名字段结构体外，允许**恰好一个字段**的元组结构体（newtype）。多字段禁止位置构造（避免和函数调用、元组变体混淆）。
 
+<!-- docs-example: parse -->
 ```gugu
 struct Point {
     pub x: int
@@ -335,6 +338,13 @@ impl dyn Any {
 恢复接口类型同样只做精确类型匹配：若容器保存的就是 `dyn Print`，可以取回 `dyn Print`；不能把保存的 `Point` 或另一个接口对象临时转换成 `dyn Print`。要接口对象，应在放入容器前显式按 `dyn Print` 擦除。
 
 ```gugu
+use std.any.{Any}
+
+struct Point {
+    pub x: int
+    pub y: int
+}
+
 fn demo(a: dyn Any) {
     if let Some(p) = a.downcast::[Point]() {
         p.x += 1

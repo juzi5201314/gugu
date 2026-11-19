@@ -23,6 +23,13 @@ fn main() {
 }
 ```
 
+输出：
+
+<!-- docs-example: output -->
+```text
+hello, gugu
+```
+
 绑定写作 `let 名字 = 值`，类型标注可选（`let i: int = 0`）；返回类型写在参数列表之后、只用空白分隔。绑定默认可变，没有 `mut` 关键字：
 
 ```gugu
