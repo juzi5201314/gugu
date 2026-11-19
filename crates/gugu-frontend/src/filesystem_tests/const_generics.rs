@@ -1,6 +1,29 @@
 use super::{CompileRequest, Compiler, TargetName, printing::output};
 
 #[test]
+fn dependent_value_parameter_method_dispatch_uses_bound_signature() {
+    let bytes: Vec<_> = output(
+        r#"
+use std.io.{println}
+struct S {}
+impl S { fn f(self: &Self, comptime n: int) [int; n] { [7; n] } }
+fn main() { let s = S {}
+    let a = s.f(2)
+    let b = s.f(3)
+    let empty: [int; 0] = s.f(0)
+    _ = empty
+    println(a[1])
+    println(b[2]) }
+"#,
+        &[],
+    )
+    .into_iter()
+    .flat_map(|(_, bytes)| bytes)
+    .collect();
+    assert_eq!(bytes, b"7\n7\n");
+}
+
+#[test]
 fn dependent_value_parameters_reject_implicit_receiver_borrows() {
     let compiled = Compiler::shared().compile(CompileRequest::single_file(
         "main.gg",

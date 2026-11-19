@@ -184,6 +184,15 @@ impl Checker<'_, '_> {
         {
             *recorded = ty.clone();
         }
+        if let Some(dispatch) = self
+            .dispatches
+            .iter_mut()
+            .rev()
+            .find(|dispatch| dispatch.expression == callee)
+            && let Some((parameters, result)) = ty.signature()
+        {
+            dispatch.signature = Ty::Function(parameters.to_vec(), Box::new(result.clone()));
+        }
         if let Some((params, ret)) = ty.signature() {
             if let Some(expected) = expected
                 && !matches!(ret, Ty::Projection(..))
