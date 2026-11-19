@@ -512,6 +512,12 @@ fn intersect(a: &Ty, b: &Ty, bindings: &mut BTreeMap<String, Ty>) -> bool {
         }
         (Ty::Tuple(a), Ty::Tuple(b)) => intersect_list(a, b, bindings),
         (Ty::Named(i, a), Ty::Named(j, b)) => i == j && intersect_list(a, b, bindings),
+        (Ty::Dyn(a), Ty::Dyn(b)) => {
+            a.len() == b.len()
+                && a.iter().zip(b).all(|(a, b)| {
+                    a.id == b.id && intersect_list(&a.arguments, &b.arguments, bindings)
+                })
+        }
         (Ty::Result(a, e), Ty::Result(b, f)) => {
             intersect(a, b, bindings) && intersect(e, f, bindings)
         }
@@ -541,6 +547,12 @@ fn occurs(name: &str, ty: &Ty, bindings: &BTreeMap<String, Ty>) -> bool {
         | Ty::Join(t)
         | Ty::MaybeUninit(t) => occurs(name, t, bindings),
         Ty::Tuple(ts) | Ty::Named(_, ts) => ts.iter().any(|t| occurs(name, t, bindings)),
+        Ty::Dyn(interfaces) => interfaces.iter().any(|interface| {
+            interface
+                .arguments
+                .iter()
+                .any(|ty| occurs(name, ty, bindings))
+        }),
         Ty::Result(t, e) => occurs(name, t, bindings) || occurs(name, e, bindings),
         Ty::Function(ts, ret) => {
             ts.iter().any(|t| occurs(name, t, bindings)) || occurs(name, ret, bindings)

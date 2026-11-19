@@ -279,6 +279,24 @@ fn array_const_impls_reject_alpha_equivalent_duplicates() {
 }
 
 #[test]
+fn array_const_impls_reject_alpha_equivalent_dyn_arguments() {
+    rejects(
+        "trait View[T] {}\ntrait Mark {}\nimpl[comptime N: int] Mark for [dyn View[[int; N]]; 1] {}\nimpl[comptime M: int] Mark for [dyn View[[int; M]]; 1] {}\nfn main() {}",
+        "重叠",
+    );
+}
+
+#[test]
+fn array_const_impls_distinguish_disjoint_dyn_arguments() {
+    let compiled = Compiler::shared().compile(CompileRequest::single_file("main.gg", "trait View[T] {}\ntrait Other[T] {}\ntrait Mark {}\nimpl Mark for [dyn View[[int; 2]]; 1] {}\nimpl Mark for [dyn View[[int; 3]]; 1] {}\nimpl Mark for [dyn Other[[int; 2]]; 1] {}\nfn main() {}", TargetName::X86_64Linux));
+    assert!(
+        compiled.is_success(),
+        "{:?}",
+        compiled.diagnostics().items()
+    );
+}
+
+#[test]
 fn array_const_impls_keep_repeated_length_constraints_consistent() {
     let compiled = Compiler::shared().compile(CompileRequest::single_file("main.gg", "trait Mark {}\nimpl[comptime N: int] Mark for [[int; N]; N] {}\nimpl Mark for [[int; 3]; 4] {}\nfn main() {}", TargetName::X86_64Linux));
     assert!(
