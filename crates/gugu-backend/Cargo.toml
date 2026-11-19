@@ -10,6 +10,7 @@ test-support = []
 
 [dependencies]
 blake3 = "1"
+sha2 = "0.10"
 foldhash = "0.2"
 serde.workspace = true
 
