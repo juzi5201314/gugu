@@ -1,9 +1,574 @@
-struct Probe {
-    value: int,
+use std.text.{Bytes, alloc_bytes}
+
+pub struct Formatter {
+    text: string,
+    fill: char,
+    alignment: int,
+    sign: int,
+    alternate: bool,
+    zero: bool,
+    width: int,
+    precision: int,
 }
 
-impl Print for Probe {
-    fn print(self: &Self, out: &Formatter) {}
+impl Formatter {
+    pub fn new() Formatter = Formatter {
+        text: "", fill: ' ', alignment: 0, sign: 0,
+        alternate: false, zero: false, width: 0, precision: -1,
+    }
+    pub fn finish(self: &Self) string = self.text
+    pub fn write_str(self: &Self, value: string) { self.text = self.text + value }
+    pub fn write_char(self: &Self, value: char) { self.write_str(character(value)) }
+    pub fn pad(self: &Self, value: string) {
+        let bytes = unsafe { Bytes::from_string(value).as_slice() }
+        let end = 0
+        let length = 0
+        while end < bytes.len() && (self.precision < 0 || length < self.precision) {
+            end = end + scalar_width(bytes[end])
+            length = length + 1
+        }
+        self.aligned(value[..end], length, 1)
+    }
+    pub fn pad_integral(self: &Self, non_negative: bool, prefix: string, digits: string) {
+        let sign = if !non_negative { "-" } else if self.sign == 1 { "+" } else if self.sign == 3 { " " } else { "" }
+        let prefix = if self.alternate { prefix } else { "" }
+        let head = sign + prefix
+        let length = Bytes::from_string(head).len() + Bytes::from_string(digits).len()
+        if self.zero {
+            self.write_str(head)
+            self.repeat('0', self.width - length)
+            self.write_str(digits)
+        } else {
+            self.aligned(head + digits, length, 3)
+        }
+    }
+    fn aligned(self: &Self, text: string, length: int, default: int) {
+        let padding = if self.width > length { self.width - length } else { 0 }
+        let alignment = if self.alignment == 0 { default } else { self.alignment }
+        let before = if alignment == 3 { padding } else if alignment == 2 { padding / 2 } else { 0 }
+        self.repeat(self.fill, before)
+        self.write_str(text)
+        self.repeat(self.fill, padding - before)
+    }
+    fn repeat(self: &Self, fill: char, count: int) {
+        let text = character(fill)
+        for _ in 0..count { self.write_str(text) }
+    }
 }
 
-fn render(probe: Probe, width: int) string = f"{probe}:{probe.value:>width$}:{probe.value:#x}"
+fn scalar_width(first: byte) int {
+    if first < 128 { 1 } else if first < 224 { 2 } else if first < 240 { 3 } else { 4 }
+}
+
+fn character(value: char) string {
+    let code = uint(value)
+    let length = if code < 128 { 1 } else if code < 2048 { 2 } else if code < 65536 { 3 } else { 4 }
+    let data = unsafe { alloc_bytes(length) }
+    if length == 1 {
+        data[0] = byte(code)
+    } else {
+        let remaining = code
+        let index = length - 1
+        while index > 0 {
+            data[index] = byte((remaining & 63) | 128)
+            remaining = remaining >> 6
+            index = index - 1
+        }
+        let prefix = if length == 2 { uint(192) } else if length == 3 { uint(224) } else { uint(240) }
+        data[0] = byte(remaining | prefix)
+    }
+    utf8(data)
+}
+
+fn digits(value: uint, base: uint, upper: bool) string {
+    let alphabet = unsafe { Bytes::from_string(if upper { "0123456789ABCDEF" } else { "0123456789abcdef" }).as_slice() }
+    let storage = unsafe { alloc_bytes(64) }
+    let cursor = 64
+    let remaining = value
+    loop {
+        cursor = cursor - 1
+        storage[cursor] = alphabet[int(remaining % base)]
+        remaining = remaining / base
+        if remaining == 0 { break };
+    }
+    utf8(storage[cursor..])
+}
+
+fn utf8(data: &[byte]) string {
+    let bytes = unsafe { Bytes::from_owned(data) }
+    bytes.to_string_lossy()
+}
+
+fn signed_decimal(value: int, out: &Formatter) {
+    let magnitude = if value < 0 { uint(-(value + 1)) + 1 } else { uint(value) }
+    out.pad_integral(value >= 0, "", digits(magnitude, 10, false))
+}
+
+fn escaped(value: string, quote: char) string {
+    let out = Formatter::new()
+    out.write_char(quote)
+    let bytes = unsafe { Bytes::from_string(value).as_slice() }
+    let index = 0
+    while index < bytes.len() {
+        let first = bytes[index]
+        let width = scalar_width(first)
+        let code = uint(first)
+        if width > 1 {
+            code = uint(first & (if width == 2 { byte(31) } else if width == 3 { byte(15) } else { byte(7) }))
+            for offset in 1..width { code = (code << 6) | uint(bytes[index + offset] & 63) }
+        }
+        if first == 0 { out.write_str("\\0") }
+        else if first == 9 { out.write_str("\\t") }
+        else if first == 10 { out.write_str("\\n") }
+        else if first == 13 { out.write_str("\\r") }
+        else if first == 92 { out.write_str("\\\\") }
+        else if uint(first) == uint(quote) { out.write_char('\\'); out.write_char(quote) }
+        else if code < 32 || (code >= 127 && code <= 159) || code == 173 || code == 1564 || (code >= 8203 && code <= 8207) || (code >= 8232 && code <= 8238) || (code >= 8288 && code <= 8303) || code == 65279 || (code >= 65529 && code <= 65531) {
+            out.write_str("\\u{")
+            out.write_str(digits(code, 16, false))
+            out.write_str("}")
+        } else {
+            out.write_str(value[index..index + width])
+        }
+        index = index + width
+    }
+    out.write_char(quote)
+    out.finish()
+}
+
+impl Print for string {
+    fn print(self: &Self, out: &Formatter) { out.pad(*self) }
+}
+impl Debug for string {
+    fn debug(self: &Self, out: &Formatter) {
+        let text = escaped(*self, '"')
+        let bytes = unsafe { Bytes::from_string(text).as_slice() }
+        let length = 0
+        let index = 0
+        while index < bytes.len() {
+            index = index + scalar_width(bytes[index])
+            length = length + 1
+        }
+        out.aligned(text, length, 1)
+    }
+}
+impl Print for char {
+    fn print(self: &Self, out: &Formatter) { out.pad(character(*self)) }
+}
+impl Debug for char {
+    fn debug(self: &Self, out: &Formatter) { out.pad(escaped(character(*self), '\'')) }
+}
+impl Print for bool {
+    fn print(self: &Self, out: &Formatter) { out.pad(if *self { "true" } else { "false" }) }
+}
+impl Debug for bool {
+    fn debug(self: &Self, out: &Formatter) { out.pad(if *self { "true" } else { "false" }) }
+}
+
+fn wide_divmod(value: u128, base: uint) (u128, uint) {
+    let quotient: u128 = 0
+    let remainder: uint = 0
+    let bit = 127
+    while bit >= 0 {
+        remainder = (remainder << 1) | uint((value >> bit) & 1)
+        if remainder >= base {
+            remainder = remainder - base
+            quotient = quotient | (u128(1) << bit)
+        }
+        bit = bit - 1
+    }
+    (quotient, remainder)
+}
+
+fn wide_digits(value: u128, base: uint, upper: bool) string {
+    let alphabet = unsafe { Bytes::from_string(if upper { "0123456789ABCDEF" } else { "0123456789abcdef" }).as_slice() }
+    let storage = unsafe { alloc_bytes(128) }
+    let cursor = 128
+    let remaining = value
+    loop {
+        let (quotient, remainder) = wide_divmod(remaining, base)
+        cursor = cursor - 1
+        storage[cursor] = alphabet[int(remainder)]
+        remaining = quotient
+        if remaining == 0 { break };
+    }
+    utf8(storage[cursor..])
+}
+
+fn __formatter_new() Formatter = Formatter::new()
+fn __formatter_write(out: &Formatter, value: string) { out.write_str(value) }
+fn __formatter_finish(out: &Formatter) string = out.finish()
+fn __formatter_spec(out: &Formatter, fill: char, alignment: int, sign: int, alternate: bool, zero: bool, has_width: bool, width: int, has_precision: bool, precision: int) {
+    if (has_width && width < 0) || (has_precision && precision < 0) { panic("negative format count") }
+    out.fill = fill
+    out.alignment = alignment
+    out.sign = sign
+    out.alternate = alternate
+    out.zero = zero
+    out.width = if has_width { width } else { 0 }
+    out.precision = if has_precision { precision } else { -1 }
+}
+
+impl Print for i8 {
+    fn print(self: &Self, out: &Formatter) {
+        signed_decimal(int(*self), out)
+    }
+}
+
+impl Debug for i8 {
+    fn debug(self: &Self, out: &Formatter) {
+        signed_decimal(int(*self), out)
+    }
+}
+
+impl Binary for i8 {
+    fn binary(self: &Self, out: &Formatter) {
+        out.pad_integral(true, "0b", digits(unsafe { std.mem.transmute[int, uint](int(*self)) }, 2, false))
+    }
+}
+
+impl Octal for i8 {
+    fn octal(self: &Self, out: &Formatter) {
+        out.pad_integral(true, "0o", digits(unsafe { std.mem.transmute[int, uint](int(*self)) }, 8, false))
+    }
+}
+
+impl LowerHex for i8 {
+    fn lower_hex(self: &Self, out: &Formatter) {
+        out.pad_integral(true, "0x", digits(unsafe { std.mem.transmute[int, uint](int(*self)) }, 16, false))
+    }
+}
+
+impl UpperHex for i8 {
+    fn upper_hex(self: &Self, out: &Formatter) {
+        out.pad_integral(true, "0x", digits(unsafe { std.mem.transmute[int, uint](int(*self)) }, 16, true))
+    }
+}
+
+impl Print for i16 {
+    fn print(self: &Self, out: &Formatter) {
+        signed_decimal(int(*self), out)
+    }
+}
+
+impl Debug for i16 {
+    fn debug(self: &Self, out: &Formatter) {
+        signed_decimal(int(*self), out)
+    }
+}
+
+impl Binary for i16 {
+    fn binary(self: &Self, out: &Formatter) {
+        out.pad_integral(true, "0b", digits(unsafe { std.mem.transmute[int, uint](int(*self)) }, 2, false))
+    }
+}
+
+impl Octal for i16 {
+    fn octal(self: &Self, out: &Formatter) {
+        out.pad_integral(true, "0o", digits(unsafe { std.mem.transmute[int, uint](int(*self)) }, 8, false))
+    }
+}
+
+impl LowerHex for i16 {
+    fn lower_hex(self: &Self, out: &Formatter) {
+        out.pad_integral(true, "0x", digits(unsafe { std.mem.transmute[int, uint](int(*self)) }, 16, false))
+    }
+}
+
+impl UpperHex for i16 {
+    fn upper_hex(self: &Self, out: &Formatter) {
+        out.pad_integral(true, "0x", digits(unsafe { std.mem.transmute[int, uint](int(*self)) }, 16, true))
+    }
+}
+
+impl Print for i32 {
+    fn print(self: &Self, out: &Formatter) {
+        signed_decimal(int(*self), out)
+    }
+}
+
+impl Debug for i32 {
+    fn debug(self: &Self, out: &Formatter) {
+        signed_decimal(int(*self), out)
+    }
+}
+
+impl Binary for i32 {
+    fn binary(self: &Self, out: &Formatter) {
+        out.pad_integral(true, "0b", digits(unsafe { std.mem.transmute[int, uint](int(*self)) }, 2, false))
+    }
+}
+
+impl Octal for i32 {
+    fn octal(self: &Self, out: &Formatter) {
+        out.pad_integral(true, "0o", digits(unsafe { std.mem.transmute[int, uint](int(*self)) }, 8, false))
+    }
+}
+
+impl LowerHex for i32 {
+    fn lower_hex(self: &Self, out: &Formatter) {
+        out.pad_integral(true, "0x", digits(unsafe { std.mem.transmute[int, uint](int(*self)) }, 16, false))
+    }
+}
+
+impl UpperHex for i32 {
+    fn upper_hex(self: &Self, out: &Formatter) {
+        out.pad_integral(true, "0x", digits(unsafe { std.mem.transmute[int, uint](int(*self)) }, 16, true))
+    }
+}
+
+impl Print for int {
+    fn print(self: &Self, out: &Formatter) {
+        signed_decimal(int(*self), out)
+    }
+}
+
+impl Debug for int {
+    fn debug(self: &Self, out: &Formatter) {
+        signed_decimal(int(*self), out)
+    }
+}
+
+impl Binary for int {
+    fn binary(self: &Self, out: &Formatter) {
+        out.pad_integral(true, "0b", digits(unsafe { std.mem.transmute[int, uint](int(*self)) }, 2, false))
+    }
+}
+
+impl Octal for int {
+    fn octal(self: &Self, out: &Formatter) {
+        out.pad_integral(true, "0o", digits(unsafe { std.mem.transmute[int, uint](int(*self)) }, 8, false))
+    }
+}
+
+impl LowerHex for int {
+    fn lower_hex(self: &Self, out: &Formatter) {
+        out.pad_integral(true, "0x", digits(unsafe { std.mem.transmute[int, uint](int(*self)) }, 16, false))
+    }
+}
+
+impl UpperHex for int {
+    fn upper_hex(self: &Self, out: &Formatter) {
+        out.pad_integral(true, "0x", digits(unsafe { std.mem.transmute[int, uint](int(*self)) }, 16, true))
+    }
+}
+
+impl Print for i128 {
+    fn print(self: &Self, out: &Formatter) {
+        let value = *self
+        let magnitude = if value < 0 { u128(-(value + 1)) + 1 } else { u128(value) }
+        out.pad_integral(value >= 0, "", wide_digits(magnitude, 10, false))
+    }
+}
+
+impl Debug for i128 {
+    fn debug(self: &Self, out: &Formatter) {
+        let value = *self
+        let magnitude = if value < 0 { u128(-(value + 1)) + 1 } else { u128(value) }
+        out.pad_integral(value >= 0, "", wide_digits(magnitude, 10, false))
+    }
+}
+
+impl Binary for i128 {
+    fn binary(self: &Self, out: &Formatter) {
+        out.pad_integral(true, "0b", wide_digits(unsafe { std.mem.transmute[i128, u128](*self) }, 2, false))
+    }
+}
+
+impl Octal for i128 {
+    fn octal(self: &Self, out: &Formatter) {
+        out.pad_integral(true, "0o", wide_digits(unsafe { std.mem.transmute[i128, u128](*self) }, 8, false))
+    }
+}
+
+impl LowerHex for i128 {
+    fn lower_hex(self: &Self, out: &Formatter) {
+        out.pad_integral(true, "0x", wide_digits(unsafe { std.mem.transmute[i128, u128](*self) }, 16, false))
+    }
+}
+
+impl UpperHex for i128 {
+    fn upper_hex(self: &Self, out: &Formatter) {
+        out.pad_integral(true, "0x", wide_digits(unsafe { std.mem.transmute[i128, u128](*self) }, 16, true))
+    }
+}
+
+impl Print for byte {
+    fn print(self: &Self, out: &Formatter) {
+        out.pad_integral(true, "", digits(uint(*self), 10, false))
+    }
+}
+
+impl Debug for byte {
+    fn debug(self: &Self, out: &Formatter) {
+        out.pad_integral(true, "", digits(uint(*self), 10, false))
+    }
+}
+
+impl Binary for byte {
+    fn binary(self: &Self, out: &Formatter) {
+        out.pad_integral(true, "0b", digits(uint(*self), 2, false))
+    }
+}
+
+impl Octal for byte {
+    fn octal(self: &Self, out: &Formatter) {
+        out.pad_integral(true, "0o", digits(uint(*self), 8, false))
+    }
+}
+
+impl LowerHex for byte {
+    fn lower_hex(self: &Self, out: &Formatter) {
+        out.pad_integral(true, "0x", digits(uint(*self), 16, false))
+    }
+}
+
+impl UpperHex for byte {
+    fn upper_hex(self: &Self, out: &Formatter) {
+        out.pad_integral(true, "0x", digits(uint(*self), 16, true))
+    }
+}
+
+impl Print for u16 {
+    fn print(self: &Self, out: &Formatter) {
+        out.pad_integral(true, "", digits(uint(*self), 10, false))
+    }
+}
+
+impl Debug for u16 {
+    fn debug(self: &Self, out: &Formatter) {
+        out.pad_integral(true, "", digits(uint(*self), 10, false))
+    }
+}
+
+impl Binary for u16 {
+    fn binary(self: &Self, out: &Formatter) {
+        out.pad_integral(true, "0b", digits(uint(*self), 2, false))
+    }
+}
+
+impl Octal for u16 {
+    fn octal(self: &Self, out: &Formatter) {
+        out.pad_integral(true, "0o", digits(uint(*self), 8, false))
+    }
+}
+
+impl LowerHex for u16 {
+    fn lower_hex(self: &Self, out: &Formatter) {
+        out.pad_integral(true, "0x", digits(uint(*self), 16, false))
+    }
+}
+
+impl UpperHex for u16 {
+    fn upper_hex(self: &Self, out: &Formatter) {
+        out.pad_integral(true, "0x", digits(uint(*self), 16, true))
+    }
+}
+
+impl Print for u32 {
+    fn print(self: &Self, out: &Formatter) {
+        out.pad_integral(true, "", digits(uint(*self), 10, false))
+    }
+}
+
+impl Debug for u32 {
+    fn debug(self: &Self, out: &Formatter) {
+        out.pad_integral(true, "", digits(uint(*self), 10, false))
+    }
+}
+
+impl Binary for u32 {
+    fn binary(self: &Self, out: &Formatter) {
+        out.pad_integral(true, "0b", digits(uint(*self), 2, false))
+    }
+}
+
+impl Octal for u32 {
+    fn octal(self: &Self, out: &Formatter) {
+        out.pad_integral(true, "0o", digits(uint(*self), 8, false))
+    }
+}
+
+impl LowerHex for u32 {
+    fn lower_hex(self: &Self, out: &Formatter) {
+        out.pad_integral(true, "0x", digits(uint(*self), 16, false))
+    }
+}
+
+impl UpperHex for u32 {
+    fn upper_hex(self: &Self, out: &Formatter) {
+        out.pad_integral(true, "0x", digits(uint(*self), 16, true))
+    }
+}
+
+impl Print for uint {
+    fn print(self: &Self, out: &Formatter) {
+        out.pad_integral(true, "", digits(uint(*self), 10, false))
+    }
+}
+
+impl Debug for uint {
+    fn debug(self: &Self, out: &Formatter) {
+        out.pad_integral(true, "", digits(uint(*self), 10, false))
+    }
+}
+
+impl Binary for uint {
+    fn binary(self: &Self, out: &Formatter) {
+        out.pad_integral(true, "0b", digits(uint(*self), 2, false))
+    }
+}
+
+impl Octal for uint {
+    fn octal(self: &Self, out: &Formatter) {
+        out.pad_integral(true, "0o", digits(uint(*self), 8, false))
+    }
+}
+
+impl LowerHex for uint {
+    fn lower_hex(self: &Self, out: &Formatter) {
+        out.pad_integral(true, "0x", digits(uint(*self), 16, false))
+    }
+}
+
+impl UpperHex for uint {
+    fn upper_hex(self: &Self, out: &Formatter) {
+        out.pad_integral(true, "0x", digits(uint(*self), 16, true))
+    }
+}
+
+impl Print for u128 {
+    fn print(self: &Self, out: &Formatter) {
+        out.pad_integral(true, "", wide_digits(*self, 10, false))
+    }
+}
+
+impl Debug for u128 {
+    fn debug(self: &Self, out: &Formatter) {
+        out.pad_integral(true, "", wide_digits(*self, 10, false))
+    }
+}
+
+impl Binary for u128 {
+    fn binary(self: &Self, out: &Formatter) {
+        out.pad_integral(true, "0b", wide_digits(*self, 2, false))
+    }
+}
+
+impl Octal for u128 {
+    fn octal(self: &Self, out: &Formatter) {
+        out.pad_integral(true, "0o", wide_digits(*self, 8, false))
+    }
+}
+
+impl LowerHex for u128 {
+    fn lower_hex(self: &Self, out: &Formatter) {
+        out.pad_integral(true, "0x", wide_digits(*self, 16, false))
+    }
+}
+
+impl UpperHex for u128 {
+    fn upper_hex(self: &Self, out: &Formatter) {
+        out.pad_integral(true, "0x", wide_digits(*self, 16, true))
+    }
+}

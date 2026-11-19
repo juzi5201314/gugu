@@ -296,7 +296,7 @@ fn intrinsic_effects(state: &mut AbstractState, op: &IntrinsicOp) -> Interval {
                 }
             }
         }
-        IntrinsicOp::ChanNew | IntrinsicOp::Format { .. } => state.effects.allocate = true,
+        IntrinsicOp::ChanNew => state.effects.allocate = true,
         _ => {}
     }
     Interval::UNKNOWN

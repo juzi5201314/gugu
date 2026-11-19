@@ -384,6 +384,16 @@ impl<'a> Harness<'a> {
                 Boundary::Call(CallTarget::Runtime(RuntimeCall::StringCompare)) => {
                     self.invoke("std/text.gg", "string_compare", args, memory)
                 }
+                Boundary::Call(CallTarget::Runtime(RuntimeCall::Concat)) => {
+                    let result = self.invoke("std/text.gg", "concat", &args[1..], memory);
+                    for (index, value) in result.into_iter().enumerate() {
+                        put(memory, args[0] + index as u64 * 8, value);
+                    }
+                    vec![]
+                }
+                Boundary::Call(CallTarget::Runtime(RuntimeCall::Utf8Boundary)) => {
+                    self.invoke("std/text.gg", "utf8_boundary", args, memory)
+                }
                 Boundary::Call(CallTarget::Runtime(call))
                     if self.metadata.is_some()
                         && matches!(

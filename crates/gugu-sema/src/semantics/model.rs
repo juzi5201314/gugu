@@ -187,6 +187,17 @@ pub struct Model<'a> {
     function_items: Vec<Vec<Option<ItemId>>>,
 }
 impl<'a> Model<'a> {
+    pub(super) fn formatter_type(&self) -> Ty {
+        self.nominal
+            .iter()
+            .position(|nominal| {
+                nominal.name == "Formatter"
+                    && self.modules[nominal.definition.module].builtin
+                    && self.modules[nominal.definition.module].path == "std.fmt"
+            })
+            .map_or(Ty::Formatter, |index| Ty::Named(index, Vec::new()))
+    }
+
     pub fn name_fingerprint(&self) -> [u8; 32] {
         let mut hash = blake3::Hasher::new_derive_key("gugu-semantic-names-v1");
         for definition in &self.names.definitions {
@@ -722,7 +733,11 @@ impl<'a> Model<'a> {
                         return Ok(t.clone());
                     }
                     if let Some(t) = Ty::primitive(parts[0]) {
-                        return Ok(t);
+                        return Ok(if t == Ty::Formatter {
+                            self.formatter_type()
+                        } else {
+                            t
+                        });
                     }
                 }
                 let args: Vec<_> = a.paths[path.0 as usize]

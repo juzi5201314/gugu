@@ -249,7 +249,11 @@ impl Checker<'_, '_> {
         if prefix.len() == 1
             && let Some(ty) = Ty::primitive(prefix[0])
         {
-            return Some(ty);
+            return Some(if ty == Ty::Formatter {
+                self.model.formatter_type()
+            } else {
+                ty
+            });
         }
         let def = self.model.resolve(self.module, prefix).ok()?;
         let id = self

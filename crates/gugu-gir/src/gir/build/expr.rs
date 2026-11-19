@@ -478,27 +478,19 @@ impl Builder<'_> {
     }
 
     fn emit_string(&mut self, id: ExprId, parts: Range<u32>) -> Result<(), Diagnostic> {
-        let mut operands = Vec::new();
+        let mut text = String::new();
         for part in &self.owner.string_parts[parts.start as usize..parts.end as usize] {
-            if let hir::StringPart::Value { expression, .. } = part {
-                let Some(local) = self.emit_expr(*expression)? else {
-                    return Ok(());
-                };
-                operands.push(copy_of(local));
+            match part {
+                hir::StringPart::Text(part) => text.push_str(part),
+                hir::StringPart::Value { .. } => {
+                    return Err(gir_error(
+                        "运行时插值需要 std.fmt.Formatter",
+                        Some(&self.source_of(id).location),
+                    ));
+                }
             }
         }
-        let dest = self.temp(self.expr_ty(id));
-        self.assign(
-            Place::local(dest),
-            Rvalue::Intrinsic {
-                op: IntrinsicOp::Format {
-                    parts: parts.clone(),
-                },
-                operands,
-                types: Vec::new(),
-            },
-        );
-        self.set_value(id, dest);
+        self.emit_literal(id, hir::Literal::String(text))?;
         Ok(())
     }
 

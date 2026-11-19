@@ -414,10 +414,6 @@ pub enum IntrinsicOp {
     },
     /// 齐次变参尾：把 operands 物化为 `&[T]`，`types = [T]`，长度由 operands 数量决定。
     PackSlice,
-    /// 字符串插值；`parts` 引用 HIR owner 的 string_parts 池。
-    Format {
-        parts: Range<u32>,
-    },
     /// 内联汇编计划（HIR owner 的 assembly 编号）。
     Asm(u32),
     PtrRead,

@@ -2,7 +2,7 @@ use super::values::Computed;
 use super::{Builder, Diagnostic, Storage, TypeKind, invalid};
 use crate::body::{
     Condition, Conversion, IntOp, Op, Origin, Provenance, RuntimeCall, Symbol, Type, ValueId,
-    ValueType, id, range,
+    ValueType, id,
 };
 use crate::gir::placement::PlacementKind;
 use crate::invalid_resource;
@@ -355,18 +355,6 @@ impl Builder<'_> {
             }
             g::IntrinsicOp::Spawn(g::SpawnTarget::Callee(callee)) => {
                 self.spawn_callee(callee, operands, ty)
-            }
-            g::IntrinsicOp::Format { parts } => {
-                let metadata = serde_json::to_vec(&self.owner.string_parts[range(parts)])
-                    .expect("格式计划可序列化");
-                let mut args = vec![self.data(metadata, Provenance::Metadata)];
-                for operand in operands {
-                    let value = self.operand(operand)?;
-                    let ty = value.ty();
-                    args.push(self.computed_address(value)?);
-                    args.push(self.descriptor(ty));
-                }
-                self.runtime_result(RuntimeCall::Format, args, ty)
             }
             g::IntrinsicOp::Asm(index) => self.inline_asm(*index, operands, ty),
             g::IntrinsicOp::DeferChainEmpty => {
