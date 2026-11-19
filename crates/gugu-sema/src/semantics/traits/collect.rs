@@ -99,16 +99,6 @@ impl Model<'_> {
                     {
                         return Err(self.error(module, "trait impl 的 comptime 泛型参数尚未实现"));
                     }
-                    if matches!(
-                        parsed.arena.tys[self_ty.0 as usize].kind,
-                        TyKind::Array { .. }
-                    ) && params.values().any(|ty| matches!(ty, Ty::Const(_)))
-                    {
-                        return Err(self.error(
-                            module,
-                            "未解析的编译期名称：数组 impl 的 comptime 参数匹配尚未实现",
-                        ));
-                    }
                     self.implicit_parameters(module, self_ty, false, &mut params);
                     if let Some(ty) = trait_ty {
                         self.implicit_parameters(module, ty, false, &mut params);

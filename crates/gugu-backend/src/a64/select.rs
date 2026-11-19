@@ -9,18 +9,30 @@ use crate::lir::body::{Body, Op, Terminator, Type, ValueId};
 use std::ops::Range;
 
 pub fn select(body: &Body) -> Result<Function, Error> {
-    select_mode(body, true, false)
+    select_mode(body, true, false, None)
 }
 
 pub fn select_function(body: &Body) -> Result<Function, Error> {
-    select_mode(body, false, false)
+    select_mode(body, false, false, None)
 }
 
 pub fn select_runtime(body: &Body) -> Result<Function, Error> {
-    select_mode(body, false, true)
+    select_mode(body, false, true, None)
 }
 
-fn select_mode(body: &Body, leaf: bool, runtime: bool) -> Result<Function, Error> {
+pub(crate) fn select_image(
+    body: &Body,
+    symbols: &[(crate::lir::body::Symbol, String)],
+) -> Result<Function, Error> {
+    select_mode(body, false, true, Some(symbols))
+}
+
+fn select_mode(
+    body: &Body,
+    leaf: bool,
+    runtime: bool,
+    symbols: Option<&[(crate::lir::body::Symbol, String)]>,
+) -> Result<Function, Error> {
     validate(body, leaf, runtime).map_err(|e| Error(format!("{} entry: {e}", body.name)))?;
     let count = body.blocks.len();
     let mut function = Function {
@@ -41,6 +53,7 @@ fn select_mode(body: &Body, leaf: bool, runtime: bool) -> Result<Function, Error
         ],
     };
     let mut b = Builder {
+        symbols,
         function: &mut function,
         items: vec![],
         context: format!("{} incoming arguments", body.name),
@@ -66,6 +79,7 @@ fn select_mode(body: &Body, leaf: bool, runtime: bool) -> Result<Function, Error
         events.sort_by_key(|event| (event.0, event.1, event.2));
         let mut cursor = 0;
         let mut b = Builder {
+            symbols,
             function: &mut function,
             items: vec![],
             context: format!("{} block {index} entry", body.name),
@@ -150,6 +164,7 @@ fn select_mode(body: &Body, leaf: bool, runtime: bool) -> Result<Function, Error
             .map(|(source, dest)| (MReg::Virtual(source.0), MReg::Virtual(dest.value.0)))
             .collect();
         let mut b = Builder {
+            symbols,
             function: &mut function,
             items: vec![],
             context,

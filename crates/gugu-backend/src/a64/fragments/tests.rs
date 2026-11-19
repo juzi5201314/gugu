@@ -25,6 +25,8 @@ mod linux_vm;
 
 #[path = "linux_net_tests.rs"]
 mod linux_net;
+#[path = "linux_resolver_tests.rs"]
+mod linux_resolver;
 
 #[path = "linux_vm_tests.rs"]
 mod linux_memory;

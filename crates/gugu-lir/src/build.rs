@@ -799,7 +799,11 @@ impl Builder<'_> {
                         && call.target.is_none()
                         && matches!(
                             call.protocol,
-                            Some(gir::concrete::Protocol::Eq | gir::concrete::Protocol::Cmp)
+                            Some(
+                                gir::concrete::Protocol::Eq
+                                    | gir::concrete::Protocol::Cmp
+                                    | gir::concrete::Protocol::Clone
+                            )
                         )
                 })
             {

@@ -12,6 +12,7 @@ use super::{
 use crate::lir::body::{Body, Instruction, Type, ValueId};
 
 pub struct Builder<'a> {
+    pub symbols: Option<&'a [(crate::lir::body::Symbol, String)]>,
     pub function: &'a mut Function,
     pub items: Vec<Site>,
     pub context: String,

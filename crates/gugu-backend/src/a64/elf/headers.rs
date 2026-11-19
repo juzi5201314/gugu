@@ -1,6 +1,6 @@
-use super::{ElfRequest, Layout, PHNUM, SEGMENT_ALIGN, put};
+use super::{ElfRequest, Layout, SEGMENT_ALIGN, put};
 
-pub(super) const SHSTRTAB: &[u8] = b"\0.rela.dyn\0.shstrtab\0";
+pub(super) const SHSTRTAB: &[u8] = b"\0.rela.dyn\0.shstrtab\0.dynsym\0.dynstr\0.hash\0.dynamic\0";
 
 pub(super) fn write(bytes: &mut [u8], request: &ElfRequest, layout: &Layout) -> Result<(), String> {
     bytes[..16].copy_from_slice(b"\x7fELF\x02\x01\x01\0\0\0\0\0\0\0\0\0");
@@ -10,7 +10,14 @@ pub(super) fn write(bytes: &mut [u8], request: &ElfRequest, layout: &Layout) -> 
     put(bytes, 24, layout.address(request.entry)?);
     put(bytes, 32, 64);
     put(bytes, 40, layout.shoff);
-    for (at, value) in [(52, 64), (54, 56), (56, PHNUM), (58, 64), (60, 3), (62, 2)] {
+    for (at, value) in [
+        (52, 64),
+        (54, 56),
+        (56, layout.phnum),
+        (58, 64),
+        (60, layout.shnum),
+        (62, 2),
+    ] {
         half(bytes, at, value);
     }
     phdr(
@@ -18,18 +25,39 @@ pub(super) fn write(bytes: &mut [u8], request: &ElfRequest, layout: &Layout) -> 
         0,
         6,
         4,
-        (64, PHNUM as u64 * 56, PHNUM as u64 * 56),
+        (64, layout.phnum as u64 * 56, layout.phnum as u64 * 56),
         8,
     );
     for (index, (segment, flags)) in layout.segments.into_iter().zip([5, 4, 6]).enumerate() {
-        phdr(bytes, index + 1, 1, flags, segment, SEGMENT_ALIGN);
+        phdr(
+            bytes,
+            index + if layout.phnum == 7 { 2 } else { 1 },
+            1,
+            flags,
+            segment,
+            SEGMENT_ALIGN,
+        );
     }
-    phdr(bytes, 4, 0x6474_e551, 6, (0, 0, 0), 16);
+    phdr(
+        bytes,
+        if layout.phnum == 7 { 5 } else { 4 },
+        0x6474_e551,
+        6,
+        (0, 0, 0),
+        16,
+    );
     section_headers(bytes, request, layout);
     Ok(())
 }
 
-fn phdr(bytes: &mut [u8], index: usize, kind: u32, flags: u32, range: (u64, u64, u64), align: u64) {
+pub(super) fn phdr(
+    bytes: &mut [u8],
+    index: usize,
+    kind: u32,
+    flags: u32,
+    range: (u64, u64, u64),
+    align: u64,
+) {
     let at = 64 + index * 56;
     let (start, file_size, memory_size) = range;
     word(bytes, at, kind);
@@ -46,7 +74,7 @@ fn phdr(bytes: &mut [u8], index: usize, kind: u32, flags: u32, range: (u64, u64,
     }
 }
 
-fn section_headers(bytes: &mut [u8], request: &ElfRequest, layout: &Layout) {
+fn section_headers(bytes: &mut [u8], _request: &ElfRequest, layout: &Layout) {
     let at = layout.shoff as usize + 64;
     word(bytes, at, 1);
     word(bytes, at + 4, 4);
@@ -54,7 +82,7 @@ fn section_headers(bytes: &mut [u8], request: &ElfRequest, layout: &Layout) {
         (8, 2),
         (16, layout.rela),
         (24, layout.rela),
-        (32, request.relatives.len() as u64 * 24),
+        (32, layout.rela_count * 24),
         (48, 8),
         (56, 24),
     ] {
@@ -74,6 +102,6 @@ fn half(bytes: &mut [u8], at: usize, value: u16) {
     bytes[at..at + 2].copy_from_slice(&value.to_le_bytes());
 }
 
-fn word(bytes: &mut [u8], at: usize, value: u32) {
+pub(super) fn word(bytes: &mut [u8], at: usize, value: u32) {
     bytes[at..at + 4].copy_from_slice(&value.to_le_bytes());
 }

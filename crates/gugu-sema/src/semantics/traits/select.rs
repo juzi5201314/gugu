@@ -222,6 +222,7 @@ impl Model<'_> {
             return match ty {
                 Ty::Unit | Ty::Bool | Ty::Int { .. } | Ty::Char | Ty::String | Ty::TypeId => true,
                 Ty::Float(_) => name == "Clone",
+                Ty::Array(t, _) if name == "Clone" => self.require_trait(t, interface, &[]).is_ok(),
                 Ty::Array(t, _) | Ty::Option(t) => self.builtin_trait(t, interface),
                 Ty::Tuple(ts) => ts.iter().all(|t| self.builtin_trait(t, interface)),
                 Ty::Result(t, e) => {

@@ -9,7 +9,7 @@ use crate::{ast, hir};
 use serde::{Deserialize, Serialize};
 use std::collections::{BTreeMap, BTreeSet};
 
-pub const INSTANCE_SCHEMA: u32 = 10;
+pub const INSTANCE_SCHEMA: u32 = 12;
 
 /// 调用位点使用 owner 内的确定性编号，不把定义级 callee 当作实例身份。
 #[derive(Clone, Copy, Debug, Eq, PartialEq, Ord, PartialOrd, Serialize, Deserialize)]
@@ -472,6 +472,27 @@ fn resolve_dispatch(
                 .insert(context.item_key(implementation));
         }
         let Some(callable) = method.callable else {
+            if context.model.traits.interfaces[interface.id].name == "Clone"
+                && let Ty::Array(element, count) = &self_ty
+            {
+                let definition = context
+                    .module
+                    .definitions
+                    .iter()
+                    .position(|definition| {
+                        definition.name == "clone_array"
+                            && definition.location.as_ref().is_some_and(|location| {
+                                context.module.sources[location.source as usize].path
+                                    == "std/prelude.gg"
+                            })
+                    })
+                    .ok_or_else(|| inconsistency("std.prelude 缺少数组 Clone 回退函数"))?;
+                return Ok(Some(ResolvedCallee {
+                    definition: hir::DefId(definition as u32),
+                    arguments: vec![*element.clone(), Ty::Const(count.clone())],
+                    signature,
+                }));
+            }
             if context.model.traits.interfaces[interface.id].name == "Hash"
                 && matches!(self_ty, Ty::Tuple(_))
             {

@@ -69,6 +69,14 @@ fn plans(hir: &hir::Validated) -> Vec<&hir::ArrayInitLoop> {
     hir.module()
         .owners
         .iter()
+        .filter(|owner| {
+            hir.module().definitions[owner.definition.index()]
+                .location
+                .as_ref()
+                .is_some_and(|location| {
+                    hir.module().sources[location.source as usize].path == "main.gg"
+                })
+        })
         .flat_map(|owner| &owner.expressions)
         .filter_map(|expression| match &expression.kind {
             hir::ExprKind::For {

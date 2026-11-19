@@ -19,6 +19,52 @@ impl Computed {
 }
 
 impl Builder<'_> {
+    pub(super) fn clone_protocol(
+        &mut self,
+        operand: &Operand,
+        ty: u32,
+    ) -> Result<Computed, Diagnostic> {
+        let reference = self.operand(operand)?;
+        if !matches!(self.kind(reference.ty()), TypeKind::Reference(inner) if *inner == ty) {
+            return Err(invalid("Clone 回退的实参必须是结果类型的引用"));
+        }
+        if matches!(self.kind(ty), TypeKind::Array { .. }) {
+            return Err(invalid("数组 Clone 回退必须在单态化时绑定逐元素函数"));
+        }
+        let address = self.computed_values(reference)?[0];
+        if self.layout(ty).passing.has_resource() {
+            let descriptor = self.descriptor(ty);
+            self.runtime(
+                crate::body::RuntimeCall::ResourceAcquire,
+                &[address, descriptor],
+                &[],
+            )?;
+        }
+        self.cow_snapshot(Computed::Address { ty, address }, ty)
+    }
+
+    pub(super) fn cow_snapshot(
+        &mut self,
+        value: Computed,
+        ty: u32,
+    ) -> Result<Computed, Diagnostic> {
+        if !self.layout(ty).passing.has_cow() {
+            return Ok(value);
+        }
+        let source = self.computed_address(value)?;
+        let destination = self.temporary(ty)?;
+        let descriptor = self.descriptor(ty);
+        self.runtime(
+            crate::body::RuntimeCall::CowSnapshot,
+            &[destination, source, descriptor],
+            &[],
+        )?;
+        Ok(Computed::Address {
+            ty,
+            address: destination,
+        })
+    }
+
     pub(super) fn local_values(&mut self, local: LocalId) -> Result<Vec<ValueId>, Diagnostic> {
         let Storage::Values(variables) = self.storage[local.index()].clone() else {
             let value = self.read_place(crate::gir::body::Place::local(local))?;
