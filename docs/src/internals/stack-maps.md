@@ -71,15 +71,14 @@ signal/APC handler不在任意PC直接扫描用户 stack。它只设置当前 pr
 
 ### 内部 A64 runtime-site 边界（4c.1）
 
-A64 fragment 暂只发布无根运行时站点的最终 BL 返回 PC 与 CFA 诊断，不发布此处二进制
-section。返回 PC 必须精确匹配，不能用最近站点代替；MorestackEntry 的 frame 尚未建立，
+4c.1 最初只发布无根运行时站点的最终 BL 返回 PC 与 CFA 诊断；4c.2b.1 的序列化接线见后文。
+返回 PC 必须精确匹配，不能用最近站点代替；MorestackEntry 的 frame 尚未建立，
 原始 LR 在 x10；PollResume 按 CFA=SP+frame.size，原始 LR 在 SP+record+8 恢复。
 x29 指向 FP/LR record，但 poll 后不能假设 x29 的值有效，因此诊断使用 SP-based CFA。
 
 下表的 v4 寄存器编号仅适用于 x64，不能把 xN 强行解释为同号 x64 bit。4c.2a 的 Rust
-codec/walker 已支持下面的 A64 v5 契约；lowering 的强制根 spill、managed call、序列化
-CFA/unwind 与 coroutine handoff 仍待后续接线，compile_runtime 继续拒绝带根函数。
-空根诊断不是可运行用户镜像的栈图承诺，镜像中的 Gugu runtime decoder 尚未切换到 A64。
+codec/walker 已支持下面的 A64 v5 契约；4c.2b.1 已接通标量根 spill、managed call 与 safepoint
+CFA。coroutine handoff 与镜像中的 Gugu runtime decoder 尚未切换到 A64，不承诺可运行用户镜像。
 
 ### A64 v5 寄存器与布局
 
@@ -160,6 +159,29 @@ LIR 为每个栈槽维护逐根字段的初始化事件流 `RootInit { slot, pos
 ## 二进制 section
 
 Linux 放入 `.gugu.stackmap`，Windows 放入 `.gugustk`。section 内所有整数小端，所有 offset 相对 section 起始，table 按记录自然对齐；padding 必须为 0。
+
+### A64 lowering 到 map/CFA 的接线（4c.2b.1）
+
+CallReturn 的 poll-free leaf 豁免不能与 slow-capable callee 入口检查共存。A64 runtime
+使用 4096 字节的 managed leaf 帧预算：caller 检查自己的 frame 加预算，callee 帧必须不大于
+预算且不发射自动 morestack/poll 入口。reserve 不计入 frame_size/CFA/slot_count，也不新增
+caller 的调用图；过大的叶帧必须报错。空帧叶同样不检查，非叶的自动检查仍保留。
+
+标量根已从权威 LIR anchors 经共享 pointer_spill 落槽；五类 provenance 逐站点映射，
+不允许用 register 根绕过调用/poll 的强制落槽要求。managed call 的 BL 返回标签必须位于
+结果物化之前；该调用新定义的结果不在该返回 PC 上被当作已有根。实参根登记 source spill，
+传出栈参数另登记实际 outgoing slot；pre-frame 入口的传入栈参数由 caller 图覆盖。
+自动生成的 checked entry 也有 v5 入口图，不依赖 LIR 必须保留 StackCheck marker。
+
+逐片段 CFA 段 magic 为 GUGUCF01：固定 40 字节头依次为 magic:[u8;8]、arch:u32=183、
+code_size:u32、frame_size:u32、fp_offset:u32、code_rva:u64、count:u32、reserved:u32=0。
+每个 16 字节记录为 pc_offset:u32、cfa_offset:u32、lr:u32、flags:u32。
+flags=1 是 MorestackEntry（cfa=0、lr=10 表示 x10）；flags=0 为建帧后的站点
+（cfa=frame_size、lr=fp_offset+8 表示 SP-relative 字节偏移）。其他 flags 拒绝。
+PC 严格递增、4 字节对齐且在 code range 内；与 v5 map 的每个 PC/kind 必须一一匹配。
+caller 恢复只接受精确返回 PC；缺失 snapshot 或 SP 溢出都报错，不读宿主地址。
+此格式是 safepoint walker 的记录，不是平台 EH unwind；gated local、协程 handoff 与
+镜像内的 Gugu decoder 仍未接入。x64 v4 编码、raw contract 与 runtime 源码均不变。
 
 ### header
 

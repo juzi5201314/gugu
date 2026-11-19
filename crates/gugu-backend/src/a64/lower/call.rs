@@ -19,6 +19,12 @@ pub fn requires_maps(call: &Call) -> bool {
                 .any(|kind| kind.provenance.is_some_and(|p| p.managed())))
 }
 
+#[derive(Clone, Copy)]
+pub(crate) enum Mode {
+    Isolated,
+    Runtime(Option<(u32, u32)>),
+}
+
 pub fn lower(
     body: &Body,
     call: &Call,
@@ -27,12 +33,25 @@ pub fn lower(
     tail: bool,
     b: &mut Builder<'_>,
 ) -> Result<(), Error> {
+    lower_mode(body, call, args, results, tail, Mode::Isolated, b)
+}
+
+pub(crate) fn lower_mode(
+    body: &Body,
+    call: &Call,
+    args: &[ValueId],
+    results: &[ValueId],
+    tail: bool,
+    mode: Mode,
+    b: &mut Builder<'_>,
+) -> Result<(), Error> {
+    let runtime = matches!(mode, Mode::Runtime(_));
     if call.kind != CallKind::Managed {
         return Err(crate::a64::error(
             "only internal managed direct calls supported",
         ));
     }
-    if requires_maps(call) {
+    if requires_maps(call) && !runtime {
         return Err(crate::a64::error(
             "requires checked entry / stack maps (4c)",
         ));
@@ -58,7 +77,7 @@ pub fn lower(
     }
     for kind in call.parameters.iter().chain(&call.results) {
         super::bits(kind.ty)?;
-        if kind.provenance.is_some_and(|p| p.managed()) {
+        if kind.provenance.is_some_and(|p| p.managed()) && !runtime {
             return Err(crate::a64::error(
                 "requires checked entry / stack maps (4c)",
             ));
@@ -97,6 +116,10 @@ pub fn lower(
             target: abi::symbol(key),
             arguments,
             results: results.iter().map(|id| id.0).collect(),
+            safepoint: match mode {
+                Mode::Isolated => None,
+                Mode::Runtime(site) => site,
+            },
         });
         for result in results {
             let bits = super::bits(body.values[result.index()].kind.ty)?;

@@ -14,6 +14,7 @@ use crate::lir::body::{Body, Op, Terminator};
 pub enum SiteKind {
     MorestackEntry,
     PollResume,
+    CallReturn,
 }
 
 #[derive(Clone, Debug, Eq, PartialEq)]
@@ -30,7 +31,6 @@ pub struct RuntimeSite {
     pub instruction: Option<u32>,
     pub cfa_offset: u32,
     pub caller_lr: CallerLr,
-    pub empty_roots: [Vec<u64>; 5],
 }
 
 pub fn lookup(sites: &[RuntimeSite], return_pc: u32) -> Option<&RuntimeSite> {
@@ -73,7 +73,6 @@ pub(crate) fn resolve(
             } else {
                 CallerLr::StackOffset(frame.record + 8)
             },
-            empty_roots: crate::metadata::empty_bitmaps(if entry { 0 } else { frame.size / 8 }),
         });
     }
     sites.sort_by_key(|site| site.pc_offset);
@@ -114,7 +113,7 @@ impl<'a> Emitter<'a> {
         });
         Ok(())
     }
-    fn call(
+    pub(super) fn call(
         &mut self,
         out: &mut Vec<layout::Item>,
         symbol: String,
@@ -224,19 +223,33 @@ pub(crate) fn validate(body: &Body) -> Result<(), Error> {
     if body.signature.sret.is_some()
         || !body.signature.by_value.is_empty()
         || !body.root_inits.is_empty()
-        || body
-            .values
-            .iter()
-            .any(|v| v.kind.provenance.is_some_and(|p| p.root_kind().is_some()))
-        || body
-            .signature
-            .parameters
-            .iter()
-            .chain(&body.signature.results)
-            .any(|v| v.provenance.is_some_and(|p| p.root_kind().is_some()))
         || body.stack_slots.iter().any(|slot| !slot.roots.is_empty())
     {
-        return Err(super::error("roots/sret require stack maps (4c.2)"));
+        return Err(super::error(
+            "rooted locals/init gates/sret require 4c.2b.2",
+        ));
+    }
+    let entry = body
+        .blocks
+        .get(body.entry.index())
+        .ok_or_else(|| super::error("invalid runtime entry"))?;
+    let parameters = body
+        .parameters
+        .get(entry.parameters.start as usize..entry.parameters.end as usize)
+        .ok_or_else(|| super::error("invalid entry parameter arena"))?;
+    let params = parameters
+        .iter()
+        .map(|p| body.values.get(p.value.index()).map(|v| v.kind))
+        .collect::<Option<Vec<_>>>()
+        .ok_or_else(|| super::error("invalid entry parameter value"))?;
+    let params = params
+        .into_iter()
+        .filter(|p| p.ty != crate::lir::body::Type::Mem)
+        .collect::<Vec<_>>();
+    if params != body.signature.parameters {
+        return Err(super::error(
+            "entry parameter provenance/signature mismatch (4c.2)",
+        ));
     }
     let mut checks = 0;
     for (index, inst) in body.instructions.iter().enumerate() {
@@ -279,18 +292,39 @@ pub(crate) fn validate(body: &Body) -> Result<(), Error> {
                 return Err(fail("StackCheck must be the single entry marker"));
             }
         }
-        if matches!(inst.op, Op::Call(_) | Op::ForeignCall(_) | Op::StackAddr(_)) {
+        if matches!(inst.op, Op::ForeignCall(_) | Op::StackAddr(_)) {
             return Err(fail("calls/stack addresses require stack maps (4c.2)"));
         }
-        if inst.safepoint.is_some() && !matches!(inst.op, Op::StackCheck | Op::SafepointPoll { .. })
+        if let Op::Call(ref call) = inst.op {
+            if call.sret.is_some()
+                || call.may_suspend
+                || (call.poll_free_leaf && (call.may_allocate || call.may_unwind))
+            {
+                return Err(fail(
+                    "suspension or inconsistent poll-free proof requires 4c.2b.2",
+                ));
+            }
+            if !call.poll_free_leaf && inst.safepoint.is_none() {
+                return Err(fail(
+                    "managed call requires an authoritative CallReturn map",
+                ));
+            }
+        }
+        if inst.safepoint.is_some()
+            && !matches!(
+                inst.op,
+                Op::StackCheck | Op::SafepointPoll { .. } | Op::Call(_)
+            )
         {
             return Err(fail("safepoint requires stack maps (4c.2)"));
         }
         if let Some(id) = inst.safepoint {
             let expected = if matches!(inst.op, Op::StackCheck) {
                 crate::lir::body::SafepointKind::StackCheck
-            } else {
+            } else if matches!(inst.op, Op::SafepointPoll { .. }) {
                 crate::lir::body::SafepointKind::Poll
+            } else {
+                crate::lir::body::SafepointKind::CallReturn
             };
             if body.safepoints.get(id.index()).is_none_or(|point| {
                 point.kind != expected
@@ -312,7 +346,9 @@ pub(crate) fn validate(body: &Body) -> Result<(), Error> {
     for (index, point) in body.safepoints.iter().enumerate() {
         if !matches!(
             point.kind,
-            crate::lir::body::SafepointKind::StackCheck | crate::lir::body::SafepointKind::Poll
+            crate::lir::body::SafepointKind::StackCheck
+                | crate::lir::body::SafepointKind::Poll
+                | crate::lir::body::SafepointKind::CallReturn
         ) {
             return Err(super::error("safepoint table requires stack maps (4c.2)"));
         }

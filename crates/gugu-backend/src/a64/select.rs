@@ -75,6 +75,21 @@ fn select_mode(body: &Body, leaf: bool, runtime: bool) -> Result<Function, Error
                         });
                         continue;
                     }
+                    Op::Call(ref call) => {
+                        lower::call::lower_mode(
+                            body,
+                            call,
+                            body.args(&instruction.arguments),
+                            body.args(&instruction.results),
+                            false,
+                            lower::call::Mode::Runtime(
+                                instruction.safepoint.map(|_| (index as u32, site)),
+                            ),
+                            &mut b,
+                        )
+                        .map_err(|e| Error(format!("{}: {e}", b.context)))?;
+                        continue;
+                    }
                     _ => {}
                 }
             }
@@ -337,7 +352,7 @@ fn validate(body: &Body, leaf: bool, runtime: bool) -> Result<(), Error> {
         if !matches!(
             value.kind.ty,
             Type::I8 | Type::I16 | Type::I32 | Type::I64 | Type::Ptr | Type::Mem
-        ) || value.kind.provenance.is_some_and(|p| p.managed())
+        ) || (!runtime && value.kind.provenance.is_some_and(|p| p.managed()))
         {
             return Err(Error(format!(
                 "unsupported leaf value type {:?}",
@@ -352,7 +367,7 @@ fn validate(body: &Body, leaf: bool, runtime: bool) -> Result<(), Error> {
         .chain(&body.signature.results)
     {
         lower::bits(ty.ty)?;
-        if ty.provenance.is_some_and(|p| p.managed()) {
+        if !runtime && ty.provenance.is_some_and(|p| p.managed()) {
             return Err(super::error("managed leaf signature unsupported"));
         }
     }
