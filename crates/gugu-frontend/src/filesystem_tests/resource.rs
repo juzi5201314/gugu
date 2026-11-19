@@ -1,4 +1,5 @@
 //! 资源终结、计数、关闭与账本回收执行真实 LIR；平台操作和调度由固定钩子控制。
+use super::harness::runtime_bodies;
 use super::{Compilation, CompileRequest, Compiler, TargetName};
 use crate::lir::body::{Body, CallTarget, Op, Symbol};
 
@@ -545,8 +546,8 @@ fn request_memory() -> Vec<u8> {
 
 #[test]
 fn running_cancellation_retains_credit_until_worker_exits() {
-    let output = compile();
-    let mut harness = ResourceHarness::new(&output);
+    let (hir, bodies) = runtime_bodies();
+    let mut harness = ResourceHarness::from_bodies(&hir, &bodies);
     let mut memory = request_memory();
     harness.run("fs_platform", "service", &[PROCESSOR], &mut memory);
     assert_eq!(word(&memory, REQUEST + 120), 1);
@@ -568,8 +569,8 @@ fn running_cancellation_retains_credit_until_worker_exits() {
 
 #[test]
 fn completed_request_wins_over_unobserved_cancellation() {
-    let output = compile();
-    let mut harness = ResourceHarness::new(&output);
+    let (hir, bodies) = runtime_bodies();
+    let mut harness = ResourceHarness::from_bodies(&hir, &bodies);
     let mut memory = request_memory();
     harness.poll_complete = true;
     put(&mut memory, REQUEST + 64, 7);
@@ -624,8 +625,8 @@ fn queued_cancellation_and_start_failure_return_credit_once() {
 
 #[test]
 fn full_worker_pool_keeps_waiter_queued_until_credit_is_returned() {
-    let output = compile();
-    let mut harness = ResourceHarness::new(&output);
+    let (hir, bodies) = runtime_bodies();
+    let mut harness = ResourceHarness::from_bodies(&hir, &bodies);
     let mut memory = request_memory();
     put(&mut memory, CANCEL, 0);
     for slot in 0..8 {
@@ -656,8 +657,8 @@ fn full_worker_pool_keeps_waiter_queued_until_credit_is_returned() {
 
 #[test]
 fn reclaim_unlinks_middle_tail_and_head_and_drains_ledger() {
-    let output = compile();
-    let mut harness = ResourceHarness::new(&output);
+    let (hir, bodies) = runtime_bodies();
+    let mut harness = ResourceHarness::from_bodies(&hir, &bodies);
     let mut memory = memory();
     let nodes = [CONTROL, 1024, 2048];
     put(&mut memory, PROCESSOR + 3968, 3 * 4096);
@@ -749,8 +750,8 @@ fn runtime_mapping_ledger_charges_only_successful_platform_operations() {
 
 #[test]
 fn pressure_hysteresis_defers_gc_and_allows_one_cycle_per_episode() {
-    let output = compile();
-    let mut harness = ResourceHarness::new(&output);
+    let (hir, bodies) = runtime_bodies();
+    let mut harness = ResourceHarness::from_bodies(&hir, &bodies);
     let mut memory = vec![0; 16384];
     put(&mut memory, PROCESSOR + 3952, 100);
     for used in [84, 85] {
@@ -846,8 +847,8 @@ fn pressure_hysteresis_defers_gc_and_allows_one_cycle_per_episode() {
 
 #[test]
 fn pressure_threshold_does_not_overflow_at_largest_memory_limit() {
-    let output = compile();
-    let mut harness = ResourceHarness::new(&output);
+    let (hir, bodies) = runtime_bodies();
+    let mut harness = ResourceHarness::from_bodies(&hir, &bodies);
     let mut memory = vec![0; 16384];
     let threshold = ((u128::from(u64::MAX) * 85).div_ceil(100)) as u64;
     put(&mut memory, PROCESSOR + 3952, u64::MAX);
@@ -947,8 +948,8 @@ const STACK_BYTES: u64 = 65536;
 
 #[test]
 fn file_pool_initialization_does_not_allocate_worker_stacks() {
-    let output = compile();
-    let mut harness = ResourceHarness::new(&output);
+    let (hir, bodies) = runtime_bodies();
+    let mut harness = ResourceHarness::from_bodies(&hir, &bodies);
     let mut memory = request_memory();
     put(&mut memory, PROCESSOR + 4024, 0);
     assert_eq!(
@@ -964,8 +965,8 @@ fn file_pool_initialization_does_not_allocate_worker_stacks() {
 
 #[test]
 fn worker_stack_is_reused_then_trimmed_only_after_thread_exit() {
-    let output = compile();
-    let mut harness = ResourceHarness::new(&output);
+    let (hir, bodies) = runtime_bodies();
+    let mut harness = ResourceHarness::from_bodies(&hir, &bodies);
     let mut memory = request_memory();
     put(&mut memory, CANCEL, 0);
     harness.run("fs_platform", "stack_for", &[POOL, 0], &mut memory);
@@ -997,8 +998,8 @@ fn worker_stack_is_reused_then_trimmed_only_after_thread_exit() {
 
 #[test]
 fn pressure_reuses_completed_stack_for_waiter_before_trimming() {
-    let output = compile();
-    let mut harness = ResourceHarness::new(&output);
+    let (hir, bodies) = runtime_bodies();
+    let mut harness = ResourceHarness::from_bodies(&hir, &bodies);
     let mut memory = request_memory();
     put(&mut memory, CANCEL, 0);
     harness.run("fs_platform", "stack_for", &[POOL, 0], &mut memory);

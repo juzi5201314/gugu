@@ -9,8 +9,8 @@ const ROOT_TABLE: u64 = 8192;
 
 #[test]
 fn callback_storage_reuses_retired_records_and_pressure_releases_mapping() {
-    let output = compile();
-    let mut harness = ResourceHarness::new(&output);
+    let (hir, bodies) = runtime_bodies();
+    let mut harness = ResourceHarness::from_bodies(&hir, &bodies);
     harness.block_budget = 2048;
     let mut memory = vec![0; 131072];
     let storage = 16384;
@@ -172,8 +172,8 @@ fn verify_adapters(target: TargetName) {
 
 #[test]
 fn callback_waiter_executes_fifo_without_releasing_outer_credit() {
-    let output = compile();
-    let mut harness = ResourceHarness::new(&output);
+    let (hir, bodies) = runtime_bodies();
+    let mut harness = ResourceHarness::from_bodies(&hir, &bodies);
     harness.block_budget = 32768;
     let mut memory = request_memory();
     put(&mut memory, CANCEL, 0);

@@ -66,8 +66,8 @@ fn large_capture_uses_full_pointer_cells_with_cage_enabled() {
 
 #[test]
 fn cage_boot_slices_reservation_and_rejects_invalid_words() {
-    let output = compile();
-    let mut harness = ResourceHarness::new(&output);
+    let (hir, bodies) = runtime_bodies();
+    let mut harness = ResourceHarness::from_bodies(&hir, &bodies);
     let mut memory = vec![0; 16384];
     put(&mut memory, HOT + 16, PROCESSOR);
     harness.run("compression", "cage_boot", &[], &mut memory);
@@ -127,8 +127,8 @@ fn compressed_fields_and_roots_survive_minor_and_major() {
     const OLD: u64 = 2097152;
     const YOUNG: u64 = 6291456;
     const BARRIER: u64 = 98304;
-    let output = compile();
-    let mut harness = ResourceHarness::new(&output);
+    let (hir, bodies) = runtime_bodies();
+    let mut harness = ResourceHarness::from_bodies(&hir, &bodies);
     harness.gc_config = CONFIG;
     harness.block_budget = 32768;
     let (mut memory, _) = graph_memory();

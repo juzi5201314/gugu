@@ -4,8 +4,8 @@ use crate::runtime::stackmap_codec::{CodeLayout, SafepointLayout, encode};
 
 #[test]
 fn pressure_poll_dispatches_gc_once_and_preserves_stack_resource() {
-    let output = compile();
-    let mut harness = ResourceHarness::new(&output);
+    let (hir, bodies) = runtime_bodies();
+    let mut harness = ResourceHarness::from_bodies(&hir, &bodies);
     harness.gc_config = CONFIG;
     harness.block_budget = 32768;
     harness.clock.extend([1000, 1125]);

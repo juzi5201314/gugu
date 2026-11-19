@@ -3,8 +3,8 @@ use super::*;
 
 #[test]
 fn shared_trim_resumes_bounded_scan_and_new_work_revokes_confirmation() {
-    let output = compile();
-    let mut harness = ResourceHarness::new(&output);
+    let (hir, bodies) = runtime_bodies();
+    let mut harness = ResourceHarness::from_bodies(&hir, &bodies);
     harness.block_budget = 32768;
     let (mut memory, _) = graph_memory();
     let base = 131072;
@@ -49,8 +49,8 @@ fn shared_trim_resumes_bounded_scan_and_new_work_revokes_confirmation() {
 
 #[test]
 fn pressure_service_waits_for_resource_return_and_drains_both_caches() {
-    let output = compile();
-    let mut harness = ResourceHarness::new(&output);
+    let (hir, bodies) = runtime_bodies();
+    let mut harness = ResourceHarness::from_bodies(&hir, &bodies);
     harness.block_budget = 32768;
     let (mut memory, _) = graph_memory();
     harness.reserve_script.push_back(73728);
@@ -102,8 +102,8 @@ fn pressure_service_waits_for_resource_return_and_drains_both_caches() {
 
 #[test]
 fn pressure_reclaims_empty_shared_table_and_clears_reclaimable_bytes() {
-    let output = compile();
-    let mut harness = ResourceHarness::new(&output);
+    let (hir, bodies) = runtime_bodies();
+    let mut harness = ResourceHarness::from_bodies(&hir, &bodies);
     harness.gc_config = CONFIG;
     harness.block_budget = 32768;
     let (mut memory, _) = graph_memory();

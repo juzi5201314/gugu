@@ -86,8 +86,8 @@ fn graph_memory() -> (Vec<u8>, u64) {
 
 #[test]
 fn edge_staging_counts_batches_and_major_consumes_overflow() {
-    let output = compile();
-    let mut harness = ResourceHarness::new(&output);
+    let (hir, bodies) = runtime_bodies();
+    let mut harness = ResourceHarness::from_bodies(&hir, &bodies);
     harness.gc_config = CONFIG;
     harness.block_budget = 32768;
     let (mut memory, _) = graph_memory();

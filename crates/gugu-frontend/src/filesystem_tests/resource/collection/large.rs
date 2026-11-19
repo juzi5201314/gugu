@@ -2,8 +2,8 @@ use super::*;
 
 #[test]
 fn large_field_barrier_uses_registered_range_without_arena_probe() {
-    let output = compile();
-    let mut harness = ResourceHarness::new(&output);
+    let (hir, bodies) = runtime_bodies();
+    let mut harness = ResourceHarness::from_bodies(&hir, &bodies);
     harness.gc_config = CONFIG;
     harness.block_budget = 32768;
     let (mut memory, meta) = graph_memory();
