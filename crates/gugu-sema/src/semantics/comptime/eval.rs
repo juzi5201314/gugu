@@ -162,6 +162,7 @@ pub(super) struct EvalState<'a> {
     /// 函数与常量初始化只访问自身词法帧，不可读取调用者局部槽。
     frame_bases: Vec<usize>,
     const_arguments: Vec<BTreeMap<String, Option<ConstantValue>>>,
+    runtime_parameters: Vec<Vec<usize>>,
     /// SourceExpand 域的插入上下文与 query 访问；其它域为空。
     expand: Option<ExpandState<'a>>,
     /// `embed_file` 的编译输入根；无文件系统边界的输入为空。
@@ -189,6 +190,7 @@ impl<'a> EvalState<'a> {
             frames: Vec::new(),
             frame_bases: Vec::new(),
             const_arguments: Vec::new(),
+            runtime_parameters: Vec::new(),
             expand: None,
             embed: None,
         }
@@ -238,6 +240,7 @@ impl<'a> EvalState<'a> {
         self.frame_bases.push(self.frames.len());
         self.frames.push(Vec::new());
         self.const_arguments.push(BTreeMap::new());
+        self.runtime_parameters.push(Vec::new());
         Ok(())
     }
 
@@ -247,6 +250,7 @@ impl<'a> EvalState<'a> {
         self.frames.pop();
         self.frame_bases.pop();
         self.const_arguments.pop();
+        self.runtime_parameters.pop();
     }
 
     fn bind(&mut self, name: String, value: ConstantValue) {
@@ -1552,7 +1556,16 @@ impl Model<'_> {
             let Some(pat) = param.pat else {
                 return Err(self.error(module, "comptime 调用的参数缺少绑定模式"));
             };
+            let start = state.frames.last().expect("函数参数帧").len();
             self.bind_pattern(module, pat, value, state)?;
+            if !param.comptime {
+                let end = state.frames.last().expect("函数参数帧").len();
+                state
+                    .runtime_parameters
+                    .last_mut()
+                    .expect("函数参数帧")
+                    .extend(start..end);
+            }
         }
         if bound != arguments.len() {
             return Err(self.error(module, "comptime 调用实参数量不符"));

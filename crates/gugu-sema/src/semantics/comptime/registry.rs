@@ -13,7 +13,7 @@ pub const REGISTRY_REVISION: u32 = 1;
 pub const EARLY_REGISTRY_IDENTITY: (u32, [u8; 32]) = (REGISTRY_REVISION, [0; 32]);
 
 /// evaluator 核心的 revision；registry 条目各自声明其依赖的版本。
-pub const EVALUATOR_REVISION: u32 = 7;
+pub const EVALUATOR_REVISION: u32 = 8;
 
 /// comptime 执行域位掩码。
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]

@@ -1,6 +1,30 @@
 use super::{CompileRequest, Compiler, TargetName, printing::output};
 
 #[test]
+fn source_macro_const_arguments_preserve_script_locals_and_comptime_parameters() {
+    let actual: Vec<_> = output(
+        r#"
+use std.io.{println}
+const M: int = 1
+fn number[comptime N: int]() int { N }
+fn forward(comptime M: int) int { number::[M]() }
+const ANSWER: int = comptime source {
+    let M = 3
+    let local = number::[M]()
+    let parameter = forward(4)
+    std.syntax.parse_source(f"{local} * 10 + {parameter}")
+}
+fn main() { println(ANSWER) }
+"#,
+        &[],
+    )
+    .into_iter()
+    .flat_map(|(_, bytes)| bytes)
+    .collect();
+    assert_eq!(actual, b"34\n");
+}
+
+#[test]
 fn qualified_repeat_lengths_are_not_bare_const_parameters() {
     let actual: Vec<_> = output(
         r#"

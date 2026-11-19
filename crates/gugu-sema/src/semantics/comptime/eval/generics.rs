@@ -50,13 +50,26 @@ impl Model<'_> {
         argument: GenericArg,
         state: &mut EvalState,
     ) -> EvalResult<ConstantValue> {
-        let bindings = state.const_arguments.last().cloned().unwrap_or_default();
+        let base = state.frame_bases.last().copied().unwrap_or(0);
+        let excluded = state.runtime_parameters.last();
+        let bindings: Vec<_> = state.frames[base..]
+            .iter()
+            .enumerate()
+            .flat_map(|(frame, values)| {
+                values
+                    .iter()
+                    .enumerate()
+                    .filter(move |(slot, _)| {
+                        frame != 0 || !excluded.is_some_and(|slots| slots.contains(slot))
+                    })
+                    .map(|(_, binding)| binding.clone())
+            })
+            .collect();
         state.frame_bases.push(state.frames.len());
         state.frames.push(Vec::new());
+        state.runtime_parameters.push(Vec::new());
         for (name, value) in bindings {
-            if let Some(value) = value {
-                state.bind(name, value);
-            }
+            state.bind(name, value);
         }
         let result = (|| {
             let value = match argument {
@@ -78,6 +91,7 @@ impl Model<'_> {
         })();
         state.frames.pop();
         state.frame_bases.pop();
+        state.runtime_parameters.pop();
         result
     }
 }
