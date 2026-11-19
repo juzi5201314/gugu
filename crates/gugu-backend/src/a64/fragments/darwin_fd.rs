@@ -1,0 +1,146 @@
+use super::{Builder, Fragment, LR, SP, add_imm, condition, imm, movz, next, reg};
+use crate::{
+    NativeImport,
+    a64::{
+        macho::import_stub_symbol,
+        reg::{Reg, Width},
+    },
+    macho::LIB_SYSTEM,
+    runtime::foreign_schema::{
+        NATIVE_REQUEST_ARGUMENTS, NATIVE_REQUEST_ERROR, NATIVE_REQUEST_OPERATION,
+        NATIVE_REQUEST_VALUE,
+    },
+};
+
+struct Method {
+    name: &'static str,
+    fixed: u8,
+    variadic_int: bool,
+    wide_result: bool,
+}
+
+const METHODS: [Method; 11] = [
+    method("read", 3, false, true),
+    method("write", 3, false, true),
+    method("open", 2, true, false),
+    method("close", 1, false, false),
+    method("lseek", 3, false, true),
+    method("stat", 2, false, false),
+    method("lstat", 2, false, false),
+    method("fstat", 2, false, false),
+    method("ftruncate", 2, false, false),
+    method("fsync", 1, false, false),
+    method("fcntl", 2, true, false),
+];
+
+const fn method(name: &'static str, fixed: u8, variadic_int: bool, wide_result: bool) -> Method {
+    Method {
+        name,
+        fixed,
+        variadic_int,
+        wide_result,
+    }
+}
+
+const REQUEST: Reg = Reg::x(19);
+const FP: Reg = Reg::x(29);
+const RESULT: Reg = Reg::x(0);
+const XZR: Reg = Reg::zr(Width::X);
+const EINVAL: u16 = 22;
+const EQ: u8 = 0;
+const NE: u8 = 1;
+
+pub fn darwin_fd_imports() -> Vec<NativeImport> {
+    METHODS
+        .iter()
+        .map(|method| method.name)
+        .chain(["__error"])
+        .map(|name| NativeImport::function(LIB_SYSTEM, name))
+        .collect()
+}
+
+/// x0 = NativeRequest；只在已进入 native 栈后调用，不管理线程或发布完成。
+pub fn darwin_fd_dispatch() -> Fragment {
+    let mut b = Builder::default();
+    b.emit("sub.X.imm", [reg(SP), reg(SP), add_imm(32)]);
+    for (offset, saved) in [(8, REQUEST), (16, FP), (24, LR)] {
+        b.memory("str.X.Unsigned", saved, SP, offset);
+    }
+    b.add(FP, SP, 16);
+    b.add(REQUEST, RESULT, 0);
+    let operation = Reg::x(9);
+    b.memory(
+        "ldr.X.Unsigned",
+        operation,
+        REQUEST,
+        NATIVE_REQUEST_OPERATION,
+    );
+    let mut errors = Vec::new();
+    let mut exits = Vec::new();
+    for (number, method) in METHODS.iter().enumerate() {
+        b.emit("subs.X.imm", [reg(XZR), reg(operation), add_imm(number)]);
+        let skip = branch_cond(&mut b, NE);
+        call_method(&mut b, method);
+        errors.push(branch_cond(&mut b, EQ));
+        b.memory("str.X.Unsigned", RESULT, REQUEST, NATIVE_REQUEST_VALUE);
+        exits.push(branch(&mut b));
+        b.patch_branch(skip, "b.cond", &[], &[condition(NE)]);
+    }
+    b.emit("movz.X", [reg(RESULT), movz(EINVAL)]);
+    let invalid = branch(&mut b);
+    for at in errors {
+        b.patch_branch(at, "b.cond", &[], &[condition(EQ)]);
+    }
+    b.external_branch("bl", &import_stub_symbol("__error"));
+    b.memory("ldr.W.Unsigned", Reg::w(0), RESULT, 0);
+    b.patch_branch(invalid, "b", &[], &[]);
+    b.memory("str.X.Unsigned", RESULT, REQUEST, NATIVE_REQUEST_ERROR);
+    for at in exits {
+        b.patch_branch(at, "b", &[], &[]);
+    }
+    for (offset, saved) in [(8, REQUEST), (16, FP), (24, LR)] {
+        b.memory("ldr.X.Unsigned", saved, SP, offset);
+    }
+    b.emit("movz.X", [reg(RESULT), movz(0)]);
+    b.add(SP, SP, 32);
+    b.ret();
+    b.finish()
+}
+
+fn call_method(b: &mut Builder, method: &Method) {
+    for i in 0..method.fixed {
+        b.memory(
+            "ldr.X.Unsigned",
+            Reg::x(i),
+            REQUEST,
+            NATIVE_REQUEST_ARGUMENTS + usize::from(i) * 8,
+        );
+    }
+    if method.variadic_int {
+        let mode = Reg::w(10);
+        b.memory(
+            "ldr.W.Unsigned",
+            mode,
+            REQUEST,
+            NATIVE_REQUEST_ARGUMENTS + 16,
+        );
+        b.memory("str.W.Unsigned", mode, SP, 0);
+    }
+    b.external_branch("bl", &import_stub_symbol(method.name));
+    if !method.wide_result {
+        b.emit("sbfm.X", [reg(RESULT), reg(RESULT), imm(0), imm(31)]);
+    }
+    b.emit("adds.X.imm", [reg(XZR), reg(RESULT), add_imm(1)]);
+}
+
+fn branch_cond(b: &mut Builder, cond: u8) -> u32 {
+    let at = b.offset();
+    b.emit("b.cond", [next(), condition(cond)]);
+    at
+}
+
+fn branch(b: &mut Builder) -> u32 {
+    let at = b.offset();
+    b.emit("b", [next()]);
+    at
+}
