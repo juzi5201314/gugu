@@ -372,6 +372,8 @@ rt0 和 runtime 通过 PE 导入表调用目标注册表允许的系统 DLL；�
 
 内部 arm64 Mach-O 的 Function 导入通过调用桩跳转到 dyld 绑定的地址；Data 导入没有调用桩。调用桩不负责建立 AAPCS64 调用现场或切换栈。
 
+内部 arm64 Mach-O 的 `LC_MAIN` 将 Darwin 的 `argc`、`argv` 和 `envp` 传给 rt0；`rt0_start` 正常返回时，进程以其返回值调用 libSystem 的 `exit`。如果镜像已导入 libSystem 的 `_exit`，入口复用该导入。添加入口不改变已有调用桩的绑定目标。这一入口不构成目标登记。
+
 rt0 和运行时通过 libSystem 调用 Darwin 接口；文件系统、套接字、进程和信号订阅使用同一标准库语义，但原生结构、信号编号和错误码不与 Linux 互换。普通信号由 kqueue 收集；订阅期间的原生处理器不执行用户代码，也不把忽略信号的 disposition 传给通过 exec 启动的子进程。
 
 内部 arm64 文件描述符适配器在原生栈上处理文件请求。传给 `open` 和文件描述符 `fcntl` 的可变整数实参位于栈上，而非固定参数寄存器；`stat`、`lstat`、`fstat` 绑定到 arm64 的无后缀 libSystem 导出。失败把 Darwin errno 写回请求；适配器不负责调度或发布请求完成。
