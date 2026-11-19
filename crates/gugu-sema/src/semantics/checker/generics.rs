@@ -155,7 +155,7 @@ impl Checker<'_, '_> {
                     if let BoundKind::Path(path) = bound.kind {
                         match self.model.trait_ref(id.module, path, &bindings) {
                             Ok(interface) => {
-                                let assumptions = self.model.assumptions_at(self.module, span);
+                                let assumptions = self.assumptions(span);
                                 match assumptions {
                                     Ok(assumptions) => self.trait_constraints.push((
                                         super::super::traits::Obligation {

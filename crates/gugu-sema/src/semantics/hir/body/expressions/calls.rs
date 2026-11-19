@@ -446,7 +446,8 @@ impl BodyBuilder<'_, '_, '_, '_> {
                 }
                 let names = self.compiler.model.path(self.module, path);
                 let local = *self.names.get(names[0])?;
-                let receiver_ty = &self.facts.body.slots[self.local_sources[local.index()]];
+                let receiver_ty = &self.facts.body.slots
+                    [self.local_sources[local.index()].expect("source local")];
                 concurrency_builtin(receiver_ty, names[1])
             }
             ast::ExprKind::TypeApp { base, .. } | ast::ExprKind::Paren(base) => {
@@ -626,7 +627,8 @@ impl BodyBuilder<'_, '_, '_, '_> {
         let Some(&local) = self.names.get(first_name) else {
             return false;
         };
-        let mut ty = self.facts.body.slots[self.local_sources[local.index()]].clone();
+        let mut ty =
+            self.facts.body.slots[self.local_sources[local.index()].expect("source local")].clone();
         for segment in &prefix[1..] {
             let name = self.compiler.model.name(self.module, segment.name);
             let Some((_, field, _)) = self.compiler.model.find_field(&ty, name) else {

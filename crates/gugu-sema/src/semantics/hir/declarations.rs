@@ -78,6 +78,27 @@ impl Builder<'_, '_> {
                 }
                 Origin::Async { .. } | Origin::LocalStatic { .. } => {}
             }
+            if let Origin::Named(named) = origin
+                && let Some(definition) = self.identities.named_items[named]
+                && let Some(body) = self
+                    .checked
+                    .bodies
+                    .iter()
+                    .find(|body| body.definition == definition)
+            {
+                for ty in body
+                    .slots
+                    .iter()
+                    .chain(body.patterns.iter().map(|plan| &plan.ty))
+                {
+                    if let Ty::Param(name) = ty
+                        && name.starts_with("$pack:")
+                        && !parameters.iter().any(|parameter| parameter.name == *name)
+                    {
+                        parameters.push(type_parameter(name.clone(), false));
+                    }
+                }
+            }
             self.parameters[index] = parameters;
         }
         for index in 0..self.parameters.len() {

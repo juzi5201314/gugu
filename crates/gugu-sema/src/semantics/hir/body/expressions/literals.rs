@@ -58,6 +58,9 @@ impl BodyBuilder<'_, '_, '_, '_> {
         &mut self,
         parts: ast::AstRange<ast::FStringPart>,
     ) -> Result<hir::ExprKind, Diagnostic> {
+        if matches!(self.compiler.model.formatter_type(), Ty::Named(..)) {
+            return self.runtime_formatted_string(parts);
+        }
         let mut formed = Vec::with_capacity(parts.len as usize);
         for (offset, part) in parts
             .as_slice(&self.arena().fstring_parts)
@@ -94,12 +97,11 @@ impl BodyBuilder<'_, '_, '_, '_> {
         }
         let start = checked_id(self.output.string_parts.len())?;
         self.output.string_parts.extend(formed);
-        Ok(hir::ExprKind::String {
-            parts: start..checked_id(self.output.string_parts.len())?,
-        })
+        let range = start..checked_id(self.output.string_parts.len())?;
+        Ok(hir::ExprKind::String { parts: range })
     }
 
-    fn format_count(
+    pub(super) fn format_count(
         &mut self,
         count: crate::semantics::output::FormattingCount,
         span: &Span,

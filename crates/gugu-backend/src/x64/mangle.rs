@@ -128,7 +128,6 @@ pub fn runtime_call_name(call: RuntimeCall) -> &'static str {
         RuntimeCall::Yield => "yield",
         RuntimeCall::Spawn => "spawn",
         RuntimeCall::SelectCommit { .. } => "select_commit",
-        RuntimeCall::Format => "format",
         RuntimeCall::Concat => "concat",
         RuntimeCall::StringCompare => "string_compare",
         RuntimeCall::Utf8Boundary => "utf8_boundary",

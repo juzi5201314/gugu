@@ -153,7 +153,22 @@ impl MonoContext<'_> {
 
     pub fn parameter_context(&self, definition: hir::DefId) -> BTreeMap<String, Ty> {
         if let Some(callable) = self.callable_of[definition.index()] {
-            return self.model.callable_context(callable);
+            let mut parameters = self.model.callable_context(callable);
+            if let Some(capture) = self
+                .checked
+                .bodies
+                .iter()
+                .flat_map(|body| &body.captures)
+                .find(|capture| capture.function == Some(callable))
+            {
+                parameters.extend(
+                    capture
+                        .type_parameters
+                        .iter()
+                        .map(|name| (name.clone(), Ty::Param(name.clone()))),
+                );
+            }
+            return parameters;
         }
         let item = &self.module.definitions[definition.index()];
         if matches!(

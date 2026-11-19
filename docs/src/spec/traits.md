@@ -199,20 +199,22 @@ impl Add[Point] for Point {
 }
 
 impl Print for Foo[T] {
-    fn print(self: &Self, buf: &Vec[byte]) { ... }
+    fn print(self: &Self, out: &Formatter) { ... }
 }
 
 impl Print for Foo[string] {
-    fn print(self: &Self, buf: &Vec[byte]) { ... }
+    fn print(self: &Self, out: &Formatter) { ... }
 }
 ```
 
 ## 约束
 
 ```gugu
+use std.fmt.{Formatter}
+
 fn dump[T: Print](x: T) {
-    let buf = Vec::new()
-    x.print(&buf)
+    let out = Formatter::new()
+    x.print(&out)
 }
 ```
 

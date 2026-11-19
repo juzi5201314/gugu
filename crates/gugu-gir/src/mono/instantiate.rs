@@ -9,7 +9,7 @@ use crate::{ast, hir};
 use serde::{Deserialize, Serialize};
 use std::collections::{BTreeMap, BTreeSet};
 
-pub const INSTANCE_SCHEMA: u32 = 7;
+pub const INSTANCE_SCHEMA: u32 = 8;
 
 /// 调用位点使用 owner 内的确定性编号，不把定义级 callee 当作实例身份。
 #[derive(Clone, Copy, Debug, Eq, PartialEq, Ord, PartialOrd, Serialize, Deserialize)]
@@ -179,6 +179,26 @@ struct Edges {
 }
 
 pub fn walk_instance(
+    context: &MonoContext<'_>,
+    interner: &mut MonoInterner,
+    entry: &WalkEntry,
+) -> Result<InstanceRecordV1, Diagnostic> {
+    if let Some(expanded) = super::packs::expand(context, entry.definition, &entry.bindings)? {
+        let context = MonoContext::new(
+            context.model,
+            context.checked,
+            context.identities,
+            &expanded.module,
+            context.sources,
+            context.target,
+            context.harness,
+        );
+        return walk_instance_body(&context, interner, entry);
+    }
+    walk_instance_body(context, interner, entry)
+}
+
+fn walk_instance_body(
     context: &MonoContext<'_>,
     interner: &mut MonoInterner,
     entry: &WalkEntry,
