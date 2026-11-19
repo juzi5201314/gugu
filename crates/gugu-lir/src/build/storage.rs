@@ -278,6 +278,17 @@ impl Builder<'_> {
                 if !self.layout(self.local_ty(local)).passing.has_resource() {
                     self.lifetime(slot, true);
                 }
+                if self.gir.locals[local.index()].element_initialization {
+                    let address = self.address(Place::local(local))?.0;
+                    let bytes = self
+                        .layout(self.local_ty(local))
+                        .layout
+                        .expect("数组布局")
+                        .size;
+                    let zero = self.constant(0, Type::I8);
+                    self.emit(Op::Memset { bytes }, &[address, zero], &[]);
+                    self.root_init_bytes(slot, true);
+                }
             }
             Storage::Heap {
                 variable,
@@ -352,6 +363,15 @@ impl Builder<'_> {
 
     /// 逐根初始化位复位：把该槽 root 表的全部位写成未初始化。
     fn root_init_reset(&mut self, slot: SlotId) {
+        if self
+            .gir
+            .locals
+            .get(self.body.stack_slots[slot.index()].local as usize)
+            .is_some_and(|local| local.element_initialization)
+        {
+            self.root_init_bytes(slot, false);
+            return;
+        }
         let count = self.body.stack_slots[slot.index()].roots.len();
         for index in 0..count {
             self.root_init(slot, u32::try_from(index).expect("根下标适配 u32"), false);
@@ -478,6 +498,12 @@ impl Builder<'_> {
     }
 
     fn root_init(&mut self, slot: SlotId, bit: u32, initialized: bool) {
+        if let Some(base) = self.dynamic_root {
+            let address = self.offset(base, u64::from(bit));
+            let value = self.constant(u64::from(initialized), Type::I8);
+            self.store(address, value, 1, false);
+            return;
+        }
         self.body.root_inits.push(RootInit {
             slot,
             block: self.current,

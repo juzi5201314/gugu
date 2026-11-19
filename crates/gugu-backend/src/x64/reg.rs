@@ -11,6 +11,7 @@ use serde::{Deserialize, Serialize};
 /// 分配阶段把它改写成 `[rsp + local_offset(slot)]`。值编号与 lowering 临时编号必须
 /// 小于该基址，两个空间才不会混淆（`select` 侧有 `debug_assert` 与上界校验）。
 pub const FRAME_SLOT_BASE: u32 = 1 << 30;
+pub const FRAME_INIT_BASE: u32 = 1 << 31;
 
 /// 16 个通用寄存器；声明顺序即 ModRM/REX 的机器编码顺序。
 #[derive(Clone, Copy, Debug, Eq, PartialEq, Serialize, Deserialize)]

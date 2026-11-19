@@ -92,6 +92,7 @@ pub enum ExprKind {
         body: ExprId,
         into_iter: Option<u32>,
         next: Option<u32>,
+        initializations: Vec<ArrayInitLoop>,
     },
     Try {
         body: ExprId,
@@ -177,6 +178,14 @@ pub enum ExprKind {
         pattern: PatternId,
         value: ExprId,
     },
+}
+
+#[derive(Clone, Debug, Eq, PartialEq, Serialize, Deserialize)]
+pub struct ArrayInitLoop {
+    pub array: LocalId,
+    pub index: LocalId,
+    pub store: StmtId,
+    pub length: super::ArrayLength,
 }
 
 #[derive(Clone, Debug, Eq, PartialEq, Serialize, Deserialize)]

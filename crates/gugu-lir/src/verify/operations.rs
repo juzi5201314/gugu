@@ -47,6 +47,15 @@ pub(super) fn verify(body: &Body) -> Result<(), Diagnostic> {
                     && slot.index() < body.stack_slots.len()
                     && results[0].provenance == Some(Provenance::Stack)
             }
+            Op::RootInitAddr(slot) => {
+                a.is_empty()
+                    && r == [Type::Ptr]
+                    && body
+                        .stack_slots
+                        .get(slot.index())
+                        .is_some_and(|slot| !slot.roots.is_empty())
+                    && results[0].provenance == Some(Provenance::Raw)
+            }
             Op::PtrOffset => a == [Type::Ptr, Type::I64] && r == [Type::Ptr],
             Op::Integer(op) => match op {
                 IntOp::AddCarry | IntOp::SubBorrow => {

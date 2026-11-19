@@ -31,6 +31,13 @@ impl Checker<'_, '_> {
                     .is_some_and(|path| path.mandatory)
             });
             path.initialized.resize(self.slots.len(), false);
+            path.maybe_initialized.resize(self.slots.len(), false);
+            for (slot, initialized) in path.maybe_initialized.iter_mut().enumerate() {
+                *initialized = reachable
+                    .iter()
+                    .filter_map(|state| state.cleanup_paths.get(&id))
+                    .any(|path| path.maybe_initialized.get(slot) == Some(&true));
+            }
             for (slot, initialized) in path.initialized.iter_mut().enumerate() {
                 *initialized = reachable
                     .iter()
@@ -54,6 +61,9 @@ impl Checker<'_, '_> {
             }
         }
         for i in 0..self.state.initialized.len() {
+            self.state.maybe_initialized[i] = reachable
+                .iter()
+                .any(|state| state.maybe_initialized.get(i) == Some(&true));
             self.state.initialized[i] = reachable
                 .iter()
                 .all(|s| s.initialized.get(i) == Some(&true));
@@ -194,6 +204,7 @@ impl Checker<'_, '_> {
                 }
             }
             StmtKind::Assign { op, place, value } => {
+                self.array_init_assignment(place);
                 let discard = matches!(self.arena().exprs[place.0 as usize].kind,ExprKind::Path(path) if self.model.path(self.module,path).as_slice()==["_"]);
                 if discard {
                     if op != AssignOp::Assign {
@@ -402,6 +413,7 @@ impl Checker<'_, '_> {
                 }
             } else if irrefutable {
                 fallthrough.initialized = guard_failed.initialized;
+                fallthrough.maybe_initialized = guard_failed.maybe_initialized;
                 fallthrough.cleanup_paths = guard_failed.cleanup_paths;
                 fallthrough.reachable = guard_failed.reachable;
             } else {
@@ -463,6 +475,8 @@ impl Checker<'_, '_> {
             self.bind(pat, &elem, true, Some(false));
         }
         self.loops.push(LoopState {
+            entry_slots: self.slots.len(),
+            back_edges: Vec::new(),
             pack,
             values: Vec::new(),
             exits: Vec::new(),
@@ -470,12 +484,16 @@ impl Checker<'_, '_> {
             cleanup_floor: self.defers.len(),
         });
         self.discarded(body);
-        let loop_state = self.loops.pop().expect("循环上下文已建立");
+        let mut loop_state = self.loops.pop().expect("循环上下文已建立");
+        if self.state.reachable {
+            loop_state.back_edges.push(self.state.clone());
+        }
         let mut exits = loop_state.exits;
         if let Some(state) = natural_exit {
             exits.push(state);
         }
         self.merge(&base, &exits);
+        self.merge_loop_back_edges(&loop_state.back_edges);
         let mut result = if loop_state.value_allowed {
             Ty::Never
         } else {
@@ -485,5 +503,30 @@ impl Checker<'_, '_> {
             result = self.join(&ty, &result, &self.arena().exprs[body.0 as usize].span);
         }
         result
+    }
+
+    fn merge_loop_back_edges(&mut self, back_edges: &[State]) {
+        if !self.state.reachable {
+            return;
+        }
+        for back_edge in back_edges.iter().filter(|state| state.reachable) {
+            for (initialized, &incoming) in self
+                .state
+                .maybe_initialized
+                .iter_mut()
+                .zip(&back_edge.maybe_initialized)
+            {
+                *initialized |= incoming;
+            }
+            for (&id, path) in &mut self.state.cleanup_paths {
+                let incoming = back_edge
+                    .cleanup_paths
+                    .get(&id)
+                    .map_or(&back_edge.maybe_initialized, |path| &path.maybe_initialized);
+                for (initialized, &incoming) in path.maybe_initialized.iter_mut().zip(incoming) {
+                    *initialized |= incoming;
+                }
+            }
+        }
     }
 }
