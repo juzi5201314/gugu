@@ -87,6 +87,7 @@ v5 header byte 24 的 u32 为架构 tag 183，byte 28 的 u32 仍为零。v4 隐
 只接受 (version=4, tag=0) 与 (version=5, tag=183)，未知组合拒绝。
 
 A64 用五个 u32 register mask，xN 的位号就是 N（0..30）；SP/bit31 不编码。
+A64 函数的 has_stack_interior 标志包含 typed/gated 的 StackInterior 根，即使寄存器掩码和固定槽位图均为空；初始化字节只门控本次扫描，不消除函数的换栈修正义务。
 x16/x17 scratch、x18 platform、x27/x28 runtime context、x29 FP 与 x30 LR 不得为用户根。
 CallReturn/PollResume/SuspendResume/ForeignBridge 的 mask 全零；MorestackEntry 仅可
 登记 x0-x8 参数根，slot_count=0 且无 typed root。非入口点的根槽与初始化字节必须在 frame 内。

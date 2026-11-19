@@ -293,6 +293,27 @@ fn non_entry_future_set_does_not_initialize_an_earlier_poll() {
 }
 
 #[test]
+fn typed_only_stack_roots_set_the_function_stack_interior_flag() {
+    let mut f = fixture(&[], &[]);
+    slot(&mut f, vec![(0, Provenance::Stack)], 8);
+    poll(&mut f);
+    f.ret(&[]);
+    let fragment = compile(&mut f);
+    let maps = maps(&fragment);
+    let point = maps
+        .safepoints
+        .iter()
+        .find(|point| point.kind == 1)
+        .unwrap();
+    let map = &maps.maps[point.map_index as usize];
+    assert!(map.registers.iter().all(|mask| *mask == 0));
+    assert!(map.slots.iter().all(Vec::is_empty));
+    assert_eq!(map.typed.len(), 1);
+    assert_eq!(map.typed[0].root_kind, 4);
+    assert_ne!(maps.functions[0].flags & 4, 0);
+}
+
+#[test]
 fn entry_header_backedges_keep_gates_but_do_not_prove_first_entry_initialized() {
     let mut f = fixture(&[Type::I64], &[Type::I64]);
     slot(&mut f, vec![(0, Provenance::GcHeap)], 8);
