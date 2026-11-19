@@ -19,6 +19,7 @@
 mod frame;
 mod live;
 mod parallel;
+mod registers;
 mod rewrite;
 mod scan;
 mod slots;
@@ -92,15 +93,7 @@ impl RegClass {
     }
 }
 
-/// spill slot 的根类别：不同 root class 绝不共用槽，栈复制与 stack map 因此不依赖
-/// 某时刻残留的位。
-#[derive(Clone, Copy, Debug, Eq, PartialEq)]
-#[repr(u8)]
-pub enum RootClass {
-    NonPointer = 0,
-    HeapPointer = 1,
-    StackPointer = 2,
-}
+pub use crate::regalloc::RootClass;
 
 impl RootClass {
     /// 由 provenance 推出根类别。
@@ -118,16 +111,6 @@ impl RootClass {
             )
             | None => Self::NonPointer,
         }
-    }
-
-    /// payload 判别值。
-    pub const fn code(self) -> u8 {
-        self as u8
-    }
-
-    /// managed/stack 指针必须落 frame slot（挂起与 bridge 点）。
-    pub const fn must_spill(self) -> bool {
-        !matches!(self, Self::NonPointer)
     }
 }
 
@@ -259,7 +242,7 @@ fn run(
     live::note_outgoing_roots(body, &selected, target, &mut live)?;
     let scanned = scan::scan(&live)?;
     let mut values = scanned.values;
-    let mut slots = slots::assign(&mut values);
+    let mut slots = slots::assign(&mut values)?;
     let request = parallel::Request::new(body, &selected, &live, &values)?;
     // 第一遍解析只为判定是否需要 16 字节 copy scratch；布局完成后按真实偏移再解一次。
     let probe = request.resolve(None)?;

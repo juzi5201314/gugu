@@ -331,111 +331,99 @@ fn stack_arguments(body: &Body, selected: &SelectedFunction) -> Vec<(u32, u32, T
     stack
 }
 
-/// 一个组的解析：去自拷贝、目标空闲顺序发射、环打断，最后重建常量。
+/// 一个组的解析：调度在共享核心，x64 只决定 scratch 保存序列。
 fn resolve_group(
     moves: &[Move],
     materializations: &[(u32, Loc)],
     scratch: Option<u32>,
 ) -> Result<(Vec<EmittedMove>, u32, bool), AllocError> {
-    let mut emitted = Vec::with_capacity(moves.len() + materializations.len());
-    let mut pending: Vec<Move> = moves.to_vec();
-    let mut cycles = 0_u32;
-    let mut uses_scratch = false;
-    loop {
-        pending.retain(|mov| mov.src != mov.dst);
-        if pending.is_empty() {
-            break;
-        }
-        let ready = pending
-            .iter()
-            .position(|candidate| !pending.iter().any(|other| other.src == candidate.dst));
-        if let Some(index) = ready {
-            let mov = pending.remove(index);
-            emitted.push(EmittedMove::Move {
-                src: mov.src,
-                dst: mov.dst,
-                ty: mov.ty,
-            });
-            continue;
-        }
-        // 环：保存第一条 move 的目标，再把仍读该目标的源改读 scratch。
-        let saved = pending[0].dst;
-        cycles += 1;
-        match saved {
-            Loc::Gpr(_)
-                if pending.iter().any(|mov| {
-                    mov.src == Loc::Gpr(Gpr::R11)
-                        || (matches!(mov.src, Loc::Slot(_) | Loc::Scratch)
-                            && matches!(mov.dst, Loc::Slot(_) | Loc::Scratch))
-                }) =>
-            {
-                // 剩余内存搬运会使用 `r11`，环上旧值改存 frame scratch。
-                uses_scratch = true;
-                if scratch.is_none() {
-                    return Ok((emitted, cycles, true));
-                }
-                save_to_scratch(&mut emitted, saved, pending[0].ty);
-                for mov in &mut pending {
-                    if mov.src == saved {
-                        mov.src = Loc::Scratch;
-                    }
-                }
-            }
-            Loc::Gpr(_) => {
-                let holder = Loc::Gpr(Gpr::R11);
-                emitted.push(EmittedMove::Move {
-                    src: saved,
-                    dst: holder,
-                    ty: pending[0].ty,
-                });
-                for mov in &mut pending {
-                    if mov.src == saved {
-                        mov.src = holder;
-                    }
-                }
-            }
-            Loc::Xmm(_) | Loc::Slot(_) | Loc::Scratch => {
-                uses_scratch = true;
-                if scratch.is_none() {
-                    // 探测阶段：只需知道需要预留 16 字节 scratch。
-                    return Ok((emitted, cycles, true));
-                }
-                save_to_scratch(&mut emitted, saved, pending[0].ty);
-                for mov in &mut pending {
-                    if mov.src == saved {
-                        mov.src = Loc::Scratch;
-                    }
-                }
-            }
-        }
+    let normalized = moves
+        .iter()
+        .map(|mov| crate::regalloc::parallel::Copy {
+            src: mov.src,
+            dst: mov.dst,
+            ty: mov.ty,
+        })
+        .collect::<Vec<_>>();
+    let plan =
+        crate::regalloc::parallel::resolve_copies(&normalized, &X64CopyPolicy, scratch.is_some())
+            .map_err(|error| AllocError::new(error.to_string()))?;
+    let mut emitted = plan
+        .moves
+        .into_iter()
+        .map(|mov| EmittedMove::Move {
+            src: mov.src,
+            dst: mov.dst,
+            ty: mov.ty,
+        })
+        .collect::<Vec<_>>();
+    if !plan.uses_scratch || scratch.is_some() {
+        emitted.extend(
+            materializations
+                .iter()
+                .map(|&(value, dest)| EmittedMove::Rematerialize { value, dest }),
+        );
     }
-    emitted.extend(
-        materializations
-            .iter()
-            .map(|&(value, dest)| EmittedMove::Rematerialize { value, dest }),
-    );
-    Ok((emitted, cycles, uses_scratch))
+    Ok((emitted, plan.cycles, plan.uses_scratch))
 }
 
-/// 把环上的目标保存到 16 字节 scratch：XMM 一次 `movups`，其余经 `r11` 搬两个机器字。
-fn save_to_scratch(emitted: &mut Vec<EmittedMove>, saved: Loc, ty: Type) {
-    match saved {
-        Loc::Xmm(_) => emitted.push(EmittedMove::Move {
-            src: saved,
-            dst: Loc::Scratch,
-            ty,
-        }),
-        Loc::Gpr(_) | Loc::Slot(_) | Loc::Scratch => {
-            emitted.push(EmittedMove::Move {
+struct X64CopyPolicy;
+
+impl crate::regalloc::parallel::CopyPolicy<Loc, Type> for X64CopyPolicy {
+    fn break_cycle(
+        &self,
+        saved: Loc,
+        ty: Type,
+        pending: &[crate::regalloc::parallel::Copy<Loc, Type>],
+    ) -> crate::regalloc::parallel::CycleBreak<Loc, Type> {
+        use crate::regalloc::parallel::{Copy, CycleBreak};
+        use crate::regalloc::{Class, RegisterFile};
+        let scratch = super::registers::X64Registers
+            .copy_scratch(Class(0))
+            .and_then(|reg| super::registers::location(crate::regalloc::Location::Reg(reg)).ok())
+            .map(loc_of)
+            .expect("x64 copy scratch is a GPR");
+        let uses_scratch = !matches!(saved, Loc::Gpr(_))
+            || pending.iter().any(|mov| {
+                mov.src == scratch
+                    || (matches!(mov.src, Loc::Slot(_) | Loc::Scratch)
+                        && matches!(mov.dst, Loc::Slot(_) | Loc::Scratch))
+            });
+        if !uses_scratch {
+            return CycleBreak {
+                holder: scratch,
+                saves: vec![Copy {
+                    src: saved,
+                    dst: scratch,
+                    ty,
+                }],
+                uses_scratch,
+            };
+        }
+        let saves = if matches!(saved, Loc::Xmm(_)) {
+            vec![Copy {
                 src: saved,
-                dst: Loc::Gpr(Gpr::R11),
-                ty: Type::I64,
-            });
-            emitted.push(EmittedMove::Move {
-                src: Loc::Gpr(Gpr::R11),
                 dst: Loc::Scratch,
-                ty: Type::I64,
-            });
+                ty,
+            }]
+        } else {
+            vec![
+                Copy {
+                    src: saved,
+                    dst: scratch,
+                    ty: Type::I64,
+                },
+                Copy {
+                    src: scratch,
+                    dst: Loc::Scratch,
+                    ty: Type::I64,
+                },
+            ]
+        };
+        CycleBreak {
+            holder: Loc::Scratch,
+            saves,
+            uses_scratch,
         }
     }
 }
