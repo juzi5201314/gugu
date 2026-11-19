@@ -395,6 +395,12 @@ fragment relocation 封闭为：
 
 stat 成功后把暂存区复制为 x86_64 kernel stat：mode/nlink/uid/gid/rdev 调整偏移，32 位 nlink 零扩展、blksize 符号扩展，dev/ino/size/blocks/时间戳保持偏移，填充和保留字段清零。Linux `fs_platform::linux_stat` 从 +88/+96 读取修改时间秒/纳秒。解码往返与确定性 syscall 替身执行测试覆盖请求翻译、flags、完整 stat、负返回、零字节读取/目录 EOF 和不支持请求；不进行真实 I/O。`examples/a64_linux_fd_image.rs` 在默认测试之外生成经 worker 以 `O_EXCL` 创建 /tmp 文件（已存在则失败，不覆盖或删除已有文件）并写/关/stat/重开/读、目录 getdents、unlink 和 errno 检查的镜像；所有检查成功返回 0，失败返回 1。
 
+`a64::fragments::linux_process_call/worker` 使用 `process_schema` 的 ProcessRequest/SpawnPacket，独立于 NativeRequest。call 校验 x0 与请求 operation 相同并在原生栈保存非易失寄存器，try_wait/kill/close/read/write 翻译为 wait4 260、kill 129、close 57、read 63、write 64；观察使用 WNOHANG 并将 wait status 归一为 runtime 的 kind/code。worker 地址由 ADR 返回，同片段 worker 执行 pipe2 59、fcntl 25、openat 56 和 spawn。parent 端 F_SETFL(O_NONBLOCK)，F_DUPFD_CLOEXEC 的最小 fd 为 3；管道 flags 配置失败同时关闭两端并保留原 errno。
+
+spawn 的错误管道和 stdio 临时副本均为 CLOEXEC；用 clone 220 的 arm64 参数顺序 flags/newsp/parent_tid/tls/child_tid（17/0/0/0/0）模拟 fork，不使用共享 VM 的 vfork。`linux_process_spawn` 的子分支只编码 syscall：chdir 49、fcntl 25、dup3 24、close 57、rt_sigaction 134、execve 221，失败在错误管道写 4 字节 errno 并用 exit 93 退出 127。低错误管道写端先以 F_DUPFD_CLOEXEC 提升到 3 以上；三个 stdio 来源全部复制到安全临时端后再 dup3，原始 0/1/2 不被 cleanup 误关。parent 重试 EINTR，EOF 后才发布 SpawnPacket 的 handle/id 与请求 value；setup/exec 错误先 wait4 回收，错误管道 read 自身失败则 kill 后回收，clone 失败关闭错误管道。子分支不调用 Builder 之外的运行时服务、libc 或分配器。
+
+pipe_write 以 8 字节 kernel sigset 和 rt_sigprocmask 135 保存/恢复线程 mask，用 rt_sigpending 136 观察旧 SIGPIPE；EPIPE 时仅在无旧 pending 的情况下以零超时 rt_sigtimedwait 137 消费新信号，EINTR 可重试。这里的 4096 是 SIGPIPE 的位掩码，不是页面大小。`examples/a64_linux_process_image.rs` 为默认测试之外的 BusyBox echo/pipe/read/wait/ENOENT 验证；nextest 仅使用解码后的指令解释器和 syscall 脚本，覆盖 parent/child、cleanup、状态解码和 SIGPIPE，不启动子进程。片段仍未接通 foreign bridge、native worker 线程启动与公开目标。
+
 `a64::fragments::linux_net_dispatch` 接收 x0 操作号和 x1 网络 packet，以 Builder 生成无导入的系统调用分派：socket/setsockopt/bind/listen/accept4/getsockname/getpeername/close = 198/208/200/201/242/204/205/57，epoll_create1/ctl/pwait = 20/21/22，connect/shutdown/getsockopt/recvfrom/sendto = 203/210/209/207/206。value/error 仍在 packet 的 +72/+80；负内核返回转换成 value = 0 与正 errno。操作 19 以 ADR 返回同一片段中的原生 close 回调地址，成功返回 0、失败返回正 errno。
 
 epoll_ctl 将调用方的打包 12 字节事件展开到原生栈，DEL 不解引用 event；epoll_wait 在 2048 字节暂存区接收最多 128 个 arm64 事件，成功后逐项压缩为 x86_64 12 字节格式，保留完整 64 位 data。零事件或失败不写输出缓冲。maxevents 按有符号 int 解释，非正返回 EINVAL，正数批量上限为 128；epoll_pwait 的 sigmask = 0、sigsetsize = 8。片段不使用动态栈分配或 mmap，不在原生栈上按不可信 maxevents 分配内存。
@@ -404,6 +410,12 @@ epoll_ctl 将调用方的打包 12 字节事件展开到原生栈，DEL 不解�
 Linux DNS 的 `net_resolver.gg` 经 `resolver_symbol` 获得 getaddrinfo/freeaddrinfo，再使用 foreign packet 调用 libc；Linux addrinfo 的 sockaddr 在 +24、next 在 +40。取消不提前释放仍被原生调用读取的 host/hints/result；迟到结果仍须 freeaddrinfo。此路径依赖 libc 导入、foreign-call worker，内部 A64 raw-syscall 层暂不实现 resolver_symbol，也不增加另一套 UDP DNS。FP/原子片段不是当前 socket/信号系统调用的依赖；完整 worker 启动、调度、foreign 调用和目标登记仍未接通。
 
 `examples/a64_linux_net_signal_image.rs` 手工生成通过适配器在 loopback 上 bind/listen/connect/accept、sendto/epoll/recvfrom，以及 block SIGUSR1、kill 自身、signalfd 读取的镜像；另外通过 sigaction 忽略 SIGUSR2、自发信号并恢复旧 action，同时检查网络 EINVAL/EBADF。默认 nextest 只运行解码/编码往返和确定性 syscall 替身，覆盖布局、完整 data、成功/零事件/错误、信号 action 转换和 signalfd 的运行时参数回归，不运行真实网络或子进程。
+
+`a64::fragments::linux_vm(PlatformOp)` 为原生 C ABI 的独立范围片段工厂，不是 NativeRequest worker。reserve 的 x0/x1 对应 x64 reserve_aligned 的 bytes/alignment；其他操作以 x0 接收 NativeExtent 的 base/+8 bytes。使用 mmap 222、munmap 215、mprotect 226、madvise 233，保留负 errno。reserve 检查 bytes/align、二次幂和总长溢出，以 PROT_NONE 和 MAP_PRIVATE|MAP_ANONYMOUS 过量预留，按位对齐并分别 munmap 首尾。任一 trim 失败释放仍拥有的映射范围，返回原错误；成功解除前缀后先推进 owned base/length，再尝试尾部，避免错误清理解除其他线程在已释放前缀新建的映射。Commit/Unprotect 为保护位 3，Guard 为 0，Decommit 为 MADV_DONTNEED 4；未使用 MAP_FIXED 覆盖其他映射。
+
+`linux_page_size()` 用 x0 的 Linux envp 扫描环境终止项与 auxv，返回 AT_PAGESZ，不调用 libc/getauxval，不依赖宿主构建机器页大小，缺少时返回 0。调用方从 `Rt0Payload.boot_environment` 取得入口捕获的 envp，再按该返回值初始化内部 A64 的页舍入与 extent。当前 `native_memory.gg` 的 NATIVE_PAGE_BYTES = 4096 和 platform profile 仍只服务已登记 x64 路径；本次不注册 A64 目标、不改共享 schema，也不宣称完整 GC/allocator 已在 16/64 KiB 内核上接通。接通未来目标时须在该 owning layer 使用 native 页值，而非继续套用 x64 profile。
+
+进程内指令/syscall 脚本覆盖 4/16/64 KiB auxv、缺失值、guard/commit/decommit/release 的原始参数与错误、reserve 的 prefix/tail、空输入/溢出和清理错误；不做真实 I/O。`examples/a64_linux_vm_image.rs` 在默认测试之外从真实 auxv 取得页大小，预留一页、提交、写入、guard/unprotect、验证内容、MADV_DONTNEED 后验证零填充并 munmap，同时检查不对齐 munmap 的 EINVAL。此层不需要 FP、原子或 foreign-call worker。
 
 ### Windows PE32+
 
