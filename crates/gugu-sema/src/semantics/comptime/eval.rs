@@ -1241,6 +1241,16 @@ impl Model<'_> {
         if let Some(value) = self.src_builtin(module, expression, &segments, args, &span)? {
             return Ok(value);
         }
+        let definition = self.resolve(module, &segments);
+        let generics = if let Ok(def) = &definition
+            && matches!(
+                self.modules[def.module].arena.items[def.item.0 as usize].kind,
+                ItemKind::Function(_)
+            ) {
+            self.call_const_arguments(module, expression, *def, state)?
+        } else {
+            BTreeMap::new()
+        };
         let arguments = self.value_list(module, args, state)?;
         if let Some(value) =
             self.embed_builtin(module, expression, &segments, &arguments, &span, state)?
@@ -1253,16 +1263,14 @@ impl Model<'_> {
         {
             return Ok(value);
         }
-        let def = self
-            .resolve(module, &segments)
-            .map_err(|_| self.fail(module, expression, "无法在编译期解析被调函数"))?;
+        let def =
+            definition.map_err(|_| self.fail(module, expression, "无法在编译期解析被调函数"))?;
         if !matches!(
             self.modules[def.module].arena.items[def.item.0 as usize].kind,
             ItemKind::Function(_)
         ) {
             return Err(self.fail(module, expression, "被调端点不是函数"));
         }
-        let generics = self.call_const_arguments(module, expression, def, state)?;
         self.check_const_array_arguments(def, &arguments, &generics, &span)?;
         self.interpret_function(def, &arguments, &generics, &span, state)
     }

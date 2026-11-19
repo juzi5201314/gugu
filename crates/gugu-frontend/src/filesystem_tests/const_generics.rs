@@ -1,6 +1,64 @@
 use super::{CompileRequest, Compiler, TargetName, printing::output};
 
 #[test]
+fn early_const_arguments_run_before_value_arguments() {
+    let actual: Vec<_> = output(
+        r#"
+use std.io.{println}
+fn combine[comptime N: int](value: int) int { N * 10 + value }
+const ANSWER: int = comptime source {
+    let n = 0
+    let value = combine::[{ n = 1
+        n
+    }]({ n = 2
+        n
+    })
+    std.syntax.parse_source(f"{value} * 10 + {n}")
+}
+fn main() { println(ANSWER) }
+"#,
+        &[],
+    )
+    .into_iter()
+    .flat_map(|(_, bytes)| bytes)
+    .collect();
+    assert_eq!(actual, b"122\n");
+}
+
+#[test]
+fn invalid_early_const_arguments_fail_before_value_arguments() {
+    for argument in ["-1", "true"] {
+        let source = format!(
+            r#"
+fn choose[comptime N: int](value: int) int {{ N }}
+const ANSWER: int = comptime source {{
+    let value = choose::[{argument}](panic("value argument evaluated first"))
+    std.syntax.parse_source(f"{{value}}")
+}}
+fn main() {{ _ = ANSWER }}
+"#
+        );
+        let compiled = Compiler::shared().compile(CompileRequest::single_file(
+            "main.gg",
+            source,
+            TargetName::X86_64Linux,
+        ));
+        assert!(!compiled.is_success());
+        assert!(
+            compiled
+                .diagnostics()
+                .items()
+                .iter()
+                .any(|diagnostic| diagnostic
+                    .message()
+                    .contains("comptime 泛型实参需要非负 int 常量")),
+            "{:?}",
+            compiled.diagnostics().items()
+        );
+    }
+}
+
+#[test]
 fn explicit_const_argument_assignments_update_live_caller_locals() {
     let actual: Vec<_> = output(
         r#"
