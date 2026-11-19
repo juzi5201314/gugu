@@ -12,6 +12,22 @@ const EXTENSIONS: [&str; 8] = [
 pub(crate) fn text(inst: &Inst) -> Result<String, Error> {
     verify::verify(inst)?;
     let form = get(inst.form)?;
+    if matches!(form.key, "orr.Q" | "bsl.Q" | "dup.Q.X") {
+        let args = inst
+            .operands
+            .iter()
+            .map(|operand| match operand {
+                Operand::Reg(super::reg::Reg {
+                    kind: super::reg::RegKind::Vector(id),
+                    ..
+                }) => format!("v{id}.{}", if form.key == "dup.Q.X" { "2d" } else { "16b" }),
+                Operand::Reg(reg) => reg.to_string(),
+                _ => unreachable!(),
+            })
+            .collect::<Vec<_>>()
+            .join(", ");
+        return Ok(format!("{} {args}", form.mnemonic));
+    }
     if form.mnemonic == "b.cond" {
         let Operand::Condition(c) = inst.operands[1] else {
             unreachable!()

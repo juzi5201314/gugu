@@ -234,11 +234,16 @@ pub(super) fn run_linked(
     args: &[u64],
     harness: &mut Harness,
 ) -> [u64; 2] {
+    let stubs = stubs();
+    let mut linked = callees.to_vec();
+    linked.extend(stubs.iter());
+    vm::execute_inner(fragment, &linked, args, Some(harness)).0
+}
+
+pub(super) fn stubs() -> [codegen::LeafFragment; 2] {
     let mut morestack = Fixture::new(&[], &[]).compile();
     let mut poll = morestack.clone();
     morestack.symbol = bindings().morestack_or_poll;
     poll.symbol = bindings().safepoint_slow;
-    let mut linked = callees.to_vec();
-    linked.extend([&morestack, &poll]);
-    vm::execute_inner(fragment, &linked, args, Some(harness)).0
+    [morestack, poll]
 }

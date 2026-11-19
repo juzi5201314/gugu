@@ -84,6 +84,8 @@ A64 显式逐帧与整栈扫描入口必须拒绝 scan_allowed=false 的站点�
 
 挂起调用中，已被权威逻辑根登记的值若另有传出栈实参副本，这些副本也必须进入同一来源种类的物理栈图；只登记原 spill 不足以保证被调方入口搬栈后的参数有效。
 
+A64 内部标量调用分别使用 x0–x7 与 v0–v7 传参，返回最多两个整数和八个 FP/SIMD 车道；溢出标量使用 8-byte 栈槽，V128 使用 16-byte 对齐栈槽。d8–d15 仅低 64 位 callee-saved，V128 跨调用不得依赖其高半部；morestack 保留完整 q0–q7，poll 可破坏所有 caller-saved FP。FP/SIMD 值不携带指针 provenance，不进入 xN 栈图掩码。该内部约定尚不声明 AAPCS64 外部调用或 Darwin variadic/system-stack 协议已接通。
+
 ### 新目标登记
 
 目标描述符的架构、操作系统、镜像格式、rt0 边界、CPU 基线与指针压缩能力是独立维度。实现可以预先表示 `aarch64`、`macos`、`macho64`、libSystem/dyld 启动边界和 `armv8.0-a` 基线；这些维度值不构成已登记目标，也不使其任意组合成为合法目标名。`armv8.0-a` 不接受任何 x86 CPU 特性；AArch64 指针压缩能力声明采用 48 位虚拟地址、最大 4 GiB cage 与 2 MiB 最小对齐，不表示已有对应后端或运行时。目标注册表及宿主目标选择仍只接受上述两行，`aarch64-linux` 与 `aarch64-macos` 均必须拒绝。

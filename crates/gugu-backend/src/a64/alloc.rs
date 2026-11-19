@@ -7,6 +7,7 @@ use crate::regalloc::{self, RegSet, RegisterFile};
 
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub struct Allocation {
+    pub types: Vec<crate::lir::body::Type>,
     pub values: Vec<regalloc::ValueAllocation>,
     pub slots: regalloc::slots::Slots,
     pub stats: regalloc::scan::Statistics,
@@ -63,11 +64,11 @@ pub(crate) fn allocate_roots(
                 site_positions.insert(source, position);
             }
             let mut fixed = if matches!(site.item, super::machine::Item::Poll { .. }) {
-                RegSet(
+                abi::CALLER_SAVED.union(RegSet(
                     abi::POOL
                         .iter()
                         .fold(0, |mask, reg| mask | (1_u64 << reg.0)),
-                )
+                ))
             } else if call {
                 abi::CALLER_SAVED
             } else {
@@ -76,7 +77,7 @@ pub(crate) fn allocate_roots(
             for (reg, access) in site.item.events() {
                 let MReg::Virtual(id) = reg else {
                     if let MReg::Physical(id) = reg {
-                        if id > 30 {
+                        if id == 31 || id > 63 {
                             return Err(super::error("invalid selected physical register"));
                         }
                         if !matches!(site.item, super::machine::Item::Copies(_)) {
@@ -137,7 +138,7 @@ pub(crate) fn allocate_roots(
             .into_iter()
             .enumerate()
             .map(|(index, v)| regalloc::Value {
-                class: abi::GPR,
+                class: abi::class(function.types[index]),
                 root: match body
                     .and_then(|body| body.values.get(index))
                     .and_then(|v| v.kind.provenance)
@@ -147,7 +148,11 @@ pub(crate) fn allocate_roots(
                     Some(_) => regalloc::RootClass::HeapPointer,
                     None => regalloc::RootClass::NonPointer,
                 },
-                allowed: RegSet(u64::MAX),
+                allowed: if matches!(function.types[index], crate::lir::body::Type::V128(_)) {
+                    RegSet(!(0xff_u64 << 40))
+                } else {
+                    RegSet(u64::MAX)
+                },
                 rematerializable: false,
                 range: (v.start, v.end),
                 forced: false,
@@ -159,6 +164,7 @@ pub(crate) fn allocate_roots(
     let mut scanned = regalloc::scan::scan(&input, registers).map_err(shared)?;
     let slots = regalloc::slots::assign(&mut scanned.values, registers).map_err(shared)?;
     Ok(Allocation {
+        types: function.types.clone(),
         values: scanned.values,
         slots,
         stats: scanned.stats,

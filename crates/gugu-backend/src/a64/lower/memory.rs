@@ -46,21 +46,40 @@ pub fn lower(
             let ty = if load { results.first() } else { args.get(1) }
                 .map(|v| body.values[v.index()].kind.ty)
                 .ok_or_else(|| crate::a64::error("missing memory value"))?;
-            let width = bits(ty)?;
+            let fp = crate::a64::abi::class(ty) == crate::a64::abi::FPR;
+            let width = if fp {
+                (ty.bytes().unwrap() * 8) as u32
+            } else {
+                bits(ty)?
+            };
             if load {
                 signature(body, args, results, &[Type::Ptr], &[ty])?;
             } else {
                 signature(body, args, results, &[Type::Ptr, ty], &[])?;
             }
-            let key = match (load, width) {
-                (true, 8) => "ldrb.W.Unsigned",
-                (true, 16) => "ldrh.W.Unsigned",
-                (true, 32) => "ldr.W.Unsigned",
-                (true, _) => "ldr.X.Unsigned",
-                (false, 8) => "strb.W.Unsigned",
-                (false, 16) => "strh.W.Unsigned",
-                (false, 32) => "str.W.Unsigned",
-                (false, _) => "str.X.Unsigned",
+            let fp_key;
+            let key = if fp {
+                fp_key = format!(
+                    "{}.{}.Unsigned",
+                    if load { "ldr" } else { "str" },
+                    match ty {
+                        Type::F32 => "S",
+                        Type::F64 => "D",
+                        _ => "Q",
+                    }
+                );
+                fp_key.as_str()
+            } else {
+                match (load, width) {
+                    (true, 8) => "ldrb.W.Unsigned",
+                    (true, 16) => "ldrh.W.Unsigned",
+                    (true, 32) => "ldr.W.Unsigned",
+                    (true, _) => "ldr.X.Unsigned",
+                    (false, 8) => "strb.W.Unsigned",
+                    (false, 16) => "strh.W.Unsigned",
+                    (false, 32) => "str.W.Unsigned",
+                    (false, _) => "str.X.Unsigned",
+                }
             };
             let id = if load { results[0].0 } else { args[1].0 };
             b.emit(
@@ -68,7 +87,13 @@ pub fn lower(
                 vec![
                     reg(
                         id,
-                        if width == 64 { Width::X } else { Width::W },
+                        if fp {
+                            crate::a64::fp::width(ty)
+                        } else if width == 64 {
+                            Width::X
+                        } else {
+                            Width::W
+                        },
                         if load { Access::Write } else { Access::Read },
                     ),
                     machine::MOperand::Address(MReg::Virtual(args[0].0)),
