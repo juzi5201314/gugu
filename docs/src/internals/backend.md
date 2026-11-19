@@ -389,7 +389,7 @@ C 导出入口的 `.pdata` 在常量符号 RVA 发布后追加，`UNWIND_INFO` �
 
 `gugu-backend::macho` 是不依赖目标注册的纯库 writer：输入架构（`Arm64` 页大小 16 KiB、`X86_64` 页大小 4 KiB）、节列表、dylib 导入、指针槽 fixup、本地符号与入口位置，输出确定性的已签名镜像。段固定为 `__PAGEZERO`（4 GiB，镜像基址 `0x1_0000_0000`）、`__TEXT`（映射文件头与 load command，只放代码与只读数据）、`__DATA_CONST`（加载后只读，`SG_READ_ONLY`）、`__DATA`（零填充节只能在此段并排在有文件内容的节之后）和 `__LINKEDIT`；没有节的数据段不写出。段的虚址与文件偏移按架构页对齐并首尾相接，节按请求顺序与对齐排列，节序号从 1 起按段顺序编号。
 
-load command 依次为各段、`LC_DYLD_CHAINED_FIXUPS`、`LC_DYLD_EXPORTS_TRIE`（空 trie）、`LC_SYMTAB`、`LC_DYSYMTAB`（只有本地符号）、`LC_LOAD_DYLINKER`、`LC_UUID`、`LC_BUILD_VERSION`（macOS 12.0）、`LC_MAIN`、每个 dylib 一条 `LC_LOAD_DYLIB` 和最后的 `LC_CODE_SIGNATURE`。导入使用 chained fixups：指针格式 `DYLD_CHAINED_PTR_64_OFFSET`、导入格式 `DYLD_CHAINED_IMPORT`，每个含 fixup 的段按页写链起点，链内 stride 为 4 字节且不跨页；rebase 槽保存目标相对镜像基址的 36 位偏移，bind 槽保存导入序号与 8 位 addend。fixup 槽必须是 `__DATA_CONST`/`__DATA` 内 8 字节对齐的有文件内容槽，重复槽、越界目标与缺失导入在写出前失败。`LC_UUID` 取签名前字节 BLAKE3 摘要的前 16 字节。
+load command 依次为各段、`LC_DYLD_CHAINED_FIXUPS`、`LC_DYLD_EXPORTS_TRIE`（空 trie）、`LC_SYMTAB`、`LC_DYSYMTAB`（只有本地符号）、`LC_LOAD_DYLINKER`、`LC_UUID`、`LC_BUILD_VERSION`（macOS 12.0）、`LC_MAIN`、每个 dylib 一条 `LC_LOAD_DYLIB` 和最后的 `LC_CODE_SIGNATURE`。导入使用 chained fixups：指针格式 `DYLD_CHAINED_PTR_64_OFFSET`、导入格式 `DYLD_CHAINED_IMPORT`，每个含 fixup 的段按页写链起点，链内 stride 为 4 字节且不跨页；rebase 槽保存目标相对镜像基址的 36 位偏移，bind 槽保存导入序号与 8 位 addend。dylib 序号 8 位且 `0xF0..=0xFF` 是 dyld 的负数特殊序号，因此镜像最多链接 239 个 dylib。fixup 槽必须是 `__DATA_CONST`/`__DATA` 内 8 字节对齐的有文件内容槽，重复槽、越界目标与缺失导入在写出前失败。`LC_UUID` 取签名前字节 BLAKE3 摘要的前 16 字节。
 
 签名是 linker-signed ad-hoc SuperBlob，只含一个 CodeDirectory（版本 `0x20400`、`CS_ADHOC | CS_LINKER_SIGNED`、SHA-256、4 KiB 页、无 special slot），`execSeg` 指向 `__TEXT` 并标记 main binary；页哈希覆盖 `[0, 签名偏移)`，因此签名最后写入。该模块尚未接入编译管线与目标注册。
 

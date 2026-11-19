@@ -11,6 +11,7 @@ const DYLD_CHAINED_PTR_64_OFFSET: u16 = 6;
 const DYLD_CHAINED_PTR_START_NONE: u16 = 0xffff;
 const STRIDE: u64 = 4;
 const TARGET_BITS: u32 = 36;
+const MAX_DYLIBS: usize = 0xef;
 
 pub(super) fn validate(request: &MachORequest) -> Result<(), String> {
     let mut seen = std::collections::BTreeSet::new();
@@ -51,8 +52,9 @@ pub(super) fn validate(request: &MachORequest) -> Result<(), String> {
             Fixup::Bind { .. } => {}
         }
     }
-    if dylibs(request).len() > 255 {
-        return Err("Mach-O image links more than 255 dylibs".to_owned());
+    // DYLD_CHAINED_IMPORT 的 8 位序号中 0xF0..=0xFF 是负数特殊序号。
+    if dylibs(request).len() > MAX_DYLIBS {
+        return Err(format!("Mach-O image links more than {MAX_DYLIBS} dylibs"));
     }
     Ok(())
 }

@@ -416,6 +416,25 @@ fn minimal_image_without_data_segments() {
 }
 
 #[test]
+fn dylib_ordinals_stay_below_special_range() {
+    let mut req = request(Arch::Arm64);
+    let with_dylibs = |req: &mut MachORequest, count: usize| {
+        req.imports = (1..count)
+            .map(|i| Import {
+                dylib: format!("/usr/lib/lib{i}.dylib"),
+                name: format!("_f{i}"),
+                weak: false,
+            })
+            .collect();
+        req.fixups.retain(|f| matches!(f, Fixup::Rebase { .. }));
+    };
+    with_dylibs(&mut req, 239);
+    link(&req).unwrap();
+    with_dylibs(&mut req, 240);
+    assert!(link(&req).unwrap_err().contains("more than 239 dylibs"));
+}
+
+#[test]
 fn invalid_requests_are_rejected() {
     let cases: [(&str, fn(&mut MachORequest)); 9] = [
         ("entry", |r| r.entry = at(2, 0)),
