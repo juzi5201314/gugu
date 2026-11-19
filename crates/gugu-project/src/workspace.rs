@@ -14,9 +14,20 @@ pub(crate) fn discover_workspace_members(
     root: &Path,
     workspace: &RawWorkspace,
 ) -> Result<Vec<PathBuf>, ProjectError> {
+    // exclude 必须在要求清单之前生效：target/、vendor/ 等被排除目录
+    // 不含 gugu.toml，不能在 member glob 展开时报错。
+    let mut excluded = BTreeSet::new();
+    for pattern in &workspace.exclude {
+        for directory in expand_exclude_pattern(root, pattern)? {
+            excluded.insert(fs::canonicalize(&directory).unwrap_or(directory));
+        }
+    }
     let mut members = BTreeSet::new();
     for pattern in &workspace.members {
         for directory in expand_directory_pattern(root, pattern)? {
+            if excluded.contains(&fs::canonicalize(&directory).unwrap_or(directory.clone())) {
+                continue;
+            }
             let manifest = directory.join("gugu.toml");
             if !manifest.is_file() {
                 return Err(ProjectError::WorkspaceMember {
@@ -32,17 +43,6 @@ pub(crate) fn discover_workspace_members(
             );
         }
     }
-    let mut excluded = BTreeSet::new();
-    for pattern in &workspace.exclude {
-        for directory in expand_exclude_pattern(root, pattern)? {
-            excluded.insert(fs::canonicalize(&directory).unwrap_or(directory));
-        }
-    }
-    members.retain(|manifest| {
-        manifest
-            .parent()
-            .is_some_and(|directory| !excluded.contains(directory))
-    });
     Ok(members.into_iter().collect())
 }
 
