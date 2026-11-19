@@ -158,7 +158,11 @@ impl State {
                 self.gpr = 8;
             }
         }
-        let grain = if darwin && !anonymous { 1 } else { 8 };
+        let grain = if darwin && !anonymous && !matches!(ty.kind, Kind::Aggregate { hfa: None }) {
+            1
+        } else {
+            8
+        };
         if bytes > crate::runtime::foreign_schema::BLOCKING_WORKER_STACK_BYTES - 4096 {
             return Err(error("C stack arguments exceed native worker stack budget"));
         }

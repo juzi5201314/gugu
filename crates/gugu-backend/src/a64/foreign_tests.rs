@@ -57,6 +57,22 @@ fn integer_pairs_do_not_split_and_linux_rounds_aligned_register_numbers() {
 }
 
 #[test]
+fn apple_non_hfa_stack_aggregates_use_eightbyte_slots_between_packed_scalars() {
+    let mut sig = signature(vec![integer(8, 8); 8]);
+    sig.arguments.extend([
+        aggregate(3, 1),
+        integer(1, 1),
+        aggregate(3, 1),
+        integer(1, 1),
+    ]);
+    let layout = classify(&sig, Platform::Darwin).unwrap();
+    for (argument, offset) in layout.arguments[8..].iter().zip([0, 8, 16, 24]) {
+        assert_eq!(argument.pieces[0].slot, Slot::Stack(offset));
+    }
+    assert_eq!(layout.stack_bytes, 32);
+}
+
+#[test]
 fn apple_packs_narrow_stack_arguments_and_extends_narrow_register_arguments() {
     let mut sig = signature(vec![integer(8, 8); 8]);
     sig.arguments

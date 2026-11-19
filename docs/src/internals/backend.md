@@ -712,7 +712,8 @@ runtime-ABI 的 `A64ForeignCallPacket` 保留完整的 176-byte `ForeignCallPack
 协议。shared prefix 的 reserved 字保持零。不登记新目标。
 
 `foreign::classify` 按 canonical C 类型分别分类 Linux 与 Darwin，不从旧的 SysV/Win64
-车道推断 HFA 或符号性。Darwin 不跳过奇数 GPR；固定窄栈参数紧凑排列，匿名参数
+车道推断 HFA 或符号性。Darwin 不跳过奇数 GPR；固定窄标量栈参数紧凑排列，非 HFA
+聚合的栈位置和占用尺寸仍向 8-byte 槽取整；匿名参数
 默认提升后全部使用 8-byte 栈槽；Linux 的 16-byte 对齐参数从偶数 GPR 开始。
 HFA 不能拆分到剩余 FP 寄存器与栈；大于 16-byte 的非 HFA 值通过 raw 副本间接传递。
 
