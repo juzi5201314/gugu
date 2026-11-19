@@ -22,6 +22,17 @@ impl Model<'_> {
             unreachable!()
         };
         let actuals = type_args.as_slice(&arena.generic_args);
+        let fixed = parameters
+            .iter()
+            .filter(|parameter| {
+                !matches!(parameter.kind, GenericParamKind::Type { pack: true, .. })
+            })
+            .count();
+        if !actuals.is_empty()
+            && (actuals.len() < fixed || (fixed == parameters.len() && actuals.len() != fixed))
+        {
+            return Err(self.fail(module, expression, "comptime 泛型实参数量不符"));
+        }
         let mut index = Some(0);
         let mut values = BTreeMap::new();
         for parameter in parameters {

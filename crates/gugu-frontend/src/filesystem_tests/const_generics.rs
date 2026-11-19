@@ -1,6 +1,47 @@
 use super::{CompileRequest, Compiler, TargetName, printing::output};
 
 #[test]
+fn source_macros_reject_surplus_explicit_generic_arguments() {
+    for call in [
+        "number::[2, 3]()",
+        "typed::[int, 2, bool]()",
+        "plain::[2]()",
+        "typed::[int]()",
+    ] {
+        let source = format!(
+            r#"
+fn number[comptime N: int]() int {{ N }}
+fn typed[T, comptime N: int]() int {{ N }}
+fn plain() int {{ 1 }}
+const ANSWER: int = comptime source {{
+    let value = {call}
+    std.syntax.parse_source(f"{{value}}")
+}}
+fn main() {{ _ = ANSWER }}
+"#
+        );
+        let compiled = Compiler::shared().compile(CompileRequest::single_file(
+            "main.gg",
+            source,
+            TargetName::X86_64Linux,
+        ));
+        assert!(
+            !compiled.is_success(),
+            "surplus generic arguments were accepted: {call}"
+        );
+        assert!(
+            compiled
+                .diagnostics()
+                .items()
+                .iter()
+                .any(|diagnostic| diagnostic.message().contains("comptime 泛型实参数量不符")),
+            "{:?}",
+            compiled.diagnostics().items()
+        );
+    }
+}
+
+#[test]
 fn early_array_arguments_match_explicit_lengths_during_type_formation() {
     for (parameter, argument, count) in [
         ("[T; N]", "[1, 2]", 3),
