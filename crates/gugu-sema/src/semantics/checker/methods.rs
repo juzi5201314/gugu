@@ -239,9 +239,6 @@ impl Checker<'_, '_> {
     fn type_head(&mut self, path: PathId, span: &Span) -> Option<Ty> {
         let parts = self.model.path(self.module, path);
         let prefix = &parts[..parts.len() - 1];
-        if prefix == ["Hasher"] {
-            return Some(self.model.hasher_type());
-        }
         if prefix == ["Self"] {
             return self
                 .model
