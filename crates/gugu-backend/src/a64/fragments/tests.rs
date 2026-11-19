@@ -210,6 +210,53 @@ fn darwin_net_dispatch_uses_the_darwin_socket_and_poller_abi() {
 }
 
 #[test]
+fn darwin_resolver_symbol_returns_libsystem_stub_addresses() {
+    use crate::{NativeImport, macho::LIB_SYSTEM};
+
+    let names = ["getaddrinfo", "freeaddrinfo"];
+    assert_eq!(
+        darwin_resolver_imports(),
+        names.map(|name| NativeImport::function(LIB_SYSTEM, name))
+    );
+    let fragment = darwin_resolver_symbol();
+    let code = instructions(&fragment);
+    let x0 = reg(Reg::x(0));
+    assert_eq!(fragment.relocations.len(), 2 * names.len());
+    for (op, name) in names.into_iter().enumerate() {
+        let start = op as u32 * 20;
+        assert_eq!(form(at(&code, start)), "subs.X.imm");
+        assert_eq!(
+            at(&code, start).operands,
+            [reg(Reg::zr(Width::X)), x0.clone(), add_imm(op)]
+        );
+        assert_eq!(form(at(&code, start + 4)), "b.cond");
+        assert_eq!(at(&code, start + 4).operands[1], condition(1));
+        assert_eq!(target(&code, start + 4), start + 20);
+        assert_eq!(form(at(&code, start + 8)), "adrp");
+        assert_eq!(at(&code, start + 8).operands[0], x0);
+        assert_eq!(form(at(&code, start + 12)), "add.X.imm");
+        assert_eq!(
+            at(&code, start + 12).operands,
+            [x0.clone(), x0.clone(), add_imm(0)]
+        );
+        assert_eq!(form(at(&code, start + 16)), "ret");
+        assert_eq!(at(&code, start + 16).operands, [reg(LR)]);
+        for (i, kind) in [RelocKind::AdrpPage21, RelocKind::AddLo12]
+            .into_iter()
+            .enumerate()
+        {
+            let site = &fragment.relocations[2 * op + i];
+            assert_eq!(site.offset, start + 8 + i as u32 * 4);
+            assert_eq!(site.relocation.kind, kind);
+            assert_eq!(site.relocation.target, format!("__gugu_darwin_c_{name}"));
+            assert_eq!(site.relocation.addend, 0);
+        }
+    }
+    assert_eq!(code.len(), 11);
+    assert_eq!(form(at(&code, 40)), "brk");
+}
+
+#[test]
 fn darwin_fd_dispatch_uses_native_packet_and_arm64_libsystem_abi() {
     use crate::{NativeImport, macho::LIB_SYSTEM, runtime::foreign_schema::*};
 
