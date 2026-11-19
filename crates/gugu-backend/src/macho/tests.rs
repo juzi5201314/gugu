@@ -120,6 +120,62 @@ fn native_imports_use_dyld_slots_on_both_architectures() {
     }
 }
 
+#[test]
+fn arm64_import_stubs_resolve_page_and_pageoff_to_each_bind_slot() {
+    use crate::{NativeImport, a64::macho as a64_macho};
+
+    let mut request = request(Arch::Arm64);
+    request.imports[0].name = "_abort".into();
+    request.sections.push(Section {
+        segment: Segment::DataConst,
+        name: "__padding".into(),
+        align: 8,
+        content: SectionContent::Data(vec![0; 0x1008]),
+    });
+    let slots = append_native_imports(
+        &mut request,
+        &[
+            NativeImport::function(LIB_SYSTEM, "write"),
+            NativeImport::data(LIB_SYSTEM, "environ"),
+            NativeImport::function(LIB_SYSTEM, "exit"),
+        ],
+    )
+    .unwrap();
+    let stubs = a64_macho::append_import_stubs(&mut request, &slots).unwrap();
+    let names = ["__gugu_darwin_c_exit", "__gugu_darwin_c_write"];
+    assert_eq!(stubs.keys().map(String::as_str).collect::<Vec<_>>(), names);
+    let layout = layout(&request).unwrap();
+    let file = link(&request).unwrap().bytes;
+    for (index, (name, c_name)) in names.into_iter().zip(["exit", "write"]).enumerate() {
+        assert_eq!(a64_macho::import_stub_symbol(c_name), name);
+        let stub = stubs[name];
+        assert_eq!(stub.offset, index as u64 * 12);
+        assert_eq!(request.sections[stub.section].name, "__stubs");
+        assert!(request.symbols.contains(&Symbol {
+            name: name.into(),
+            at: stub
+        }));
+        let code = layout.sections[stub.section];
+        let off = (code.fileoff + stub.offset) as usize;
+        let adrp = u32_at(&file, off);
+        let ldr = u32_at(&file, off + 4);
+        assert_eq!(adrp & 0x9f00_001f, 0x9000_0010);
+        assert_eq!(ldr & 0xffc0_03ff, 0xf940_0210);
+        assert_eq!(u32_at(&file, off + 8), 0xd61f_0200);
+        let pages = ((((adrp >> 5) & 0x7ffff) << 2) | ((adrp >> 29) & 3)) as i32;
+        let target_page = ((code.addr + stub.offset) & !0xfff)
+            .checked_add_signed(i64::from((pages << 11) >> 11) * 4096)
+            .unwrap();
+        let slot = slots[c_name].at;
+        assert_eq!(
+            target_page + u64::from((ldr >> 10) & 0xfff) * 8,
+            layout.address(slot).unwrap()
+        );
+        let got = layout.sections[slot.section];
+        assert_eq!(u64_at(&file, (got.fileoff + slot.offset) as usize) >> 63, 1);
+    }
+}
+
 fn u32_at(bytes: &[u8], at: usize) -> u32 {
     u32::from_le_bytes(bytes[at..at + 4].try_into().unwrap())
 }
