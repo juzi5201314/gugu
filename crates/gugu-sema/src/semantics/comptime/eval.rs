@@ -164,6 +164,7 @@ pub(super) struct EvalState<'a> {
     frame_bases: Vec<usize>,
     const_arguments: Vec<BTreeMap<String, Option<ConstantValue>>>,
     runtime_parameters: Vec<Vec<usize>>,
+    masked_runtime_base: Option<usize>,
     /// SourceExpand 域的插入上下文与 query 访问；其它域为空。
     expand: Option<ExpandState<'a>>,
     /// `embed_file` 的编译输入根；无文件系统边界的输入为空。
@@ -192,6 +193,7 @@ impl<'a> EvalState<'a> {
             frame_bases: Vec::new(),
             const_arguments: Vec::new(),
             runtime_parameters: Vec::new(),
+            masked_runtime_base: None,
             expand: None,
             embed: None,
         }
@@ -266,18 +268,7 @@ impl<'a> EvalState<'a> {
         name: &str,
         span: &crate::Span,
     ) -> Result<Option<ConstantValue>, Diagnostic> {
-        let base = self.frame_bases.last().copied().unwrap_or(0);
-        let slot = self.frames[base..]
-            .iter()
-            .enumerate()
-            .rev()
-            .find_map(|(frame, values)| {
-                values
-                    .iter()
-                    .rposition(|(bound, _)| bound == name)
-                    .map(|slot| (base + frame, slot))
-            });
-        let Some((frame, slot)) = slot else {
+        let Some((frame, slot)) = self.slot(name) else {
             if self
                 .const_arguments
                 .last()
@@ -295,13 +286,30 @@ impl<'a> EvalState<'a> {
     }
 
     fn slot_mut(&mut self, name: &str) -> Option<&mut ConstantValue> {
+        let (frame, slot) = self.slot(name)?;
+        Some(&mut self.frames[frame][slot].1)
+    }
+
+    fn slot(&self, name: &str) -> Option<(usize, usize)> {
         let base = self.frame_bases.last().copied().unwrap_or(0);
+        let excluded = self
+            .runtime_parameters
+            .last()
+            .filter(|_| self.masked_runtime_base == Some(base));
         self.frames[base..]
-            .iter_mut()
+            .iter()
+            .enumerate()
             .rev()
-            .flat_map(|frame| frame.iter_mut().rev())
-            .find(|(bound, _)| bound == name)
-            .map(|(_, value)| value)
+            .find_map(|(frame, values)| {
+                values
+                    .iter()
+                    .enumerate()
+                    .rfind(|(slot, (bound, _))| {
+                        bound == name
+                            && (frame != 0 || !excluded.is_some_and(|slots| slots.contains(slot)))
+                    })
+                    .map(|(slot, _)| (base + frame, slot))
+            })
     }
 
     fn with_scope<T, E>(&mut self, run: impl FnOnce(&mut Self) -> Result<T, E>) -> Result<T, E> {

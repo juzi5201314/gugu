@@ -1,6 +1,82 @@
 use super::*;
 use crate::ast::{GenericArg, GenericParamKind, TyKind};
 
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn literal_const_arguments_do_not_allocate_caller_environment_copies() {
+        let sources = crate::SourceMap::new(vec![crate::source::SourceSnapshot::from_str("main.gg", "fn number[comptime N: int]() int { N }\nfn main() { _ = comptime source { let payload = \"abcdefgh\"\nlet value = number::[3]()\nlet invalid = number::[true]()\nlet read = number::[payload]()\nstd.syntax.parse_source(\"3\") } }").unwrap()]).unwrap();
+        let cfg = crate::cfg::CfgContext::target_only(crate::TargetName::X86_64Linux);
+        let modules =
+            crate::modules::parse_modules(&sources, "", &cfg, &Default::default()).unwrap();
+        let names = crate::names::analyze_with_prefix(
+            "tests/const-arguments@1",
+            &Default::default(),
+            &modules,
+            None,
+        )
+        .unwrap();
+        let paths = Default::default();
+        let model = Model::new(&modules, &names, &paths).unwrap();
+        let arguments: Vec<_> = modules[0]
+            .arena
+            .exprs
+            .iter()
+            .enumerate()
+            .filter_map(|(index, expression)| {
+                let ExprKind::Call { type_args, .. } = expression.kind else {
+                    return None;
+                };
+                Some((
+                    ExprId(index as u32),
+                    *type_args.as_slice(&modules[0].arena.generic_args).first()?,
+                ))
+            })
+            .collect();
+        let (expression, actual) = arguments[0];
+        let mut state = EvalState::new(
+            Domain::SOURCE_EXPAND,
+            EvalProfile {
+                heap_bytes: 16,
+                ..Default::default()
+            },
+        );
+        state.frames = Vec::with_capacity(1);
+        let span = &modules[0].arena.exprs[expression.0 as usize].span;
+        state.enter("caller", span).unwrap();
+        state.alloc(16, span).unwrap();
+        state.bind(
+            "payload".to_owned(),
+            ConstantValue::String("abcdefgh".to_owned()),
+        );
+        assert_eq!(
+            model
+                .explicit_const_argument(0, expression, actual, &mut state)
+                .unwrap(),
+            ConstantValue::Int(3)
+        );
+        assert_eq!(state.heap, 16);
+        assert_eq!(
+            state.frames.capacity(),
+            1,
+            "literal arguments must not allocate cloned caller frames outside the heap ledger"
+        );
+        assert_eq!(state.masked_runtime_base, None);
+        for ((expression, actual), code) in arguments[1..].iter().zip([
+            DiagnosticCode::InvalidExpression,
+            DiagnosticCode::ComptimeBudget,
+        ]) {
+            let error = model
+                .explicit_const_argument(0, *expression, *actual, &mut state)
+                .expect_err("invalid arguments must restore the caller mask");
+            assert_eq!(error.diagnostic(span).code(), code);
+            assert_eq!(state.masked_runtime_base, None);
+        }
+    }
+}
+
 impl Model<'_> {
     pub(super) fn call_const_arguments(
         &self,
@@ -61,27 +137,8 @@ impl Model<'_> {
         argument: GenericArg,
         state: &mut EvalState,
     ) -> EvalResult<ConstantValue> {
-        let base = state.frame_bases.last().copied().unwrap_or(0);
-        let excluded = state.runtime_parameters.last();
-        let bindings: Vec<_> = state.frames[base..]
-            .iter()
-            .enumerate()
-            .flat_map(|(frame, values)| {
-                values
-                    .iter()
-                    .enumerate()
-                    .filter(move |(slot, _)| {
-                        frame != 0 || !excluded.is_some_and(|slots| slots.contains(slot))
-                    })
-                    .map(|(_, binding)| binding.clone())
-            })
-            .collect();
-        state.frame_bases.push(state.frames.len());
-        state.frames.push(Vec::new());
-        state.runtime_parameters.push(Vec::new());
-        for (name, value) in bindings {
-            state.bind(name, value);
-        }
+        let base = state.frame_bases.last().copied();
+        let previous = std::mem::replace(&mut state.masked_runtime_base, base);
         let result = (|| {
             let value = match argument {
                 GenericArg::Expr(expr) => self.value(module, expr, state)?,
@@ -100,9 +157,7 @@ impl Model<'_> {
                 Err(self.fail(module, expression, "comptime 泛型实参需要非负 int 常量"))
             }
         })();
-        state.frames.pop();
-        state.frame_bases.pop();
-        state.runtime_parameters.pop();
+        state.masked_runtime_base = previous;
         result
     }
 }
