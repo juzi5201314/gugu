@@ -173,8 +173,9 @@ fn native(machine: &mut Machine) {
     for (index, &r) in registers.iter().enumerate() {
         assert_eq!(machine.get(r), 100 + index as u64);
     }
-    for index in 0..if windows { 4 } else { 8 } {
-        assert_eq!(machine.floats[index], 0x3ff0000000000000 + index as u64);
+    let float_registers = if windows { 4 } else { 8 };
+    for (index, &value) in machine.floats[..float_registers].iter().enumerate() {
+        assert_eq!(value, 0x3ff0000000000000 + index as u64);
     }
     let bytes = machine.word(PACKET + packet::FOREIGN_PACKET_STACK_BYTES as u64);
     for offset in (0..bytes).step_by(8) {

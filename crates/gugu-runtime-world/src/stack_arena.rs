@@ -61,9 +61,9 @@ impl Span {
             (1_u64 << words) - 1
         };
         self.occupied = [u64::MAX; SLOT_WORDS];
-        for word in 0..words {
+        for (word, occupied) in self.occupied[..words].iter_mut().enumerate() {
             let available = (count - word * 64).min(64);
-            self.occupied[word] = if available == 64 {
+            *occupied = if available == 64 {
                 0
             } else {
                 u64::MAX << available
