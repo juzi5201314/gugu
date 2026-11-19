@@ -11,38 +11,54 @@
 //!
 //! 该二进制不进默认测试套件，供 `cargo bench --bench x64_frame` 与手工验证使用。
 
+#[cfg(target_arch = "x86_64")]
 #[path = "support/vm.rs"]
 mod vm;
 
+#[cfg(target_arch = "x86_64")]
 use gugu_compiler::{CompileRequest, Compiler, EMBEDDED_ARTIFACTS, TargetName, X64Fragment};
+#[cfg(target_arch = "x86_64")]
 use std::collections::BTreeMap;
 
 /// 代码区大小：所有片段、捕获 stub 与 `ret` stub 都放得下。
+#[cfg(target_arch = "x86_64")]
 const CODE_BYTES: usize = 1 << 20;
 /// 数据区大小：栈上限字、轮询槽与捕获槽都在第一页内。
+#[cfg(target_arch = "x86_64")]
 const DATA_BYTES: usize = 1 << 16;
 /// `ret`。
+#[cfg(target_arch = "x86_64")]
 const RET: u8 = 0xC3;
 /// 每个 stub 占用的字节数。
+#[cfg(target_arch = "x86_64")]
 const STUB_BYTES: usize = 16;
 /// `mov [rip+disp32], rdi`：`rdi` 是 C ABI 的第一个参数寄存器。
+#[cfg(target_arch = "x86_64")]
 const CAPTURE_PREFIX: [u8; 3] = [0x48, 0x89, 0x3D];
 /// `inc qword [rip+disp32]`。
+#[cfg(target_arch = "x86_64")]
 const INC_RIP_QWORD: [u8; 3] = [0x48, 0xFF, 0x05];
 /// `r14` 在状态里的下标：内部 ABI 保留的运行时上下文寄存器。
+#[cfg(target_arch = "x86_64")]
 const R14: usize = 14;
 /// `r15` 在状态里的下标：内部 ABI 保留的调度器轮询寄存器。
+#[cfg(target_arch = "x86_64")]
 const R15: usize = 15;
 /// 轮询槽在数据区内的偏移。
+#[cfg(target_arch = "x86_64")]
 const POLL_OFFSET: usize = 16;
 /// 捕获槽在数据区内的偏移。
+#[cfg(target_arch = "x86_64")]
 const CAPTURE_OFFSET: usize = 24;
 /// 捕获 stub 命中计数在数据区内的偏移。
+#[cfg(target_arch = "x86_64")]
 const COUNT_OFFSET: usize = 32;
 /// 普通 stub 命中计数在数据区内的偏移。
+#[cfg(target_arch = "x86_64")]
 const PLAIN_COUNT_OFFSET: usize = 40;
 
 /// 一个执行场景：只改 `report` 的实参表达式，并在需要时追加一个纯算术循环。
+#[cfg(target_arch = "x86_64")]
 struct Scenario {
     /// 场景名。
     name: &'static str,
@@ -58,6 +74,10 @@ struct Scenario {
     answer: Option<i64>,
 }
 
+#[cfg(not(target_arch = "x86_64"))]
+fn main() {}
+
+#[cfg(target_arch = "x86_64")]
 fn main() {
     let target = if cfg!(target_os = "windows") {
         TargetName::X86_64Windows
@@ -130,6 +150,7 @@ fn main() {
 }
 
 /// 编译、映射并执行一个场景。
+#[cfg(target_arch = "x86_64")]
 fn run(scenario: &Scenario, target: TargetName) -> Result<(), String> {
     let generated = program(scenario);
     let source = scenario.source.unwrap_or(generated.as_str());
@@ -237,6 +258,7 @@ fn run(scenario: &Scenario, target: TargetName) -> Result<(), String> {
 }
 
 /// 九个参数再加一个中间值，叶分类删不掉后来长出的帧，入口必须做栈检查。
+#[cfg(target_arch = "x86_64")]
 const WIDE_SOURCE: &str = r#"#[ffi(leaf(stack = 0))]
 extern "C" fn report(value: int)
 
@@ -251,6 +273,7 @@ fn main() {
 "#;
 
 /// 场景程序：`report` 是宿主捕获用的外部 C 函数，其余都是受管代码。
+#[cfg(target_arch = "x86_64")]
 fn program(scenario: &Scenario) -> String {
     const TEMPLATE: &str = r#"#[ffi(leaf(stack = 0))]
 extern "C" fn report(value: int)
@@ -295,6 +318,7 @@ fn main() {
 }
 
 /// 宿主参照实现：与场景程序同一套算式，独立用 Rust 再算一遍。
+#[cfg(target_arch = "x86_64")]
 fn reference(scenario: &Scenario) -> i64 {
     fn mix(a: i64, b: i64, c: i64, d: i64, e: i64, f: i64) -> i64 {
         let s0 = a + b;
@@ -346,6 +370,7 @@ fn reference(scenario: &Scenario) -> i64 {
 }
 
 /// 调试用：`X64_FRAME_DUMP=<目录>` 时把每个片段的机器字节与重定位写成文件。
+#[cfg(target_arch = "x86_64")]
 fn dump_fragments(fragments: &[X64Fragment], base: &BTreeMap<String, usize>, scenario: &str) {
     let Some(directory) = std::env::var_os("X64_FRAME_DUMP") else {
         return;
@@ -363,6 +388,7 @@ fn dump_fragments(fragments: &[X64Fragment], base: &BTreeMap<String, usize>, sce
 }
 
 /// 按符号顺序连续排布片段，返回符号到偏移的映射与片段字节总数。
+#[cfg(target_arch = "x86_64")]
 fn layout(fragments: &[X64Fragment]) -> Result<(BTreeMap<String, usize>, usize), String> {
     let mut base = BTreeMap::new();
     let mut at = 0_usize;
@@ -382,6 +408,7 @@ fn layout(fragments: &[X64Fragment]) -> Result<(BTreeMap<String, usize>, usize),
 }
 
 /// 把片段逐个写进代码映射。
+#[cfg(target_arch = "x86_64")]
 fn write_code(code: &vm::Mapping, fragments: &[X64Fragment], base: &BTreeMap<String, usize>) {
     for fragment in fragments {
         let Some(offset) = base.get(&fragment.symbol) else {
@@ -403,6 +430,7 @@ fn write_code(code: &vm::Mapping, fragments: &[X64Fragment], base: &BTreeMap<Str
 ///
 /// # Safety
 /// `capture` 与 `plain` 必须指向预留代码区内未使用、互不重叠的 [`STUB_BYTES`] 字节。
+#[cfg(target_arch = "x86_64")]
 unsafe fn write_stubs(
     capture: *mut u8,
     slot: *mut u8,
@@ -432,6 +460,7 @@ unsafe fn write_stubs(
 }
 
 /// 修正全部重定位：内部符号解析到映射内地址，`report` 落到捕获 stub，其余落到 `ret`。
+#[cfg(target_arch = "x86_64")]
 fn patch(
     code: &vm::Mapping,
     fragments: &[X64Fragment],

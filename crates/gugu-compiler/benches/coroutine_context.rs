@@ -1,10 +1,14 @@
 //! 手工machine-intrinsic smoke：运行compiler实际产出的代码，往返独立arena stack。
 //! 宿主VM与裸汇编仅存在于此验收二进制；compiler保持forbid(unsafe_code)。
 
+#[cfg(target_arch = "x86_64")]
 use gugu_compiler::{CompileRequest, Compiler, CoroutineContext, EMBEDDED_ARTIFACTS, TargetName};
+#[cfg(target_arch = "x86_64")]
 use std::arch::naked_asm;
+#[cfg(target_arch = "x86_64")]
 use std::mem::offset_of;
 
+#[cfg(target_arch = "x86_64")]
 #[repr(C)]
 struct State {
     system: CoroutineContext,
@@ -24,6 +28,7 @@ struct State {
 ///
 /// # Safety
 /// code必须是当前契约的可执行片段，save/resume必须有效且地址稳定；目标栈拥有足够空间且不展开。
+#[cfg(target_arch = "x86_64")]
 #[unsafe(naked)]
 unsafe extern "sysv64" fn enter(
     _code: usize,
@@ -52,6 +57,7 @@ unsafe extern "sysv64" fn enter(
 ///
 /// # Safety
 /// r12必须指向独占State，rsp必须位于已提交的独立stack，State中的code/context均已校验。
+#[cfg(target_arch = "x86_64")]
 #[unsafe(naked)]
 unsafe extern "sysv64" fn child_entry() {
     naked_asm!(
@@ -84,9 +90,14 @@ unsafe extern "sysv64" fn child_entry() {
 }
 
 /// 宿主 VM 映射与裸适配器；与 x64_encoding bench 共用同一份实现。
+#[cfg(target_arch = "x86_64")]
 #[path = "support/vm.rs"]
 mod vm;
 
+#[cfg(not(target_arch = "x86_64"))]
+fn main() {}
+
+#[cfg(target_arch = "x86_64")]
 fn main() {
     let target = if cfg!(target_os = "windows") {
         TargetName::X86_64Windows
