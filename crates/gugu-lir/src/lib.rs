@@ -37,7 +37,7 @@ use serde::{Deserialize, Serialize};
 use std::sync::Arc;
 
 /// LIR query 与 world 的 schema。22：结构化 IEEE 比较。
-pub const SCHEMA: u32 = 22;
+pub const SCHEMA: u32 = 23;
 
 #[derive(Clone, Debug, Eq, PartialEq, Serialize, Deserialize)]
 struct World {

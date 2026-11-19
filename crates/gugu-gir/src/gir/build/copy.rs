@@ -11,6 +11,13 @@ pub(super) enum PlaceInit {
 }
 
 impl Builder<'_> {
+    pub(super) fn initialize_value(&mut self, dest: Place, src: Place, ty: TypeId) {
+        self.copy_value_inner(dest, src, ty, false);
+        if src.is_local() && self.locals[src.local.index()].kind == LocalKind::Temporary {
+            self.release_resources(src, ty);
+        }
+    }
+
     pub(super) fn copy_value(&mut self, dest: Place, src: Place, ty: TypeId) {
         self.copy_value_inner(dest, src, ty, true);
     }
@@ -194,7 +201,9 @@ impl Builder<'_> {
             return;
         }
         if class.is_pure_resource() {
-            if self.is_written(place) {
+            if self.is_written(place)
+                || place.is_local() && self.locals[place.local.index()].element_initialization
+            {
                 self.resource_action(ResourceActionKind::ReleaseLease, place, ty);
             }
             return;
@@ -236,7 +245,9 @@ impl Builder<'_> {
             }
             return;
         }
-        if self.is_written(place) {
+        if self.is_written(place)
+            || place.is_local() && self.locals[place.local.index()].element_initialization
+        {
             self.resource_action(ResourceActionKind::ReleaseLease, place, ty);
         }
     }

@@ -15,7 +15,7 @@ pub fn lower(
     b: &mut Builder<'_>,
 ) -> Result<(), Error> {
     match op {
-        Op::StackAddr(slot) => {
+        Op::StackAddr(slot) | Op::RootInitAddr(slot) => {
             signature(body, args, results, &[], &[Type::Ptr])?;
             if slot.index() >= body.stack_slots.len() {
                 return Err(crate::a64::error("unknown stack slot"));
@@ -23,6 +23,7 @@ pub fn lower(
             b.push(Item::StackAddr {
                 dest: results[0].0,
                 slot: slot.0,
+                root_init: matches!(op, Op::RootInitAddr(_)),
             });
             Ok(())
         }

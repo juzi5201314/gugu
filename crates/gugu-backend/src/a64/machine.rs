@@ -44,6 +44,7 @@ pub enum Item {
     StackAddr {
         dest: u32,
         slot: u32,
+        root_init: bool,
     },
     Incoming {
         dest: u32,

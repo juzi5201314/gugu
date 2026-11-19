@@ -1,5 +1,6 @@
 //! 执行真实文件/资源函数的 LIR；地址是 Vec 下标，外部操作通过显式钩子注入。
 mod a64_binding;
+mod array_init;
 mod collections;
 mod const_generics;
 mod copy;
@@ -15,6 +16,7 @@ mod platform;
 mod printing;
 mod process;
 mod resource;
+mod root_trace;
 mod signal;
 mod strings;
 mod trace;
@@ -219,7 +221,24 @@ fn interpret_bounded(
     call: &mut CallHook<'_>,
     block_budget: usize,
 ) -> Vec<u64> {
+    interpret_traced(body, arguments, memory, call, block_budget, None)
+}
+
+fn word_at(memory: &[u8], at: u64) -> u64 {
+    u64::from_le_bytes(memory[at as usize..at as usize + 8].try_into().unwrap())
+}
+
+fn interpret_traced(
+    body: &Body,
+    arguments: &[u64],
+    memory: &mut Vec<u8>,
+    call: &mut CallHook<'_>,
+    block_budget: usize,
+    frames: Option<root_trace::Frames>,
+) -> Vec<u64> {
     let frame_base = memory.len();
+    let mut trace = frames.map(|frames| root_trace::RootTrace::new(body, frames));
+    let mut pending_panic = None;
     let slots: Vec<_> = body
         .stack_slots
         .iter()
@@ -229,6 +248,24 @@ fn interpret_bounded(
             base
         })
         .collect();
+    let root_bases: Vec<_> = body
+        .stack_slots
+        .iter()
+        .enumerate()
+        .map(|(index, slot)| {
+            if body
+                .instructions
+                .iter()
+                .any(|inst| matches!(inst.op, Op::RootInitAddr(id) if id.index() == index))
+            {
+                let base = memory.len() as u64;
+                memory.resize(memory.len() + slot.roots.len(), 0);
+                Some(base)
+            } else {
+                None
+            }
+        })
+        .collect();
     let mut values = vec![0u64; body.values.len()];
     let mut block = body.entry;
     assert_eq!(body.params(block).len() - 1, arguments.len());
@@ -236,7 +273,22 @@ fn interpret_bounded(
         values[parameter.value.index()] = *value;
     }
     for _ in 0..block_budget {
-        for instruction in &body.instructions[range(&body.blocks[block.index()].instructions)] {
+        for (position, instruction) in body.instructions
+            [range(&body.blocks[block.index()].instructions)]
+        .iter()
+        .enumerate()
+        {
+            if let Some(trace) = &mut trace {
+                trace.at(
+                    body,
+                    block,
+                    position as u32,
+                    &slots,
+                    &values,
+                    memory,
+                    &root_bases,
+                );
+            }
             let operands = body.args(&instruction.arguments);
             let args: Vec<_> = operands.iter().map(|value| values[value.index()]).collect();
             let value = match instruction.op {
@@ -298,6 +350,7 @@ fn interpret_bounded(
                     continue;
                 }
                 Op::StackAddr(slot) => slots[slot.index()],
+                Op::RootInitAddr(slot) => root_bases[slot.index()].unwrap(),
                 Op::PtrOffset => args[0].wrapping_add(args[1]),
                 Op::Convert(crate::lir::body::Conversion::SignExtend) => {
                     let bits = body.values[operands[0].index()].kind.ty.bytes().unwrap() * 8;
@@ -424,12 +477,24 @@ fn interpret_bounded(
                 value
             };
         }
+        if let Some(trace) = &mut trace {
+            trace.at(
+                body,
+                block,
+                body.blocks[block.index()].instructions.len() as u32,
+                &slots,
+                &values,
+                memory,
+                &root_bases,
+            );
+        }
         let edge = match &body.blocks[block.index()].terminator {
             Terminator::Invoke {
                 call: invoked,
                 arguments,
                 results,
                 normal,
+                unwind,
                 ..
             } => {
                 let args: Vec<_> = body
@@ -437,10 +502,23 @@ fn interpret_bounded(
                     .iter()
                     .map(|value| values[value.index()])
                     .collect();
-                let returned = call(Boundary::Call(&invoked.target), &args, memory);
-                assert_eq!(returned.len(), results.len());
-                values[range(results)].copy_from_slice(&returned);
-                *normal
+                let saved = memory.len();
+                let returned = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+                    call(Boundary::Call(&invoked.target), &args, memory)
+                }));
+                match returned {
+                    Ok(returned) => {
+                        assert_eq!(returned.len(), results.len());
+                        values[range(results)].copy_from_slice(&returned);
+                        *normal
+                    }
+                    Err(panic) if panic.is::<root_trace::InterpretedPanic>() => {
+                        memory.truncate(saved);
+                        pending_panic = Some(panic);
+                        *unwind
+                    }
+                    Err(panic) => std::panic::resume_unwind(panic),
+                }
             }
             Terminator::Jump(edge) => *edge,
             Terminator::Branch { condition, yes, no } => {
@@ -468,6 +546,10 @@ fn interpret_bounded(
                     .collect();
                 memory.truncate(frame_base);
                 return returned;
+            }
+            Terminator::ResumePanic { .. } => {
+                memory.truncate(frame_base);
+                std::panic::resume_unwind(pending_panic.expect("panic 沿真实 unwind 边传播"));
             }
             other => panic!("纯函数解释器遇到未登记终结符：{}: {other:?}", body.name),
         };

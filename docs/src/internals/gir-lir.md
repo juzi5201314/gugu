@@ -204,6 +204,18 @@ HIR同样提供保持源码臂优先级的 pattern matrix。GIR把它编译成�
 
 内部 `MoveInternal` 消耗具体来源槽，复制传播不得把它替换成原始值槽，否则 Forget 会清空错误的资源实例并泄漏租约。`ArrayToSlice` 对数组引用取引用值本身作为 data，不能再次取保存引用的临时槽地址；长度由数组类型确定。
 
+数组初始化计划使用原绑定的正常栈或堆存储，不引入暂存数组或出口复制。存储建立时全零填充，
+栈根字节一次性置位；根扫描跳过零字，资源释放把零控制字视为无动作。只有正常范围循环出口
+将数组提升为 `PlaceInit::Whole`，后续覆盖按普通规则释放旧租约。计划 store 禁止旧目的租约释放，
+完成复制后立即结束 RHS 自有临时租约；调用结果只在正常后继记为已写入，不能因未记录而漏释放。
+
+栈根表是 enum 变体的并集，初始全零可追踪不表示以后能无条件追踪标量载荷。
+成功元素写入后，LIR 用 `RootInitAddr(slot)` 取得帧内逐根字节基址，计算
+`index * element_root_count + field_root_index`，再按当前活动变体复位和置位。
+发射量取决于元素形状，与外层数组长度无关；没有按下标枚举的选择 CFG。
+动态字节写入不产生静态 must 初始化证明，栈图始终保留相应 gate。堆对象继续按类型描述符
+中的 repeat/switch 程序追踪实际变体。RHS 临时值保持根直到存储完成，panic 使用既有零槽清理。
+
 place 与 value 消费共享一条表达式构造路径：字段/下标/借用消费者只构造投影，`Dereference` 调整继续延长原 place，不提前把被引用聚合复制到临时槽。真正的 value 消费才物化最终投影，并执行该值自己的传递动作。由字段取地址产生的引用因此仍指向原槽；仅为了形成 place 不应触发 `large_copy` 或 COW/resource 复制。
 
 `std.text.Bytes` 与 `std.io.ByteBuffer` 走上面的 `CowSnapshot`。复制封存 backing，之后修改的一侧分离，旧快照字节不变。runtime 参照模型按 Unicode 18.0.0 判定 UTF-8/UTF-16、lossy U+FFFD、负索引、标量边界、默认大小写、完整 case fold、NFC/NFD/NFKC/NFKD，以及 grapheme 与 word 边界；规范化与分段表来自 `unicode-normalization`/`unicode-segmentation`，两者尚未发布 18.0.0 版本，实际版本（当前 17.0.0）与目标版本一起进入编译器身份，crate 升级会同时改身份。行切分目前只实现强制换行（CR LF 保持在一起，并在 LF、NEL、LS、PS 和不跟随 LF 的 CR 之后断开），不是完整的 UAX #14 类对规则。这些函数还没有降成可从 Gugu 源码调用的 intrinsic。

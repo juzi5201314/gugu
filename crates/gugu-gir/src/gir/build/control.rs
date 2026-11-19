@@ -58,7 +58,13 @@ impl Builder<'_> {
                 value,
                 operation,
                 dispatch,
-            } => self.emit_assign(place, value, operation, dispatch),
+            } => self.emit_assign(
+                place,
+                value,
+                operation,
+                dispatch,
+                self.init_stores.contains(&id),
+            ),
             hir::StatementKind::Expression(value) => self.emit_expr(value).map(|_| ()),
             hir::StatementKind::Defer(action) => self.emit_defer(action),
             hir::StatementKind::Static { local, definition } => {
@@ -97,6 +103,7 @@ impl Builder<'_> {
         value: ExprId,
         operation: crate::ast::AssignOp,
         dispatch: Option<u32>,
+        first_write: bool,
     ) -> Result<(), Diagnostic> {
         if let Some((write, base, index)) = self.index_write(place) {
             let base_place = self.emit_place(base)?;
@@ -211,6 +218,9 @@ impl Builder<'_> {
             return Ok(());
         }
         match operation {
+            crate::ast::AssignOp::Assign if first_write => {
+                self.initialize_value(dest, Place::local(src), self.place_ty(dest));
+            }
             crate::ast::AssignOp::Assign => {
                 self.copy_value(dest, Place::local(src), self.place_ty(dest));
             }
@@ -610,6 +620,12 @@ impl Builder<'_> {
         };
         let iv = self.hir_to_gir[local.index()];
         self.assign_copy(Place::local(iv), start_local);
+        let plans = match &self.owner.expressions[id.index()].kind {
+            hir::ExprKind::For {
+                initializations, ..
+            } => initializations.clone(),
+            _ => Vec::new(),
+        };
         let header = self.fresh(false);
         let exit = self.fresh(false);
         let body_block = self.fresh(false);
@@ -630,6 +646,10 @@ impl Builder<'_> {
             otherwise: exit,
         });
         self.switch_to(body_block);
+        let init_depth = self.init_stores.len();
+        for plan in &plans {
+            self.init_stores.push(plan.store);
+        }
         self.loops.push(LoopFrame {
             scope: self.expr_scope(id),
             header,
@@ -652,6 +672,10 @@ impl Builder<'_> {
         }
         self.loops.pop();
         self.switch_to(exit);
+        self.init_stores.truncate(init_depth);
+        for plan in plans {
+            self.mark_written(Place::local(self.hir_to_gir[plan.array.index()]));
+        }
         let dest = self.temp(self.expr_ty(id));
         self.assign_unit(dest);
         self.set_value(id, dest);
