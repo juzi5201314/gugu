@@ -183,7 +183,7 @@ fn bytes_view(self: &Self) Bytes
 fn normalize(self: &Self, form: NormalizationForm) string
 ```
 
-`len`、capacity、range 与修改位置都按 byte 计。`char_at` 按 Unicode scalar 计并允许线性复杂度；需要全量处理时使用 `chars()`。负 capacity、负 additional 或负索引 panic。`insert`、`remove`、`truncate`、`replace_range` 和 string range 的端点必须在范围内且位于 UTF-8 scalar 边界，否则 panic。
+`len`、capacity、range 与修改位置都按 byte 计。`char_at` 按 Unicode scalar 计并允许线性复杂度；需要全量处理时使用 `chars()`。`cap()` 不小于 `len()`；`with_capacity`、`reserve` 与 `shrink_to_fit` 只是容量提示，不改变内容。负 capacity、负 additional 或负索引 panic。`insert`、`remove`、`truncate`、`replace_range` 和 string range 的端点必须在范围内且位于 UTF-8 scalar 边界，否则 panic。
 
 string 不支持单整数 `s[i]`，避免把 byte、Unicode scalar 和用户可见 grapheme 混成同一种索引。`s[a..b]`、`s[a..]`、`s[..b]`、`s[..]` 返回 O(1) COW string 快照；创建快照会 seal backing。
 
@@ -193,18 +193,22 @@ string 不支持单整数 `s[i]`，避免把 byte、Unicode scalar 和用户可�
 
 COW 值语义的用法：
 
-<!-- docs-example: gap string 没有适用的方法 `push` -->
 ```gugu
-fn demo() {
+use std.io.{println}
+
+fn main() {
     let original = "gugu"
     let copy = original
     let modified = copy
     modified.push('!')
     // original 与 copy 仍是 "gugu"；修改 sealed backing 时分离
-    _ = original
-    _ = copy
-    _ = modified
+    println(original, " ", copy, " ", modified)
 }
+```
+
+<!-- docs-example: output -->
+```text
+gugu gugu gugu!
 ```
 
 ## 不可变 `Bytes`

@@ -179,7 +179,7 @@ impl Vec[T] {
 
 这样 `Vec::new` 和 `v.new` 不会混：前者是静态构造，后者会去找值 `v` 上名叫 `new` 的方法（通常没有）。
 
-- `impl Type { ... }` 给类型挂固有方法与关联函数。同一类型可以有多块固有 `impl`，合并看待。**固有 impl 只能写在该类型的定义模块**（`int` / `Vec` 等语言类型由标准库或编译器）。其它模块要给已有类型加方法，只能 `impl Trait for Type`。
+- `impl Type { ... }` 给类型挂固有方法与关联函数。同一类型可以有多块固有 `impl`，合并看待。**固有 impl 只能写在该类型的定义模块**（`int` / `Vec` 等语言类型由标准库或编译器；`string` 的定义模块是 `std.text`）。其它模块要给已有类型加方法，只能 `impl Trait for Type`。
 - 类型参数：出现在 Self 或 trait 实参里的 `T` 由此引入，写作 `impl Vec[T]`、`impl Print for Foo[T]`。blanket `impl Trait for T` 必须写成 `impl[T] Trait for T`（可带约束 `impl[T: Print] Trait for T`）。`comptime` 参数同样写在 `impl[...]` 里。
 - 带 `self` 的是方法：`p.len()` 与 `Point::len(p)` 等价（UFCS）。没有隐式 `this`；`self` 必须是第一个参数。
 - 不带 `self` 的是关联函数：`Vec::new()` / `Vec[int]::new()`，没有接收者。能从上下文推断时 `let v: Vec[int] = Vec::new()` 即可。

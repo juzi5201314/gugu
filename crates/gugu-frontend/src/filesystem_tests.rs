@@ -12,6 +12,7 @@ mod printing;
 mod process;
 mod resource;
 mod signal;
+mod strings;
 mod trace;
 
 use crate::lir::body::{Body, Condition, IntOp, Op, Terminator, range};
