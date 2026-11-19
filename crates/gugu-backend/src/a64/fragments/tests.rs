@@ -192,6 +192,40 @@ fn poll_retries_the_flag_update_and_tail_calls_preserve_the_link_register() {
 }
 
 #[test]
+fn poll_skips_gc_when_committed_is_at_or_below_the_soft_limit() {
+    let fragment = safepoint_slow("callback", "collect");
+    let code = instructions(&fragment);
+    let gc_offset = fragment.relocations[0].offset;
+    let branch_offset = gc_offset - 16;
+    let committed = Reg::x(10);
+    let limit = Reg::x(11);
+    for (offset, register, field) in [(12, committed, 3928), (8, limit, 3952)] {
+        let load = at(&code, branch_offset - offset);
+        assert_eq!(form(load), "ldr.X.Unsigned");
+        assert_eq!(
+            load.operands,
+            [reg(register), mem(PROCESSOR, AddressMode::Unsigned(field))]
+        );
+    }
+    let compare = at(&code, branch_offset - 4);
+    assert_eq!(form(compare), "subs.X.shift");
+    assert_eq!(
+        compare.operands,
+        [
+            reg(Reg::zr(Width::X)),
+            reg(committed),
+            reg(limit),
+            unshifted()
+        ]
+    );
+    let branch = at(&code, branch_offset);
+    assert_eq!(form(branch), "b.cond");
+    assert_eq!(branch.operands[1], condition(9)); // LS: !C || Z
+    assert_eq!(target(&code, branch_offset), gc_offset + 4);
+    assert_eq!(form(at(&code, gc_offset + 4)), "ret");
+}
+
+#[test]
 fn rt0_writes_native_boot_fields_and_restores_the_host_registers() {
     let fragment = rt0("start");
     let code = instructions(&fragment);

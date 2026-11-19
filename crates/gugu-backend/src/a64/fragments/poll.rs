@@ -17,7 +17,9 @@ use super::{
     Builder, Fragment, PROCESSOR, add_imm, condition, imm, mem, movz, next, reg, unshifted,
 };
 
-/// 保留 mutator 的 SP 和 LR；callback/GC 入口负责切栈。
+const BELOW_OR_SAME: u8 = 9;
+
+/// 保留 mutator 的 SP 和 LR；callback/GC 入口负责切栈。GC 请求地址经 x0 传递。
 pub fn safepoint_slow(callback_poll: &str, gc_enter: &str) -> Fragment {
     let mut b = Builder::default();
     let flags = Reg::x(9);
@@ -79,8 +81,8 @@ fn pressure_dispatch(b: &mut Builder, gc_enter: &str) {
         "subs.X.shift",
         [reg(zero), reg(tmp), reg(limit), unshifted()],
     );
-    done.push((b.offset(), 2));
-    b.emit("b.cond", [next(), condition(2)]);
+    done.push((b.offset(), BELOW_OR_SAME));
+    b.emit("b.cond", [next(), condition(BELOW_OR_SAME)]);
     let request = Reg::x(0);
     b.add(request, PROCESSOR, PROCESSOR_GC_REQUEST_OFFSET);
     b.emit("movz.X", [reg(tmp), movz(1)]);
