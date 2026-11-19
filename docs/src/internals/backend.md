@@ -206,6 +206,10 @@ Batch publish的CAS retry是合法cyclic runtime CFG，不得包在`NoSafepointR
 
 ## 线性扫描寄存器分配
 
+共享算法位于 `gugu-backend/src/regalloc/`：`live` 消费规范化 CFG、use/def 位图与点位事件，完成活跃定点、凸区间及循环加权；`scan` 执行带 mask、拷贝提示与重物化的确定性加权线性扫描；`slots` 按 `(size, align, root_class)` 复用不相交区间的槽；`parallel` 按稳定顺序调度物理拷贝并打断环。共享层不依赖 x64、LIR 类型或指令编码。
+
+`RegisterFile` 提供架构局部的物理寄存器身份、寄存器类、普通/跨调用偏好池、spill size/align 与 copy scratch。操作数读写、固定读写和调用 clobber 由架构适配器规范化为事件及候选 mask；每值 `allowed` 集合表达低字节等约束。x64 保留 form 解释、权威逻辑根集与 outgoing-root 扩展、ABI/frame、spill rewrite，以及 scratch 保存序列；共享调度器只决定搬运顺序。局部身份不代替 payload 的寄存器编码，x64 通过显式转换保留既有编号、分配统计及指纹。后续 A64 适配器复用这些算法，不另建分配路径；本次提取不接入 A64 lowering 或登记目标。
+
 ### interval
 
 block 按最终 layout 编号，每条 instruction 获得间隔为 2 的 position：`use_slot = 2p`、`def_slot = 2p + 1`，相邻 instruction 之间留出定义与使用分开的缝隙。一个**点位**（point）是分配与 stack map 共用的最小单位，携带 `(site, kind, block, instructions, mask, clobber, pointer_spill, fixed_physical, outgoing_roots)`：`kind` 取 `Normal`/`Call`/`Bridge`/`Prologue`，由 LIR op 的规范 safepoint 种类推出；`mask` 是该点位会写或会读的物理寄存器集合，加上 form 自带 clobber，Call 点位再加全部 caller-saved GPR（`rax, rcx, rdx, rbx, rsi, rdi, r8, r9, r10`）与全部 XMM，`CallReturn`、会分配的调用、`SuspendResume`、普通与 dirty `ForeignBridge`、会挂起的 `Select` 以及 `Invoke` 把 `pointer_spill` 置位；`PollResume` 同样置位，`ForeignLeaf`、`PollFreeLeaf` 不置位。调用点另在 `outgoing_roots` 记录 outgoing 区里的指针字。读也必须进 mask：ABI 返回寄存器（`rax`、`rbx`、`rdx`、`xmm0`、`xmm1`）在返回值搬运点只是被**读**，若只按写建 mask，转换或 scratch 仍可能覆写它们。
@@ -433,7 +437,7 @@ foldhash 固定种子状态，避免每次 emit 使用 SipHash。索引保留表
 
 ### A64 独立编码库
 
-`gugu-backend::a64` 是尚未接入任何目标、CLI、lowering 或运行时的纯库，不能据此选择
+`gugu-backend::a64` 尚未接入任何目标、CLI 或 lowering，不能据此选择
 `aarch64` 目标。封闭表目前包含 307 个 ARMv8.0-A base 与 FP/AdvSIMD 标量形式；不包含
 LSE 或 V128 整数向量指令。`FormId` 是固定表序下标，操作数采用汇编顺序；W/X 与
 B/H/S/D/Q 是寄存器视图，SP 与 XZR 是不同寄存器种类，编码号 31 的解释由槽决定。
@@ -463,6 +467,22 @@ revision 并更新测试中的指纹钉值，不能静默沿用身份。
 `clang -c -target arm64-apple-macos` 与 `otool -t`，并非由本编码器生成期望值。
 测试明确引用该 fixture，通过 Rust 构造每个 form 的样本及边界样本，同时比较规范文本、
 字节和解码回环；默认测试不启动 assembler 或任何子进程。
+
+### A64 运行时机器片段
+
+独立片段通过同一编码表输出字节与片段内重定位；不进入现有 x64 运行时契约，也不登记目标。
+片段边界保留 `x27`（协程槽）与 `x28`（processor）作为显式换入值，不使用平台寄存器
+`x18`。换栈记录保存 SP、续点、其余 AAPCS64 非易失整数寄存器和 `d8–d15`。
+入口冷路径经 `x28` 找到 mailbox，保存 `x0–x8`、`q0–q7`、冷路径返回 PC 及调用方
+LR（由 prologue 放入 `x10`），以 `SP - candidate` 确定所需空间，不访问用户栈。
+系统侧恢复该续点后，片段从 mailbox 关联的 scratch 重新装载参数和两条返回地址。
+poll 慢路保留调用点的 LR 与 SP，优先尾跳 callback；仅在压力状态与入口均就绪且 committed
+严格超过软上限时，将请求地址放入 `x0`，尾跳 GC 入口。
+
+rt0 的 OS 入口负责加载修正、native 启动参数与退出；A64 胶合写入启动载荷、装载初始保留
+寄存器并调用 runtime，随后恢复宿主保留寄存器并返回状态码。原子片段支持自然对齐的
+1/2/4/8 字节对象；RMW 使用 ARMv8.0-A 独占读写及重试，不依赖 LSE，比较失败清除本地
+独占监视器。各片段 ABI 仅供后续后端和运行时接线使用。
 
 ### Cost calibration profile {#cost-calibration-profile}
 

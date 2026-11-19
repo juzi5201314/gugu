@@ -8,6 +8,7 @@
 pub mod a64;
 pub mod macho;
 mod native_link;
+pub mod regalloc;
 pub mod x64;
 pub use native_link::{NativeImport, NativeImportKind, NativeLink};
 
