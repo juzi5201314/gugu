@@ -63,3 +63,4 @@
 - [诊断码](reference/diagnostics.md)
 - [运行时配置](reference/runtime-config.md)
 - [ABI 与兼容性矩阵](reference/abi-compat.md)
+- [发布清单](reference/release-manifest.md)

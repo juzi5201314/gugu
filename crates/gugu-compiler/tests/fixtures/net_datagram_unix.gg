@@ -1,55 +1,9 @@
-use std.net.{TcpStream, TcpListener, UdpSocket, SocketAddr, Ipv4Addr, IpAddr, BindOptions, DatagramBindOptions, ConnectOptions, Shutdown, KeepAliveConfig, InterfaceIndex, UnixAddr, UnixStream, UnixListener}
+use std.net.{UdpSocket, SocketAddr, Ipv4Addr, IpAddr, DatagramBindOptions, Shutdown, InterfaceIndex, UnixAddr, UnixStream, UnixListener}
 use std.io.{Read, Write, Bytes, Error}
 use std.sync.{CancelSource}
-use std.time.{Duration}
 use std.path.{Path}
-use std.collections.{Vec}
-use std.net.{Ipv6Addr}
-#[used]
-fn candidates() Vec[SocketAddr] {
-    let values = Vec[SocketAddr]::new()
-    values.push(SocketAddr::new(IpAddr::V6(Ipv6Addr::new([0; 8])), 1))
-    values.push(SocketAddr::new(IpAddr::V6(Ipv6Addr::new([0; 8])), 2))
-    values.push(SocketAddr::new(IpAddr::V4(Ipv4Addr::new(127, 0, 0, 1)), 3))
-    values.push(SocketAddr::new(IpAddr::V4(Ipv4Addr::new(127, 0, 0, 1)), 4))
-    values
-}
-#[used]
-fn candidate_port(values: Vec[SocketAddr], index: int) uint = match values.get(index) {
-    Some(value) => uint(value.port()), None => uint(0),
-}
 
 fn numeric() SocketAddr = SocketAddr::new(IpAddr::V4(Ipv4Addr::new(127, 0, 0, 1)), 0)
-#[used]
-fn stream(stream: TcpStream) Result[(), Error] {
-    let cancel = CancelSource::new().token()
-    let data: [byte; 8] = [0; 8]
-    let (read, write) = stream.split()
-    _ = stream.read(&data)?
-    _ = read.read_cancel(&data, &cancel)?
-    _ = stream.write(Bytes::copy_from(&data))?
-    _ = write.write_cancel(Bytes::new(), &cancel)?
-    stream.set_read_timeout(Some(Duration::new(1, 2)))?
-    _ = stream.read_timeout()?
-    stream.set_write_timeout(None)?
-    _ = stream.write_timeout()?
-    stream.set_nodelay(true)?
-    _ = stream.nodelay()?
-    stream.set_keepalive(Some(KeepAliveConfig::new()))?
-    _ = stream.keepalive()?
-    stream.set_ttl(64)?
-    _ = stream.ttl()?
-    stream.set_recv_buffer_size(8192)?
-    _ = stream.recv_buffer_size()?
-    stream.set_send_buffer_size(8192)?
-    _ = stream.send_buffer_size()?
-    _ = stream.local_addr()?
-    _ = stream.peer_addr()?
-    stream.shutdown(Shutdown::Both)?
-    read.shutdown()?
-    write.shutdown()?
-    stream.close()
-}
 #[used]
 fn datagram(socket: UdpSocket) Result[(), Error] {
     let cancel = CancelSource::new().token()
@@ -103,7 +57,5 @@ fn unix_datagram() Result[(), Error] {
     socket.close()
 }
 fn main() {
-    _ = TcpStream::connect_with(numeric(), ConnectOptions::new())
     _ = UdpSocket::bind(numeric(), DatagramBindOptions::new())
-    _ = TcpListener::bind(numeric(), BindOptions::new())
 }
