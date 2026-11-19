@@ -3,7 +3,7 @@ use inst::{AddressMode, Operand, Target};
 use reg::{Reg, RegKind, Width};
 use std::collections::BTreeMap;
 
-fn get(reg: Reg, registers: &[u64; 32]) -> u64 {
+pub(super) fn get(reg: Reg, registers: &[u64; 32]) -> u64 {
     let value = match reg.kind {
         RegKind::Gpr(id) => registers[id as usize],
         RegKind::Sp => registers[31],
@@ -16,7 +16,7 @@ fn get(reg: Reg, registers: &[u64; 32]) -> u64 {
         value
     }
 }
-fn put(reg: Reg, value: u64, registers: &mut [u64; 32]) {
+pub(super) fn put(reg: Reg, value: u64, registers: &mut [u64; 32]) {
     let value = if reg.width == Width::W {
         value & u64::from(u32::MAX)
     } else {
@@ -29,7 +29,7 @@ fn put(reg: Reg, value: u64, registers: &mut [u64; 32]) {
         _ => panic!("not a GPR"),
     }
 }
-fn rr(operand: &Operand) -> Reg {
+pub(super) fn rr(operand: &Operand) -> Reg {
     let Operand::Reg(reg) = operand else {
         panic!("expected register")
     };
@@ -102,7 +102,7 @@ pub(super) fn execute_inner(
     runtime: Option<&mut super::runtime_vm::Harness>,
 ) -> ([u64; 2], BTreeMap<u64, u8>) {
     let (result, _, memory) =
-        execute_machine(fragment, callees, args, &[], BTreeMap::new(), runtime);
+        execute_machine(fragment, callees, args, &[], BTreeMap::new(), runtime, None);
     (result, memory)
 }
 
@@ -135,7 +135,17 @@ pub(super) fn execute_fp(
     if let Some(stubs) = &stubs {
         linked.extend(stubs.iter());
     }
-    execute_machine(fragment, &linked, &gprs, &vectors, stack, runtime)
+    execute_machine(fragment, &linked, &gprs, &vectors, stack, runtime, None)
+}
+
+pub(super) fn execute_atomic(
+    fragment: &codegen::LeafFragment,
+    args: &[u64],
+    memory: BTreeMap<u64, u8>,
+    atomic: &mut super::atomic_vm::Harness,
+) -> ([u64; 2], BTreeMap<u64, u8>) {
+    let (result, _, memory) = execute_machine(fragment, &[], args, &[], memory, None, Some(atomic));
+    (result, memory)
 }
 
 fn execute_machine(
@@ -145,7 +155,10 @@ fn execute_machine(
     fp_args: &[u128],
     mut memory: BTreeMap<u64, u8>,
     mut runtime: Option<&mut super::runtime_vm::Harness>,
+    atomic: Option<&mut super::atomic_vm::Harness>,
 ) -> ([u64; 2], [u128; 32], BTreeMap<u64, u8>) {
+    let mut idle = super::atomic_vm::Harness::default();
+    let atomic = atomic.unwrap_or(&mut idle);
     let fragments = std::iter::once(fragment)
         .chain(callees.iter().copied())
         .collect::<Vec<_>>();
@@ -272,6 +285,27 @@ fn execute_machine(
             }
             calls.push(((pc + 4) as u64, registers, vectors));
             registers[30] = (pc + 4) as u64;
+        }
+        if key.starts_with("ldar.")
+            && let Some(runtime) = runtime.as_mut()
+        {
+            let Operand::Address(address) = &op[1] else {
+                panic!()
+            };
+            runtime.load(
+                fragment,
+                get(address.base, &registers),
+                &registers,
+                &memory,
+                calls.last().map(|(_, entry, _)| entry),
+            );
+        }
+        if atomic.execute(inst, &mut registers, &mut memory) {
+            pc = next;
+            continue;
+        }
+        if key.starts_with("str") {
+            atomic.clear_monitor();
         }
         if super::fp_vm::execute(
             inst,

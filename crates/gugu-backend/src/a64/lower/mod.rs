@@ -1,4 +1,5 @@
-//! Integer-only leaf instruction selection.
+//! Internal scalar instruction selection.
+mod atomic;
 pub(super) mod call;
 mod float;
 mod integer;
@@ -77,6 +78,9 @@ pub fn bits(ty: Type) -> Result<u32, Error> {
 pub fn lower(body: &Body, instruction: &Instruction, b: &mut Builder<'_>) -> Result<(), Error> {
     let args = body.args(&instruction.arguments);
     let results = body.args(&instruction.results);
+    if matches!(instruction.op, crate::lir::body::Op::Atomic { .. }) {
+        return atomic::lower(body, instruction, b);
+    }
     if let crate::lir::body::Op::Call(call) = &instruction.op {
         return call::lower(body, call, args, results, false, b);
     }

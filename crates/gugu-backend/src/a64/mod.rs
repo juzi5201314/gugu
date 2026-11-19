@@ -2,6 +2,7 @@
 
 pub mod abi;
 pub mod alloc;
+mod atomic;
 mod bits;
 pub mod codegen;
 pub mod contract;

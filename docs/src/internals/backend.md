@@ -667,6 +667,22 @@ tail-area 检查和指针参数的栈图都复用同一 ABI placement，不按�
 默认测试解释已编码字节，覆盖 FP bank、SIMD 高半部、混合参数、压力、entry/poll
 和真实链接调用；不执行生成的 A64 机器码或 OS FFI。
 
+### A64 ARMv8.0 原子 lowering（4d.2）
+
+原子 load/store、exchange、fetch add/sub/and/or/xor、强 CAS 与 fence 复用既有
+1/2/4/8-byte 编码，不要求 LSE。Relaxed load/store 用普通自然对齐访问，Acquire
+load 用 LDAR，Release store 用 STLR；RMW 按成功序选择 LDXR/LDAXR 与
+STXR/STLXR。CAS 失败序按并发规范验证，失败路径允许比所需更强的 acquire。
+Acquire fence 用 DMB ISHLD，其余合法 fence 用 DMB ISH；SeqCst 原子操作在访问
+前后保守插入 DMB ISH，包含 CAS 比较失败的退出路径。
+
+选择阶段以一个固定寄存器事件块保留 x9–x15，实参在块前平行复制，结果在块后
+复制；实际排他循环在寄存器分配后展开。循环中不能插入 spill、poll 或调用，避免
+普通栈写清除 exclusive monitor 导致永久重试。STXR 失败重新读取并重新计算，
+CAS 比较不等则 CLREX 后返回 actual/false，不写内存；只对排他存储失败重试。
+字节 VM 用显式 monitor、确定性的失败注入和并发写入替身检查重新读取、窄宽度、
+旧值返回、邻字节保护、顺序指令与有 spill 的寄存器别名情形；不执行 native 线程。
+
 ### A64 生产源与镜像数据绑定
 
 `runtime/a64.gg` 随已有 runtime source table 提供，用现有 `#![cfg(arch = "aarch64")]`
