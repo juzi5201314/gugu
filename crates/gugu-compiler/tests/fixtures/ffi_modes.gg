@@ -1,0 +1,16 @@
+#[ffi(leaf)] unsafe extern "C" fn leaf_probe(value: uint) uint
+#[ffi(dirty_cpu)] unsafe extern "C" fn dirty_probe(value: uint) uint
+unsafe extern "C" fn native_probe(value: uint) uint
+#[os_thread_local] static TLS_SLOT: uint = 0
+#[coroutine_local] static LOCAL_SLOT: uint = 0
+#[export_name = "abi_probe_export"]
+pub unsafe extern "C" fn abi_probe_body(value: uint) uint {
+    LOCAL_SLOT + value
+}
+fn main() { unsafe {
+    TLS_SLOT = leaf_probe(1)
+    LOCAL_SLOT = dirty_probe(2)
+    _ = native_probe(3)
+    _ = abi_probe_body(4)
+    if TLS_SLOT == 0xFFFF { panic("tls corrupt") }
+} }

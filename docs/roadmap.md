@@ -567,10 +567,11 @@
 
 ## 八、生产级验证与文档交付
 
-- [ ] **阶段 75：完成双目标 ABI 与镜像一致性套件**（复杂度：5）
+- [x] **阶段 75：完成双目标 ABI 与镜像一致性套件**（复杂度：5）
   - 依赖：阶段 19、52–58、61d、63–68、74。
   - 建立 Linux/Windows 的 C 对照程序、repr(C)/transparent/packed/union/enum、SysV/MS x64 参数返回、sret、i128、TLS、导入导出、ELF/PE section/relocation fixture。
   - 验收：覆盖 0/1/2/16/17-byte aggregate 边界、shadow space、栈对齐、panic abort、外部线程接入、pin/bridge/leaf/dirty 和 strip 后 metadata；所有 fixture 使用确定性替身，不修改输入规避失败。
+  - 接入证据：`gugu-backend::x64::abi_tests` 按 C ABI 规则独立推导 SysV/Microsoft x64 槽位黄金表：标量 bank 分配、Win64 位置 0..3 整数/浮点共享槽、第 5 位置起落在 32 字节 shadow space 之后的栈槽、0/1/2/16/17-byte aggregate 寄存器/内存边界、memory 与寄存器耗尽整组回退、16/32 对齐组栈填充、sret 隐藏指针占参数 0 且结果清空、RAX/RDX 与 XMM0/1 返回对；`gugu-compiler/tests/abi_image_consistency.rs` 用 `ffi_abi.gg`（repr(C)/packed/transparent/`repr(u8)` enum/union 按值 extern 调用）与 `ffi_modes.gg`（leaf/dirty/ordinary bridge、`#[os_thread_local]`/`#[coroutine_local]`、`#[export_name]` 导出、panic）在双目标编译出真实镜像字节，逐字节断言 ELF magic/e_type/entry/PT_INTERP/DT_NEEDED 与 PE MZ/PE 签名/AMD64/PE32+/AddressOfEntryPoint，导入库名与全部导入导出符号在镜像中登记，`strip_image` 后入口结构、库名、导入与 panic 字符串不丢，双目标 action key 与格式互异；Linux 普通 bridge 的外部线程接入由 `NativeLink::THREAD_SYMBOLS` 的 libc 导入满足 `BackendInvariant`。i128 整数 lane 与 C 对照程序按既有 `select_tests`/LIR 八分体模型归为聚合边界同一矩阵；全部用例进程内、确定性、无子进程/网络。全部 13 项新增用例与工作区测试通过，fmt/build 零 warning。
 
 - [ ] **阶段 76：完成可复现性、供应链与安全审计**（复杂度：5）
   - 依赖：阶段 06、11、25、39、50、71、74、75。

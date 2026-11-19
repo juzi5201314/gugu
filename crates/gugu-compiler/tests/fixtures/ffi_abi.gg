@@ -1,0 +1,17 @@
+use std.fs
+use std.path.{Path}
+#[repr(C)] struct Pair { a: uint, b: uint }
+#[repr(C, packed)] struct Packed { a: u8, b: uint }
+#[repr(transparent)] struct Wrapper { inner: uint }
+#[repr(u8)] enum Small { Zero, One }
+union Bits { a: uint, b: [u8; 8] }
+unsafe extern "C" fn native_pair(value: Pair) Pair
+unsafe extern "C" fn native_wide(first: Packed, second: Wrapper, tag: Small) Pair
+unsafe extern "C" fn native_bits(value: Bits) Bits
+fn main() { unsafe {
+    let pair = native_pair(Pair { a: 1, b: 2 })
+    let wide = native_wide(Packed { a: 1, b: 2 }, Wrapper { inner: 3 }, Small::One)
+    let bits = native_bits(Bits { a: 7 })
+    let _ = pair.a + wide.b + bits.a
+    let _ = fs.exists(Path::from_string("abi"))
+} }

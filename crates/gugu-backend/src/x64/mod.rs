@@ -4,6 +4,8 @@
 //! 可接受面的形式；lowering 与 codegen 在后续模块接入。
 
 pub mod abi;
+#[cfg(test)]
+mod abi_tests;
 pub mod alloc;
 pub mod codegen;
 pub mod contract;
