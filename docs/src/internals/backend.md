@@ -411,6 +411,8 @@ load command 依次为各段、`LC_DYLD_CHAINED_FIXUPS`、`LC_DYLD_EXPORTS_TRIE`
 
 `a64::fragments::darwin_process_call` 在原生栈上接收 x0 的操作号和 x1 的 `ProcessRequest` 地址，处理操作 0–4（非阻塞观察、终止、关闭、管道读写）。`darwin_process_worker` 首入口返回同一片段内的 C ABI worker 地址；worker 接收 x0 的 `ProcessRequest` 地址，从请求读取操作 0–3（spawn、pipe、open null、duplicate）。两者用 `darwin_process_imports` 列出的 libSystem 调用桩，并在请求中写回 value 与 error。创建进程时用 `SpawnPacket` 配置标准流和工作目录，写回 PID；文件动作初始化成功后总会销毁，管道配置失败时先保存 errno 再关闭两端。片段不负责 worker 调度、完成发布、托管栈切换或信号订阅。
 
+`a64::fragments::darwin_resolver_symbol` 独立于套接字操作分派。它用 x0 接收 `ResolverSymbol` 操作号，通过 `ADRP/ADD` 重定位到 `darwin_resolver_imports` 声明的 libSystem 调用桩，并在 x0 返回可按 C ABI 调用的地址。无效操作号触发陷阱。片段不执行解析、不捕获 errno，也不接入 worker、托管调用、栈切换或目标注册。
+
 ## 直接编码与验证
 
 encoder 对每个 `X64Inst` 先计算 exact 长度，再写 prefix、REX、opcode、ModRM、SIB、displacement和 immediate；两次计算必须一致。每条 instruction记录起止 offset，stack map、branch、relocation和 source table只引用该边界。
