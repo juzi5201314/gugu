@@ -4,7 +4,7 @@ use super::{Error, error, table::*};
 use crate::hash::hash_domain;
 
 pub const ENCODER_SCHEMA: u32 = 1;
-pub const ENCODER_REVISION: u32 = 1;
+pub const ENCODER_REVISION: u32 = 2;
 
 pub fn catalog() -> &'static [Form] {
     FORMS

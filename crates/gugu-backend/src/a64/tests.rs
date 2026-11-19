@@ -32,7 +32,7 @@ fn frozen_contract() {
         .collect();
     assert_eq!(
         hex,
-        "6b469e9c57669964bd6041dda63612e77c7d7294e9574c26b1cb46c646e8c445"
+        "4abb52a688f61778d2a536a416b50fc3c2343706553e1096b1a3e2f64bc2f5d0"
     );
 }
 
