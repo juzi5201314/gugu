@@ -469,21 +469,34 @@ revision 并更新测试中的指纹钉值，不能静默沿用身份。
 `a64::codegen::compile_leaf(&Body)` 消费已验证的 LIR，再检查 arena/CFG、整数签名与
 `PollFreeLeaf` 接口；不进入 `plan()` 或前端派发。不明确证明为 leaf，仍带 stack check、
 poll、安全点或 managed/root 初始化义务的函数被拒绝，而不是删除这些操作。
-输出为字节、最终标签偏移、frame 与 allocation 诊断，没有镜像、外部重定位或 GC map。
+输出为字节、最终标签偏移、frame 与 allocation 诊断，没有镜像或 GC map。
+
+`compile_function(&Body)` 是另一个显式隔离入口：调用方预留入口栈容量，测试手建满足
+约束的 LIR；它不要求 caller 的 leaf 标志，也不删除 StackCheck 或伪造 callee metadata。
+仍带 StackCheck、poll、safepoint 或需要 call map 的 managed call 均以
+`requires checked entry / stack maps (4c)` 拒绝。正常生产 caller 保留 checked entry，
+所以仍被拒绝，直到 4c。`compile_leaf` 继续拒绝全部 Call/TailCall。
+只接受 `CallTarget::Instance`、Managed、现有 `Call.poll_free_leaf = true` 且无
+unwind/suspend/allocation/capture 的调用；runtime、foreign、indirect/vtable 均不支持。
 
 这是私有整数叶 ABI，不是 AAPCS64/Darwin C ABI：参数用 `x0–x7`，其余标量用入口 SP
-以上的 8 字节槽；结果用 `x0–x1`，不支持超过两字结果或 aggregate/sret。
+以上的 8 字节槽；结果用 `x0–x1`。隔离入口遵守现有 LIR sret：隐藏指针为首个参数，
+多字返回由 LIR Store 写入其存储，寄存器结果为空，不把第三字放到 x2。
+普通 `compile_leaf` 不接受 sret；正常 sret callee 没有 poll_free_leaf 证明，其调用仍须 4c。
 保留 SP、`x16/x17`（rewrite/copy scratch）、`x18`（平台）、`x29`（FP）、`x30`（LR）；
 `x27 = CoroutineHot*`、`x28 = LogicalProcessor*` 均不分配。分配池为 `x0–x15`、`x19–x26`，
 用到的 `x19–x26` 保存恢复。非零 frame 保存 FP/LR；SP 16 字节对齐，无 red zone。
-尚无 stack-check/morestack prologue，leaf 入口容量是调用方义务；初版 frame 上限为
-32752 字节，超出、槽或偏移溢出均返回明确错误。
+尚无 stack-check/morestack prologue，入口容量是隔离调用方义务。frame 低地址为最大
+outgoing 参数区（向上取整至 16 字节），后面为 FP/LR record、copy scratch、保存寄存器、
+spill 与 local。x29 指向 record，所有 BL 强制建立 record，退出恢复 FP/LR 与 SP。
+frame 不再限制为 32752 字节：大 SP delta 用 scratch 常量与 extended-register ADD/SUB，
+大栈偏移先物化地址；frame/槽/偏移的算术溢出仍返回错误。
 
 `machine` 虚拟操作数显式携带 read/write/read-write 角色，地址基址是 read。
 `select` 与 `lower/{integer,memory}` 负责整数/原始指针、常量、访存与 CFG 选指。
 比较物化为 0/1，窄值为零扩展位模式，有符号运算先扩展；carry/borrow 为两段进位/借位的或。
 除法只接受静态非零除数，不能以 A64 零除结果代替语言 panic。FP/V128、managed/compressed
-引用、调用、异常、原子、runtime 与外部符号操作返回带 body/block/site 的错误。
+引用、异常、原子、runtime 与外部地址符号操作返回带 body/block/site 的错误。
 显式终止的 Trap/Unreachable 用 BRK，TrapIf 不替代为 BRK。
 
 `alloc` 仅归一化事件，共享 `regalloc` 完成 CFG liveness、加权 scan、slot 复用与并行 copy
@@ -491,11 +504,19 @@ poll、安全点或 managed/root 初始化义务的函数被拒绝，而不是�
 ABI 参数的寄存器/栈搬运与窄值规范化只在独立入口 stub 执行一次；stub 转入 LIR 入口块，
 所有 CFG 边（含指向入口的回边）只指向 LIR 块，不重复读取调用方参数。
 `frame/rewrite` 在 x16/x17 内完成 spill/reload、MOVZ/MOVN/MOVK 常量、SP 地址合法化；
-copy 环用 x16，slot-to-slot 搬运用 x17，不借用活跃分配寄存器。
+小 frame 的 copy 环用 x16；大 frame 的环使用独立 frame scratch，避免地址合法化
+覆盖 holder。slot-to-slot 搬运用 x17，不借用活跃分配寄存器。
+调用以原子 use/def 事件送入共享分配器，`call = true` 且 mask 为 x0–x15；跨调用值
+只分配 x19–x26 或 spill。先写 outgoing 栈参数，再用共享并行 copy 调度器放入 x0–x7；
+返回后同时收集 x0/x1。TailCall 恢复当前保存寄存器/SP/LR 后 B 到符号，只复用足够大的
+incoming 参数区；sret、local 栈逃逸、参数区增长和结果签名不匹配均拒绝。
 `layout` 单调扩展越界 B.cond/CBZ/CBNZ/TBZ/TBNZ 为反条件跳过一条 B，再按最终 PC 回填；
-B 仍越界则报错，不生成 veneer。现有 verifier/encoder 是最终边界，未解决符号被拒绝。
+B 仍越界则报错，不生成 veneer。现有 verifier/encoder 是最终边界；fragment 公开内部
+`__gugu_fn_<instance hex>` 符号，以及最终字节 offset 的 Call26/尾调 Branch26 重定位。
+其他未解决符号仍被拒绝，不在这里接入目标 linker。
 测试进程内手建 LIR，选指到编码/解码回环，用有限的确定性解释器核对整数、CFG、内存、
-spill 和保存寄存器；距离边界/级联扩展使用合成大小，不分配巨大 padding。
+spill 和保存寄存器。VM 在合成地址空间链接 fragment 并模拟 BL/LR/RET；大 frame 用稀疏
+内存，距离边界/级联扩展使用合成大小，不分配巨大 padding。
 
 未来站点已约定：poll clobber 所有 caller-saved 寄存器；morestack clobber `x9–x14`，
 保留 `x0–x8/q0–q7`。这里仅记录约束，叶 lowering 尚不调用这些片段。

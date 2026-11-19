@@ -37,13 +37,74 @@ fn rr(operand: &Operand) -> Reg {
 }
 
 pub(super) fn run(fragment: &codegen::LeafFragment, args: &[u64]) -> [u64; 2] {
-    let instructions = decoded(fragment);
+    run_linked(fragment, &[], args)
+}
+
+pub(super) fn link(fragments: &[&codegen::LeafFragment]) -> Result<Vec<inst::Inst>, String> {
+    let mut symbols = BTreeMap::new();
+    let mut instructions = Vec::new();
+    for fragment in fragments {
+        if symbols
+            .insert(fragment.symbol.clone(), instructions.len() * 4)
+            .is_some()
+        {
+            return Err("duplicate fragment symbol".into());
+        }
+        instructions.extend(decoded(fragment));
+    }
+    let mut base = 0;
+    for fragment in fragments {
+        for fixup in &fragment.relocations {
+            let relocation = &fixup.relocation;
+            let target = *symbols
+                .get(&relocation.target)
+                .ok_or("unknown fragment symbol")?;
+            let pc = base + usize::try_from(fixup.offset).map_err(|_| "invalid offset")?;
+            if !pc.is_multiple_of(4) || fixup.offset >= fragment.bytes.len() as u64 {
+                return Err("invalid relocation offset".into());
+            }
+            let key = match relocation.kind {
+                inst::RelocKind::Call26 => "bl",
+                inst::RelocKind::Branch26 => "b",
+                _ => return Err("unsupported test relocation".into()),
+            };
+            let displacement = target as i64 + relocation.addend - pc as i64;
+            let patched =
+                machine::inst(key, vec![Operand::Target(Target::Offset(displacement))]).unwrap();
+            let encoded = encode::encode(&patched).map_err(|error| error.to_string())?;
+            instructions[pc / 4] = decode::decode(encoded.word).unwrap();
+        }
+        base += fragment.bytes.len();
+    }
+    Ok(instructions)
+}
+
+pub(super) fn run_linked(
+    fragment: &codegen::LeafFragment,
+    callees: &[&codegen::LeafFragment],
+    args: &[u64],
+) -> [u64; 2] {
+    execute(fragment, callees, args).0
+}
+
+pub(super) fn execute(
+    fragment: &codegen::LeafFragment,
+    callees: &[&codegen::LeafFragment],
+    args: &[u64],
+) -> ([u64; 2], BTreeMap<u64, u8>) {
+    let fragments = std::iter::once(fragment)
+        .chain(callees.iter().copied())
+        .collect::<Vec<_>>();
+    let instructions = link(&fragments).unwrap();
     let mut registers = [0_u64; 32];
-    registers[31] = 65536;
+    const INITIAL_SP: u64 = 1 << 40;
+    registers[31] = INITIAL_SP;
     for (id, value) in registers.iter_mut().enumerate().take(31).skip(19) {
         *value = 1000 + id as u64;
     }
+    registers[30] = u64::MAX;
     let saved = registers;
+    let mut calls = Vec::new();
     let mut memory = BTreeMap::new();
     for (index, value) in args.iter().enumerate() {
         if index < 8 {
@@ -51,7 +112,7 @@ pub(super) fn run(fragment: &codegen::LeafFragment, args: &[u64]) -> [u64; 2] {
         } else {
             for byte in 0..8 {
                 memory.insert(
-                    65536 + (index as u64 - 8) * 8 + byte,
+                    INITIAL_SP + (index as u64 - 8) * 8 + byte,
                     (value >> (byte * 8)) as u8,
                 );
             }
@@ -84,16 +145,31 @@ pub(super) fn run(fragment: &codegen::LeafFragment, args: &[u64]) -> [u64; 2] {
         let form = table::get(inst.form).unwrap();
         let key = form.key;
         let op = &inst.operands;
+        assert_eq!(registers[31] % 16, 0, "SP alignment");
         if key == "ret" {
+            let target = get(rr(&op[0]), &registers);
+            if let Some((return_pc, before)) = calls.pop() {
+                let before: [u64; 32] = before;
+                assert_eq!(target, return_pc);
+                assert_eq!(registers[31], before[31]);
+                assert_eq!(&registers[19..30], &before[19..30]);
+                pc = target as usize;
+                continue;
+            }
+            assert_eq!(target, u64::MAX);
             for id in 19..31 {
                 assert_eq!(registers[id], saved[id], "callee-saved x{id}");
             }
-            assert_eq!(registers[31], 65536);
-            return [registers[0], registers[1]];
+            assert_eq!(registers[31], INITIAL_SP);
+            return ([registers[0], registers[1]], memory);
         }
         let mut next = pc + 4;
+        if key == "bl" {
+            calls.push(((pc + 4) as u64, registers));
+            registers[30] = (pc + 4) as u64;
+        }
         let read = |index: usize| get(rr(&op[index]), &registers);
-        if key == "b" || key == "b.cond" || key.starts_with("cb") {
+        if key == "bl" || key == "b" || key == "b.cond" || key.starts_with("cb") {
             let offset = op
                 .iter()
                 .find_map(|o| match o {
@@ -101,7 +177,7 @@ pub(super) fn run(fragment: &codegen::LeafFragment, args: &[u64]) -> [u64; 2] {
                     _ => None,
                 })
                 .unwrap();
-            let taken = if key == "b" {
+            let taken = if key == "b" || key == "bl" {
                 true
             } else if key == "b.cond" {
                 let Operand::Condition(c) = op[1] else {

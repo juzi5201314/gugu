@@ -1,4 +1,5 @@
 //! Hand-built leaf fixtures; no host assembler, native code or processes.
+mod calls;
 mod control;
 mod integer;
 mod layout;
@@ -144,7 +145,7 @@ impl Fixture {
             .collect::<Vec<_>>();
         let arguments = self.args(args);
         let results = self.args(&output);
-        let memory = if matches!(op, Op::Load(_) | Op::Store(_)) {
+        let memory = if matches!(op, Op::Load(_) | Op::Store(_) | Op::Call(_)) {
             let next = self.value(
                 Type::Mem,
                 Definition::Instruction {

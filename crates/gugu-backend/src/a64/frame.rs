@@ -8,6 +8,9 @@ use crate::{
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub struct Frame {
     pub size: u32,
+    pub outgoing: u32,
+    pub record: u32,
+    pub copy_scratch: u32,
     pub saves: Vec<(u8, u32)>,
     pub spills: Vec<u32>,
     pub locals: Vec<u32>,
@@ -24,6 +27,26 @@ fn align(value: u32, alignment: u32) -> Result<u32, Error> {
 }
 
 pub fn layout(body: &Body, allocation: &Allocation) -> Result<Frame, Error> {
+    let calls = body
+        .instructions
+        .iter()
+        .filter_map(|inst| match &inst.op {
+            crate::lir::body::Op::Call(call) => Some(call),
+            _ => None,
+        })
+        .collect::<Vec<_>>();
+    let words = calls
+        .iter()
+        .map(|call| call.parameters.len().saturating_sub(8))
+        .max()
+        .unwrap_or(0);
+    let outgoing = align(
+        u32::try_from(words)
+            .ok()
+            .and_then(|n| n.checked_mul(8))
+            .ok_or_else(|| super::error("outgoing argument area overflow"))?,
+        16,
+    )?;
     let mut saved = allocation
         .values
         .iter()
@@ -38,15 +61,27 @@ pub fn layout(body: &Body, allocation: &Allocation) -> Result<Frame, Error> {
         .collect::<Vec<_>>();
     saved.sort_unstable();
     saved.dedup();
-    if saved.is_empty() && allocation.slots.slots.is_empty() && body.stack_slots.is_empty() {
+    if calls.is_empty()
+        && saved.is_empty()
+        && allocation.slots.slots.is_empty()
+        && body.stack_slots.is_empty()
+    {
         return Ok(Frame {
             size: 0,
+            outgoing: 0,
+            record: 0,
+            copy_scratch: 0,
             saves: vec![],
             spills: vec![],
             locals: vec![],
         });
     }
-    let mut offset = 16_u32;
+    let copy_scratch = outgoing
+        .checked_add(16)
+        .ok_or_else(|| super::error("frame record overflow"))?;
+    let mut offset = copy_scratch
+        .checked_add(8)
+        .ok_or_else(|| super::error("frame scratch overflow"))?;
     let mut saves = Vec::new();
     for reg in saved {
         saves.push((reg, offset));
@@ -73,13 +108,11 @@ pub fn layout(body: &Body, allocation: &Allocation) -> Result<Frame, Error> {
             .ok_or_else(|| super::error("leaf local area overflow"))?;
     }
     let size = align(offset, 16)?;
-    if size > 32752 {
-        return Err(super::error(
-            "leaf frame exceeds initial 32752-byte legalization limit",
-        ));
-    }
     Ok(Frame {
         size,
+        outgoing,
+        record: outgoing,
+        copy_scratch,
         saves,
         spills,
         locals,

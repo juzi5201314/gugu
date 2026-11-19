@@ -2,6 +2,15 @@
 use crate::regalloc::{Class, PhysReg, RegisterFile};
 
 pub const GPR: Class = Class(0);
+pub const CALLER_SAVED: crate::regalloc::RegSet = crate::regalloc::RegSet(0xffff);
+
+pub fn symbol(instance: &[u8; 32]) -> String {
+    let key = instance
+        .iter()
+        .map(|byte| format!("{byte:02x}"))
+        .collect::<String>();
+    format!("__gugu_fn_{key}")
+}
 pub const COROUTINE: u8 = 27;
 pub const PROCESSOR: u8 = 28;
 pub const CALLEE_SAVED: std::ops::RangeInclusive<u8> = 19..=26;

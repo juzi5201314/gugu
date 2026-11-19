@@ -9,7 +9,15 @@ use crate::lir::body::{Body, Op, Terminator, Type, ValueId};
 use std::ops::Range;
 
 pub fn select(body: &Body) -> Result<Function, Error> {
-    validate(body).map_err(|e| Error(format!("{} entry: {e}", body.name)))?;
+    select_mode(body, true)
+}
+
+pub fn select_function(body: &Body) -> Result<Function, Error> {
+    select_mode(body, false)
+}
+
+fn select_mode(body: &Body, leaf: bool) -> Result<Function, Error> {
+    validate(body, leaf).map_err(|e| Error(format!("{} entry: {e}", body.name)))?;
     let count = body.blocks.len();
     let mut function = Function {
         name: body.name.clone(),
@@ -137,6 +145,17 @@ fn terminator(
 ) -> Result<Vec<usize>, Error> {
     let edge = |id: crate::lir::body::EdgeId| count + id.index() + 1;
     match term {
+        Terminator::TailCall {
+            call,
+            arguments,
+            memory,
+        } => {
+            if !values(body, arguments) || !kind(body, *memory, Type::Mem) {
+                return Err(super::error("invalid tail call operands/memory"));
+            }
+            lower::call::lower(body, call, body.args(arguments), &[], true, b)?;
+            Ok(vec![])
+        }
         Terminator::Jump(to) => {
             jump(b, "b", vec![], edge(*to) as u32)?;
             Ok(vec![edge(*to)])
@@ -217,17 +236,43 @@ fn kind(body: &Body, id: ValueId, ty: Type) -> bool {
     body.values.get(id.index()).is_some_and(|v| v.kind.ty == ty)
 }
 
-fn validate(body: &Body) -> Result<(), Error> {
-    if !body.poll_interface.leaf
-        || body.poll_summary.entry_stack_check
+fn validate(body: &Body, leaf: bool) -> Result<(), Error> {
+    if leaf && !body.poll_interface.leaf {
+        return Err(super::error("requires proven PollFreeLeaf"));
+    }
+    if body.poll_summary.entry_stack_check
         || body.poll_interface.summary.entry_stack_check
         || body.poll_summary.has_poll_free_cycle
         || !body.safepoints.is_empty()
         || !body.root_inits.is_empty()
     {
-        return Err(super::error(
-            "requires proven PollFreeLeaf without stack checks, polls, or safepoints",
-        ));
+        return Err(super::error("requires checked entry / stack maps (4c)"));
+    }
+    for (index, instruction) in body.instructions.iter().enumerate() {
+        let needs_maps = match &instruction.op {
+            Op::Call(call) | Op::ForeignCall(call) => lower::call::requires_maps(call),
+            _ => false,
+        };
+        if needs_maps
+            || matches!(instruction.op, Op::StackCheck | Op::SafepointPoll { .. })
+            || instruction.safepoint.is_some()
+        {
+            return Err(Error(format!(
+                "{} {:?}: requires checked entry / stack maps (4c)",
+                site_context(body, index),
+                instruction.op
+            )));
+        }
+    }
+    for (index, block) in body.blocks.iter().enumerate() {
+        if matches!(block.terminator, Terminator::Invoke { .. })
+            || matches!(&block.terminator, Terminator::TailCall { call, .. } if lower::call::requires_maps(call))
+        {
+            return Err(Error(format!(
+                "block {index} terminator {:?}: requires checked entry / stack maps (4c)",
+                block.terminator
+            )));
+        }
     }
     if body.revision != crate::lir::body::REVISION
         || body.entry.index() >= body.blocks.len()
@@ -240,13 +285,26 @@ fn validate(body: &Body) -> Result<(), Error> {
     {
         return Err(super::error("invalid leaf schema/entry/CFG size"));
     }
-    if body.signature.sret.is_some()
+    if (leaf && body.signature.sret.is_some())
         || !body.signature.by_value.is_empty()
         || body.signature.results.len() > 2
     {
         return Err(super::error(
             "leaf aggregate/sret or more than two results unsupported",
         ));
+    }
+    if let Some((bytes, alignment, _)) = body.signature.sret
+        && (bytes == 0
+            || !alignment.is_power_of_two()
+            || alignment > 16
+            || !body.signature.results.is_empty()
+            || body
+                .signature
+                .parameters
+                .first()
+                .is_none_or(|p| p.ty != Type::Ptr))
+    {
+        return Err(super::error("invalid hidden sret signature"));
     }
     for value in &body.values {
         if !matches!(
@@ -277,6 +335,9 @@ fn validate(body: &Body) -> Result<(), Error> {
         }
     }
     for (index, instruction) in body.instructions.iter().enumerate() {
+        if leaf && matches!(instruction.op, Op::Call(_)) {
+            return Err(Error(format!("site {index}: compile_leaf rejects calls")));
+        }
         if !values(body, &instruction.arguments)
             || !values(body, &instruction.results)
             || instruction.memory.is_some_and(|mem| {
@@ -294,8 +355,19 @@ fn validate(body: &Body) -> Result<(), Error> {
                 "site {index}: memory access lacks sequencing token"
             )));
         }
+        if matches!(instruction.op, Op::Call(_)) && instruction.memory.is_none() {
+            return Err(Error(format!(
+                "{}: call lacks sequencing token",
+                site_context(body, index)
+            )));
+        }
     }
     for (index, block) in body.blocks.iter().enumerate() {
+        if leaf && matches!(block.terminator, Terminator::TailCall { .. }) {
+            return Err(Error(format!(
+                "block {index}: compile_leaf rejects tail calls"
+            )));
+        }
         if block.cleanup
             || !valid_range(&block.instructions, body.instructions.len())
             || !valid_range(&block.parameters, body.parameters.len())
@@ -388,4 +460,15 @@ fn validate(body: &Body) -> Result<(), Error> {
         ));
     }
     Ok(())
+}
+
+fn site_context(body: &Body, site: usize) -> String {
+    match body
+        .blocks
+        .iter()
+        .position(|block| block.instructions.contains(&(site as u32)))
+    {
+        Some(block) => format!("{} block {block} site {site}", body.name),
+        None => format!("{} site {site}", body.name),
+    }
 }

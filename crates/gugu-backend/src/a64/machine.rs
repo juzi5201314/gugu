@@ -49,6 +49,15 @@ pub enum Item {
         index: u32,
     },
     Copies(Vec<(MReg, MReg)>),
+    Call {
+        target: String,
+        arguments: Vec<u32>,
+        results: Vec<u32>,
+    },
+    TailCall {
+        target: String,
+        arguments: Vec<u32>,
+    },
     Branch {
         form: FormId,
         operands: Vec<MOperand>,
@@ -107,6 +116,10 @@ pub fn zero() -> MOperand {
 }
 
 impl Item {
+    pub fn is_call(&self) -> bool {
+        matches!(self, Self::Call { .. } | Self::TailCall { .. })
+    }
+
     pub fn events(&self) -> Vec<(MReg, Access)> {
         let mut events = Vec::new();
         match self {
@@ -120,6 +133,23 @@ impl Item {
                     events.push((*src, Access::Read));
                     events.push((*dst, Access::Write));
                 }
+            }
+            Self::Call {
+                arguments, results, ..
+            } => {
+                events.extend(
+                    arguments
+                        .iter()
+                        .map(|id| (MReg::Virtual(*id), Access::Read)),
+                );
+                events.extend(results.iter().map(|id| (MReg::Virtual(*id), Access::Write)));
+            }
+            Self::TailCall { arguments, .. } => {
+                events.extend(
+                    arguments
+                        .iter()
+                        .map(|id| (MReg::Virtual(*id), Access::Read)),
+                );
             }
             Self::Return => {}
         }

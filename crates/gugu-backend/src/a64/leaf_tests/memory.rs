@@ -98,10 +98,7 @@ fn large_legal_offsets_and_oversized_frames_fail_explicitly() {
             .contains("local too large")
     );
     f.body.stack_slots[0].bytes = 40000;
-    assert!(
-        codegen::compile_leaf(&f.body)
-            .unwrap_err()
-            .0
-            .contains("legalization limit")
-    );
+    let fragment = f.compile();
+    assert!(fragment.frame.size > 32752);
+    assert_eq!(vm::run(&fragment, &[])[0] % 16, 0);
 }
