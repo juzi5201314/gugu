@@ -59,7 +59,6 @@ pub enum Type {
     TryRecvErr,
     Panic,
     Formatter,
-    Hasher,
     MaybeUninit(TypeId),
 }
 

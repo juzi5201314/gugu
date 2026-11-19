@@ -100,6 +100,16 @@ impl Model<'_> {
         }
         stack.push((ty.clone(), interface.clone()));
         let selected = self.select_impl_inner(ty, interface, assumptions, stack);
+        if !matches!(selected, Ok(Some(_)))
+            && self.traits.interfaces[interface.id].name == "Hash"
+            && let Ty::Tuple(elements) = ty
+        {
+            let result = elements.iter().try_for_each(|element| {
+                self.require_trait_inner(element, interface, assumptions, stack)
+            });
+            stack.pop();
+            return result;
+        }
         stack.pop();
         if selected?.is_some() || self.builtin_trait(ty, interface) {
             return Ok(());
@@ -477,7 +487,7 @@ impl Model<'_> {
                     vec![ty.clone()]
                 };
                 let interface = TraitRef { id, arguments };
-                if self.builtin_trait(ty, &interface) {
+                if self.builtin_method_trait(ty, &interface, assumptions) {
                     interfaces.push(interface);
                 }
             }
@@ -544,7 +554,7 @@ impl Model<'_> {
                         .iter()
                         .any(|b| b.ty == *ty && b.interface == interface)
                         || declared.contains(&interface)
-                        || self.builtin_trait(ty, &interface) =>
+                        || self.builtin_method_trait(ty, &interface, assumptions) =>
                 {
                     methods.push(self.resolved_method(
                         module,
@@ -575,6 +585,18 @@ impl Model<'_> {
             _ => Err(self.error(module, "trait 方法候选不唯一，需要 UFCS 消歧")),
         }
     }
+    fn builtin_method_trait(
+        &self,
+        ty: &Ty,
+        interface: &TraitRef,
+        assumptions: &[Obligation],
+    ) -> bool {
+        self.builtin_trait(ty, interface)
+            || (self.traits.interfaces[interface.id].name == "Hash"
+                && matches!(ty, Ty::Tuple(_))
+                && self.require_trait(ty, interface, assumptions).is_ok())
+    }
+
     pub(in super::super) fn resolved_method(
         &self,
         module: usize,

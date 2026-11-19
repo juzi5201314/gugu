@@ -1,12 +1,184 @@
-pub struct Key {
-    id: int,
-    name: string,
+// Altered source: Gugu port of FoldHash 0.2's fixed-seed byte hashing.
+// Copyright (c) 2024 Orson Peters
+//
+// This software is provided 'as-is', without any express or implied warranty. In
+// no event will the authors be held liable for any damages arising from the use of
+// this software.
+//
+// Permission is granted to anyone to use this software for any purpose, including
+// commercial applications, and to alter it and redistribute it freely, subject to
+// the following restrictions:
+//
+// 1. The origin of this software must not be misrepresented; you must not claim
+//    that you wrote the original software. If you use this software in a product,
+//    an acknowledgment in the product documentation would be appreciated but is
+//    not required.
+//
+// 2. Altered source versions must be plainly marked as such, and must not be
+//    misrepresented as being the original software.
+//
+// 3. This notice may not be removed or altered from any source distribution.
+
+use std.text.{Bytes, ByteBuffer}
+
+pub struct Hasher { seed: uint, bytes: ByteBuffer }
+
+impl Hasher {
+    pub fn with_seed(seed: uint) Self = Self { seed: seed, bytes: ByteBuffer::new() }
+    pub fn write_int(self: &Self, value: int) { self.write_uint(uint(value)) }
+    pub fn write_uint(self: &Self, value: uint) { self.write_word(value, 8) }
+    pub fn write_bool(self: &Self, value: bool) {
+        self.write_word(if value { 1 } else { 0 }, 1)
+    }
+    pub fn write_char(self: &Self, value: char) { self.write_word(uint(value), 4) }
+    pub fn write_str(self: &Self, value: string) { self.write_bytes(Bytes::from_string(value)) }
+    pub fn write_bytes(self: &Self, value: Bytes) {
+        self.write_uint(uint(value.len()))
+        self.bytes.append(value)
+    }
+    fn write_word(self: &Self, value: uint, count: int) {
+        let data: [byte; 8] = [0; 8]
+        for index in 0..count { data[index] = byte(value >> (index * 8)) }
+        self.bytes.append(Bytes::copy_from(data[..count]))
+    }
+    pub fn finish(self: &Self) uint {
+        let bytes = self.bytes.freeze()
+        let data = unsafe { bytes.as_slice() }
+        foldhash(data, self.seed)
+    }
 }
 
-impl Hash for Key {
-    fn hash(self: &Self, hasher: &Hasher) {}
+fn folded(left: uint, right: uint) uint {
+    let product = u128(left) * u128(right)
+    uint(product) ^ uint(product >> 64)
 }
 
-pub fn digest[T: Hash + StableHash](value: T) {
-    _ = value
+fn load(data: &[byte], offset: int, count: int) uint {
+    let value: uint = 0
+    for index in 0..count { value = value | uint(data[offset + index]) << (index * 8) }
+    value
+}
+
+// FoldHash-fast 0.2 的 fixed shared seed；输入是一次完整的规范字节流。
+fn foldhash(data: &[byte], seed: uint) uint {
+    let seeds: [uint; 6] = [
+        0xc0ac29b7c97c50dd, 0x3f84d5b5b5470917, 0x9216d5d98979fb1b,
+        0xd1310ba698dfb5ac, 0x2ffd72dbd01adfb7, 0xb8e1afed6a267e96,
+    ]
+    let length = data.len()
+    let initial = seed ^ uint(0x082efa98ec4e6c89)
+    let shift = uint(length) & uint(63)
+    let s0 = (initial >> shift) | (initial << ((uint(64) - shift) & uint(63)))
+    let s1 = seeds[1]
+    if length <= 16 {
+        if length >= 8 {
+            s0 = s0 ^ load(data, 0, 8)
+            s1 = s1 ^ load(data, length - 8, 8)
+        } else if length >= 4 {
+            s0 = s0 ^ load(data, 0, 4)
+            s1 = s1 ^ load(data, length - 4, 4)
+        } else if length > 0 {
+            s0 = s0 ^ uint(data[0])
+            s1 = s1 ^ (uint(data[length - 1]) << 8 | uint(data[length / 2]))
+        }
+        return folded(s0, s1)
+    }
+    s1 = s0 + seeds[1]
+    let offset = 0
+    if length > 128 {
+        let s2 = s0 + seeds[2]
+        let s3 = s0 + seeds[3]
+        if length > 256 {
+            let s4 = s0 + seeds[4]
+            let s5 = s0 + seeds[5]
+            loop {
+                s0 = folded(load(data, offset, 8) ^ s0, load(data, offset + 48, 8) ^ seeds[0])
+                s1 = folded(load(data, offset + 8, 8) ^ s1, load(data, offset + 56, 8) ^ seeds[0])
+                s2 = folded(load(data, offset + 16, 8) ^ s2, load(data, offset + 64, 8) ^ seeds[0])
+                s3 = folded(load(data, offset + 24, 8) ^ s3, load(data, offset + 72, 8) ^ seeds[0])
+                s4 = folded(load(data, offset + 32, 8) ^ s4, load(data, offset + 80, 8) ^ seeds[0])
+                s5 = folded(load(data, offset + 40, 8) ^ s5, load(data, offset + 88, 8) ^ seeds[0])
+                offset = offset + 96
+                if length - offset <= 256 { break }
+            }
+            s0 = s0 ^ s4
+            s1 = s1 ^ s5
+        }
+        loop {
+            s0 = folded(load(data, offset, 8) ^ s0, load(data, offset + 32, 8) ^ seeds[0])
+            s1 = folded(load(data, offset + 8, 8) ^ s1, load(data, offset + 40, 8) ^ seeds[0])
+            s2 = folded(load(data, offset + 16, 8) ^ s2, load(data, offset + 48, 8) ^ seeds[0])
+            s3 = folded(load(data, offset + 24, 8) ^ s3, load(data, offset + 56, 8) ^ seeds[0])
+            offset = offset + 64
+            if length - offset <= 128 { break }
+        }
+        s0 = s0 ^ s2
+        s1 = s1 ^ s3
+    }
+    let remaining = length - offset
+    s0 = folded(load(data, offset, 8) ^ s0, load(data, length - 16, 8) ^ seeds[0])
+    s1 = folded(load(data, offset + 8, 8) ^ s1, load(data, length - 8, 8) ^ seeds[0])
+    if remaining >= 32 {
+        s0 = folded(load(data, offset + 16, 8) ^ s0, load(data, length - 32, 8) ^ seeds[0])
+        s1 = folded(load(data, offset + 24, 8) ^ s1, load(data, length - 24, 8) ^ seeds[0])
+        if remaining >= 64 {
+            s0 = folded(load(data, offset + 32, 8) ^ s0, load(data, length - 48, 8) ^ seeds[0])
+            s1 = folded(load(data, offset + 40, 8) ^ s1, load(data, length - 40, 8) ^ seeds[0])
+            if remaining >= 96 {
+                s0 = folded(load(data, offset + 48, 8) ^ s0, load(data, length - 64, 8) ^ seeds[0])
+                s1 = folded(load(data, offset + 56, 8) ^ s1, load(data, length - 56, 8) ^ seeds[0])
+            }
+        }
+    }
+    s0 ^ s1
+}
+
+impl Hash for int { fn hash(self: &Self, hasher: &Hasher) { hasher.write_int(*self) } }
+impl Hash for uint { fn hash(self: &Self, hasher: &Hasher) { hasher.write_uint(*self) } }
+impl Hash for i8 { fn hash(self: &Self, hasher: &Hasher) { hasher.write_int(int(*self)) } }
+impl Hash for i16 { fn hash(self: &Self, hasher: &Hasher) { hasher.write_int(int(*self)) } }
+impl Hash for i32 { fn hash(self: &Self, hasher: &Hasher) { hasher.write_int(int(*self)) } }
+impl Hash for byte { fn hash(self: &Self, hasher: &Hasher) { hasher.write_uint(uint(*self)) } }
+impl Hash for u16 { fn hash(self: &Self, hasher: &Hasher) { hasher.write_uint(uint(*self)) } }
+impl Hash for u32 { fn hash(self: &Self, hasher: &Hasher) { hasher.write_uint(uint(*self)) } }
+impl Hash for i128 {
+    fn hash(self: &Self, hasher: &Hasher) {
+        hasher.write_uint(uint(*self))
+        hasher.write_uint(uint(*self >> 64))
+    }
+}
+impl Hash for u128 {
+    fn hash(self: &Self, hasher: &Hasher) {
+        hasher.write_uint(uint(*self))
+        hasher.write_uint(uint(*self >> 64))
+    }
+}
+impl Hash for bool { fn hash(self: &Self, hasher: &Hasher) { hasher.write_bool(*self) } }
+impl Hash for char { fn hash(self: &Self, hasher: &Hasher) { hasher.write_char(*self) } }
+impl Hash for string { fn hash(self: &Self, hasher: &Hasher) { hasher.write_str(*self) } }
+impl Hash for () { fn hash(self: &Self, hasher: &Hasher) {} }
+impl Hash for Bytes { fn hash(self: &Self, hasher: &Hasher) { hasher.write_bytes(*self) } }
+impl[T: Hash] Hash for Option[T] {
+    fn hash(self: &Self, hasher: &Hasher) {
+        match *self {
+            None => hasher.write_uint(0),
+            Some(value) => { hasher.write_uint(1)
+                value.hash(hasher) },
+        }
+    }
+}
+impl[T: Hash, E: Hash] Hash for Result[T, E] {
+    fn hash(self: &Self, hasher: &Hasher) {
+        match *self {
+            Ok(value) => { hasher.write_uint(0)
+                value.hash(hasher) },
+            Err(error) => { hasher.write_uint(1)
+                error.hash(hasher) },
+        }
+    }
+}
+
+fn hash_tuple[Ts: Hash...](values: &Ts, hasher: &Hasher) {
+    let fields = *values
+    for field in fields { field.hash(hasher) }
 }

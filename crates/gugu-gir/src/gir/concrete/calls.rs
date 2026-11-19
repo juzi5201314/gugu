@@ -120,6 +120,11 @@ fn protocol(
         ("Try", Some(4)) => Protocol::TryFromError,
         ("IntoIter", Some(2)) => Protocol::IntoIter,
         ("Iter", Some(1)) => Protocol::IterNext,
+        ("Hash", _) => {
+            return Err(invalid(
+                "该内建类型暂不支持调用 Hash.hash；请显式馈送语义字段",
+            ));
+        }
         _ => return Err(invalid("内建 trait 方法没有登记 lowering")),
     };
     Ok(Some(protocol))
