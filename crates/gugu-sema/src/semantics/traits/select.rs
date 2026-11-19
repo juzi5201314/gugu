@@ -99,7 +99,9 @@ impl Model<'_> {
             return Err(self.error(0, "trait 约束形成循环证明"));
         }
         stack.push((ty.clone(), interface.clone()));
-        if self.traits.interfaces[interface.id].name == "Hash"
+        let selected = self.select_impl_inner(ty, interface, assumptions, stack);
+        if !matches!(selected, Ok(Some(_)))
+            && self.traits.interfaces[interface.id].name == "Hash"
             && let Ty::Tuple(elements) = ty
         {
             let result = elements.iter().try_for_each(|element| {
@@ -108,7 +110,6 @@ impl Model<'_> {
             stack.pop();
             return result;
         }
-        let selected = self.select_impl_inner(ty, interface, assumptions, stack);
         stack.pop();
         if selected?.is_some() || self.builtin_trait(ty, interface) {
             return Ok(());
