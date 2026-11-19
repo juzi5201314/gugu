@@ -7,8 +7,7 @@
 
 use super::model::RawModelError;
 use super::stackmap_schema::{
-    REGISTER_NAMES, RESERVED_REGISTER_BITS, STACKMAP_ENDIAN, STACKMAP_MAGIC, STACKMAP_POINTER_SIZE,
-    STACKMAP_SECTION_VERSION,
+    STACKMAP_ENDIAN, STACKMAP_MAGIC, STACKMAP_POINTER_SIZE, StackMapArchitecture,
 };
 
 /// section header 的固定字节数：8+2+1+1+4*3+4*2+8*4 = 72。
@@ -51,7 +50,7 @@ pub const TYPED_ROOT_BYTES: usize = 12;
 
 /// 一个安全点的机器位置与根位图输入。
 #[derive(Clone, Debug, Eq, PartialEq)]
-pub struct SafepointLayout {
+pub struct SafepointLayout<R = u16> {
     pub pc_offset: u32,
     pub kind: u8,
     pub dirty: bool,
@@ -59,8 +58,8 @@ pub struct SafepointLayout {
     pub scan_allowed: bool,
     /// 五类 slot 位图（按 slot 序，最低有效 bit 先写）。
     pub slots: [Vec<u64>; 5],
-    /// 五类寄存器掩码；bit15 必须为 0，普通函数保留位必须为 0。
-    pub registers: [u16; 5],
+    /// 五类寄存器掩码：x64 默认 u16；A64 使用 u32、xN=N，SP 不编码。
+    pub registers: [R; 5],
     /// 由帧内初始化字节门控的根；这些字不得同时出现在 `slots` 位图里。
     pub typed: Vec<TypedRoot>,
     /// 该安全点所属函数的布局下标。
@@ -73,6 +72,14 @@ pub struct SafepointLayout {
 pub fn encode(
     functions: &[CodeLayout],
     safepoints: &[(u32, SafepointLayout)],
+) -> Result<Vec<u8>, RawModelError> {
+    encode_for(StackMapArchitecture::X86_64, functions, safepoints)
+}
+
+pub fn encode_for<R: Copy + Into<u32>>(
+    architecture: StackMapArchitecture,
+    functions: &[CodeLayout],
+    safepoints: &[(u32, SafepointLayout<R>)],
 ) -> Result<Vec<u8>, RawModelError> {
     // 函数表按 `code_rva` 严格递增，code range 不重叠。
     for pair in functions.windows(2) {
@@ -90,12 +97,13 @@ pub fn encode(
                 return Err(RawModelError::new("函数代码范围重叠"));
             }
         }
-        if function.frame_size % 16 != 8 && function.frame_size != 0 {
+        if !architecture.frame_aligned(function.frame_size) {
             return Err(RawModelError::new("函数帧大小不满足对齐规则"));
         }
+        verify_code_alignment(architecture, function.code_rva, function.code_size)?;
     }
     // 安全点按（函数序、offset）排序后编码。
-    let mut ordered: Vec<(u32, SafepointLayout)> = safepoints.to_vec();
+    let mut ordered = safepoints.to_vec();
     ordered.sort_by_key(|(function, layout)| (*function, layout.pc_offset));
     for (function, layout) in &ordered {
         let code = functions
@@ -104,7 +112,15 @@ pub fn encode(
         if layout.pc_offset >= code.code_size {
             return Err(RawModelError::new("安全点偏移越过函数代码"));
         }
-        verify_layout(layout)?;
+        verify_layout(layout, architecture)?;
+        verify_pc_alignment(architecture, layout.pc_offset)?;
+        architecture.verify_site(
+            layout.kind,
+            layout.registers.map(Into::into),
+            layout.slot_count,
+            &layout.typed,
+            code.frame_size,
+        )?;
     }
     // 同一函数内按 `pc_offset` 严格递增。
     for pair in ordered.windows(2) {
@@ -115,7 +131,7 @@ pub fn encode(
     // map 去重基于完整记录字节的字典序。
     let mut records: Vec<Vec<u8>> = ordered
         .iter()
-        .map(|(_, layout)| map_record(layout))
+        .map(|(_, layout)| map_record(layout, architecture))
         .collect();
     records.sort();
     records.dedup();
@@ -140,13 +156,13 @@ pub fn encode(
 
     let mut output = Vec::with_capacity(section_len as usize);
     output.extend_from_slice(STACKMAP_MAGIC);
-    output.extend_from_slice(&STACKMAP_SECTION_VERSION.to_le_bytes());
+    output.extend_from_slice(&architecture.section_version().to_le_bytes());
     output.push(STACKMAP_POINTER_SIZE);
     output.push(STACKMAP_ENDIAN);
     output.extend_from_slice(&function_count.to_le_bytes());
     output.extend_from_slice(&safepoint_count.to_le_bytes());
     output.extend_from_slice(&map_count.to_le_bytes());
-    output.extend_from_slice(&0u32.to_le_bytes());
+    output.extend_from_slice(&architecture.header_tag().to_le_bytes());
     output.extend_from_slice(&0u32.to_le_bytes());
     output.extend_from_slice(&functions_offset.to_le_bytes());
     output.extend_from_slice(&safepoints_offset.to_le_bytes());
@@ -188,7 +204,7 @@ pub fn encode(
     for ((_, layout), record) in ordered.iter().zip(
         ordered
             .iter()
-            .map(|(_, layout)| map_record(layout))
+            .map(|(_, layout)| map_record(layout, architecture))
             .collect::<Vec<_>>(),
     ) {
         let map_index = records
@@ -230,31 +246,29 @@ pub fn encode(
 
 /// 解码并验证一个完整 section；返回函数数、安全点数与 map 数。
 pub fn decode(bytes: &[u8]) -> Result<(u32, u32, u32), RawModelError> {
+    let section = decode_tables(bytes)?;
+    Ok((
+        section.functions.len() as u32,
+        section.safepoints.len() as u32,
+        section.maps.len() as u32,
+    ))
+}
+
+fn verify_section(bytes: &[u8]) -> Result<(u32, u32, u32), RawModelError> {
     if bytes.len() < HEADER_BYTES {
         return Err(RawModelError::new("栈图 section 小于固定 header"));
     }
     if &bytes[..8] != STACKMAP_MAGIC {
         return Err(RawModelError::new("栈图 section 魔数不匹配"));
     }
-    let version = u16::from_le_bytes(bytes[8..10].try_into().expect("版本字段"));
-    if version != STACKMAP_SECTION_VERSION {
-        // 历史版本一律拒收，不保留双解码路径：v1 的 handle 与压缩引用表示不同，v2 的屏障
-        // runtime 调用没有安全点记录。
-        return Err(RawModelError::new(match version {
-            1 => "拒绝 version 1 记录：handle 与压缩引用表示已变化",
-            2 => "拒绝 version 2 记录：屏障 runtime 调用缺少安全点记录",
-            _ => "栈图 section 版本不匹配",
-        }));
-    }
+    let architecture = architecture_of(bytes)?;
     if bytes[10] != STACKMAP_POINTER_SIZE || bytes[11] != STACKMAP_ENDIAN {
         return Err(RawModelError::new("栈图 section 指针宽度或字节序不匹配"));
     }
     let function_count = u32::from_le_bytes(bytes[12..16].try_into().expect("计数字段"));
     let safepoint_count = u32::from_le_bytes(bytes[16..20].try_into().expect("计数字段"));
     let map_count = u32::from_le_bytes(bytes[20..24].try_into().expect("计数字段"));
-    if u32::from_le_bytes(bytes[24..28].try_into().expect("保留字段")) != 0
-        || u32::from_le_bytes(bytes[28..32].try_into().expect("保留字段")) != 0
-    {
+    if u32::from_le_bytes(bytes[28..32].try_into().expect("保留字段")) != 0 {
         return Err(RawModelError::new("栈图 header 保留字段必须为 0"));
     }
     let functions_offset = u64::from_le_bytes(bytes[32..40].try_into().expect("偏移字段"));
@@ -304,7 +318,11 @@ pub fn decode(bytes: &[u8]) -> Result<(u32, u32, u32), RawModelError> {
             .checked_add(safepoint_count_for_function)
             .ok_or_else(|| RawModelError::new("函数安全点范围溢出"))?;
         let flags = u16::from_le_bytes(bytes[base + 28..base + 30].try_into().expect("函数字段"));
-        if safepoint_start < previous_safepoint_end || safepoint_end > safepoint_count {
+        if safepoint_start < previous_safepoint_end
+            || safepoint_end > safepoint_count
+            || (architecture == StackMapArchitecture::Aarch64
+                && safepoint_start != previous_safepoint_end)
+        {
             return Err(RawModelError::new("函数安全点范围没有连续覆盖安全点表"));
         }
         if u16::from_le_bytes(bytes[base + 30..base + 32].try_into().expect("保留字段")) != 0
@@ -312,9 +330,10 @@ pub fn decode(bytes: &[u8]) -> Result<(u32, u32, u32), RawModelError> {
         {
             return Err(RawModelError::new("函数记录保留位必须为 0"));
         }
-        if frame % 16 != 8 && frame != 0 {
+        if !architecture.frame_aligned(frame) {
             return Err(RawModelError::new("函数帧大小不满足对齐规则"));
         }
+        verify_code_alignment(architecture, rva, size)?;
         if previous_rva.is_some_and(|previous| rva <= previous) {
             return Err(RawModelError::new("函数表没有按 code_rva 严格递增"));
         }
@@ -327,6 +346,11 @@ pub fn decode(bytes: &[u8]) -> Result<(u32, u32, u32), RawModelError> {
             .ok_or_else(|| RawModelError::new("函数代码范围溢出"))?;
         previous_safepoint_end = safepoint_end;
     }
+    if architecture == StackMapArchitecture::Aarch64 && previous_safepoint_end != safepoint_count {
+        return Err(RawModelError::new(
+            "A64 functions must cover every safepoint",
+        ));
+    }
     // 安全点表按函数范围连续编码；保持单调游标，避免每个安全点从函数 0 重新扫描。
     let mut previous_function = u32::MAX;
     let mut previous_offset = u32::MAX;
@@ -337,6 +361,7 @@ pub fn decode(bytes: &[u8]) -> Result<(u32, u32, u32), RawModelError> {
     for index in 0..safepoint_count {
         let base = (safepoints_offset as usize) + index as usize * SAFEPOINT_BYTES;
         let pc = u32::from_le_bytes(bytes[base..base + 4].try_into().expect("安全点字段"));
+        verify_pc_alignment(architecture, pc)?;
         let map = u32::from_le_bytes(bytes[base + 4..base + 8].try_into().expect("安全点字段"));
         let kind = bytes[base + 8];
         let flags = bytes[base + 9];
@@ -413,7 +438,7 @@ pub fn decode(bytes: &[u8]) -> Result<(u32, u32, u32), RawModelError> {
             return Err(RawModelError::new("map 索引范围越界"));
         }
         let record = &bytes[start as usize..end as usize];
-        verify_map_record(record)?;
+        verify_map_record(record, architecture)?;
         if previous.is_some_and(|previous| record < previous) {
             return Err(RawModelError::new("map 表没有按记录字节字典序排列"));
         }
@@ -427,7 +452,10 @@ pub fn decode(bytes: &[u8]) -> Result<(u32, u32, u32), RawModelError> {
     Ok((function_count, safepoint_count, map_count))
 }
 
-fn verify_layout(layout: &SafepointLayout) -> Result<(), RawModelError> {
+fn verify_layout<R: Copy + Into<u32>>(
+    layout: &SafepointLayout<R>,
+    architecture: StackMapArchitecture,
+) -> Result<(), RawModelError> {
     if !matches!(layout.kind, 0..=4) {
         return Err(RawModelError::new("安全点 kind 未登记"));
     }
@@ -435,13 +463,13 @@ fn verify_layout(layout: &SafepointLayout) -> Result<(), RawModelError> {
         return Err(RawModelError::new("dirty 标志只能与 kind 3 同时出现"));
     }
     for mask in &layout.registers {
-        if mask & (1 << 15) != 0 {
-            return Err(RawModelError::new("寄存器掩码 bit15 必须为 0"));
+        if (*mask).into() & !architecture.valid_registers() != 0 {
+            return Err(invalid_register_bits(architecture));
         }
     }
     // 记录字节的全部结构约束（位图互斥、尾 bit、逐根初始化条目排序与去重）在编码侧
     // 复用同一份校验，避免编码器产出自己解不出的 section。
-    verify_map_record(&map_record(layout)).map_err(|error| {
+    verify_map_record(&map_record(layout, architecture), architecture).map_err(|error| {
         RawModelError::new(format!(
             "{error} (function={} pc={:#x} kind={})",
             layout.function, layout.pc_offset, layout.kind
@@ -450,7 +478,7 @@ fn verify_layout(layout: &SafepointLayout) -> Result<(), RawModelError> {
     // 普通函数的保留位（r14、r15）必须为 0；bridge 的专用根表不在此处编码。
     for (class, mask) in layout.registers.iter().enumerate() {
         let _ = class;
-        if mask & RESERVED_REGISTER_BITS != 0 {
+        if (*mask).into() & architecture.reserved_registers() != 0 {
             return Err(RawModelError::new("普通函数占用 runtime 保留寄存器"));
         }
     }
@@ -482,8 +510,9 @@ fn verify_layout(layout: &SafepointLayout) -> Result<(), RawModelError> {
         }
     }
     // 五个寄存器掩码互斥。
-    let mut merged = 0u16;
+    let mut merged = 0u32;
     for mask in &layout.registers {
+        let mask = (*mask).into();
         if merged & mask != 0 {
             return Err(RawModelError::new("五类寄存器掩码不互斥"));
         }
@@ -499,8 +528,11 @@ fn verify_layout(layout: &SafepointLayout) -> Result<(), RawModelError> {
     Ok(())
 }
 
-fn verify_map_record(record: &[u8]) -> Result<(), RawModelError> {
-    if record.len() < 16 {
+fn verify_map_record(
+    record: &[u8],
+    architecture: StackMapArchitecture,
+) -> Result<(), RawModelError> {
+    if record.len() < architecture.map_header_bytes() {
         return Err(RawModelError::new("map 记录小于固定头"));
     }
     let slot_count = u32::from_le_bytes(record[0..4].try_into().expect("槽字段"));
@@ -508,12 +540,12 @@ fn verify_map_record(record: &[u8]) -> Result<(), RawModelError> {
     // 先检查记录长度，避免损坏的 slot_count 驱动越界读取或不受限分配。
     let bitmap_bytes = words
         .checked_mul(5)
-        .and_then(|bytes| bytes.checked_add(16))
+        .and_then(|bytes| bytes.checked_add(architecture.map_header_bytes()))
         .ok_or_else(|| RawModelError::new("map 记录槽数量溢出"))?;
     if bitmap_bytes > record.len() {
         return Err(RawModelError::new("map 记录位图越界"));
     }
-    let mut cursor = 16usize;
+    let mut cursor = architecture.map_header_bytes();
     let mut bitmaps: [&[u8]; 5] = [&[]; 5];
     for class in &mut bitmaps {
         *class = &record[cursor..cursor + words];
@@ -584,37 +616,46 @@ fn verify_map_record(record: &[u8]) -> Result<(), RawModelError> {
         }
     }
     // 记录头包含五类完整掩码；最后两个字节为规范保留字段。
-    let mut masks = [0u16; 5];
+    let mut masks = [0u32; 5];
     for (index, mask) in masks.iter_mut().enumerate() {
-        let start = 4 + index * 2;
-        *mask = u16::from_le_bytes(record[start..start + 2].try_into().expect("掩码字段"));
-        if *mask & (1 << 15) != 0 {
-            return Err(RawModelError::new("寄存器掩码 bit15 必须为 0"));
+        *mask = read_mask(record, index, architecture);
+        if *mask & !architecture.valid_registers() != 0 {
+            return Err(invalid_register_bits(architecture));
+        }
+        if architecture == StackMapArchitecture::Aarch64
+            && *mask & architecture.reserved_registers() != 0
+        {
+            return Err(RawModelError::new(
+                "A64 root mask contains reserved registers",
+            ));
         }
     }
-    if u16::from_le_bytes(record[14..16].try_into().expect("保留字段")) != 0 {
+    if architecture == StackMapArchitecture::X86_64
+        && u16::from_le_bytes(record[14..16].try_into().expect("保留字段")) != 0
+    {
         return Err(RawModelError::new("map 记录保留字段必须为 0"));
     }
-    let mut merged = 0u16;
+    let mut merged = 0u32;
     for mask in masks {
         if merged & mask != 0 {
             return Err(RawModelError::new("五类寄存器掩码不互斥"));
         }
         merged |= mask;
     }
-    let _ = REGISTER_NAMES;
     Ok(())
 }
 
-fn map_record(layout: &SafepointLayout) -> Vec<u8> {
+fn map_record<R: Copy + Into<u32>>(
+    layout: &SafepointLayout<R>,
+    architecture: StackMapArchitecture,
+) -> Vec<u8> {
     let mut output = Vec::new();
     output.extend_from_slice(&layout.slot_count.to_le_bytes());
-    // 记录头固定存五个 u16 掩码：direct、interior、handle、compressed、stack；
-    // 最后两个字节为保留字段，确保第五类寄存器根不被截断。
+    // v4: 5*u16 + 2 保留字节；v5: 5*u32，无额外保留字节。
     for mask in &layout.registers {
-        output.extend_from_slice(&mask.to_le_bytes());
+        output.extend_from_slice(&(*mask).into().to_le_bytes()[..architecture.mask_bytes()]);
     }
-    output.extend_from_slice(&[0, 0]);
+    output.resize(architecture.map_header_bytes(), 0);
     let words = layout.slot_count.div_ceil(8) as usize;
     for bitmap in &layout.slots {
         // 位图按字读入内存：内存字数与 `slot_count` 覆盖的字节数一致。
@@ -651,6 +692,63 @@ fn align_up(value: u64, align: u64) -> u64 {
     value.div_ceil(align) * align
 }
 
+fn architecture_of(bytes: &[u8]) -> Result<StackMapArchitecture, RawModelError> {
+    let version = u16::from_le_bytes(bytes[8..10].try_into().expect("version"));
+    let tag = u32::from_le_bytes(bytes[24..28].try_into().expect("architecture"));
+    match (version, tag) {
+        (4, 0) => Ok(StackMapArchitecture::X86_64),
+        (5, 183) => Ok(StackMapArchitecture::Aarch64),
+        (1, _) => Err(RawModelError::new(
+            "拒绝 version 1 记录：handle 与压缩引用表示已变化",
+        )),
+        (2, _) => Err(RawModelError::new(
+            "拒绝 version 2 记录：屏障 runtime 调用缺少安全点记录",
+        )),
+        _ => Err(RawModelError::new("栈图 section 版本或架构标记不匹配")),
+    }
+}
+
+fn invalid_register_bits(architecture: StackMapArchitecture) -> RawModelError {
+    RawModelError::new(match architecture {
+        StackMapArchitecture::X86_64 => "寄存器掩码 bit15 必须为 0",
+        StackMapArchitecture::Aarch64 => "A64 SP/bit31 must not be a root",
+    })
+}
+
+fn read_mask(record: &[u8], index: usize, architecture: StackMapArchitecture) -> u32 {
+    let start = 4 + index * architecture.mask_bytes();
+    match architecture {
+        StackMapArchitecture::X86_64 => u32::from(u16::from_le_bytes(
+            record[start..start + 2].try_into().expect("mask"),
+        )),
+        StackMapArchitecture::Aarch64 => {
+            u32::from_le_bytes(record[start..start + 4].try_into().expect("mask"))
+        }
+    }
+}
+
+fn verify_code_alignment(
+    architecture: StackMapArchitecture,
+    rva: u64,
+    size: u32,
+) -> Result<(), RawModelError> {
+    if architecture == StackMapArchitecture::Aarch64
+        && (!rva.is_multiple_of(4) || !size.is_multiple_of(4))
+    {
+        return Err(RawModelError::new("A64 code must be instruction aligned"));
+    }
+    Ok(())
+}
+
+fn verify_pc_alignment(architecture: StackMapArchitecture, pc: u32) -> Result<(), RawModelError> {
+    if architecture == StackMapArchitecture::Aarch64 && (pc == 0 || !pc.is_multiple_of(4)) {
+        return Err(RawModelError::new(
+            "A64 return PC must be nonzero and instruction aligned",
+        ));
+    }
+    Ok(())
+}
+
 /// 解码后的函数记录。
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub struct DecodedFunction {
@@ -676,7 +774,7 @@ pub struct DecodedSafepoint {
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub struct DecodedMap {
     pub slots: [Vec<u32>; 5],
-    pub registers: [u16; 5],
+    pub registers: [u32; 5],
     /// 由帧内初始化字节门控的根，按字下标递增。
     pub typed: Vec<TypedRoot>,
 }
@@ -684,6 +782,7 @@ pub struct DecodedMap {
 /// 解码后的栈图 section。
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub struct DecodedSection {
+    pub architecture: StackMapArchitecture,
     pub functions: Vec<DecodedFunction>,
     pub safepoints: Vec<DecodedSafepoint>,
     pub maps: Vec<DecodedMap>,
@@ -691,7 +790,8 @@ pub struct DecodedSection {
 
 /// 解码完整 section，供 walker 消费最终机器布局。
 pub fn decode_tables(bytes: &[u8]) -> Result<DecodedSection, RawModelError> {
-    decode(bytes)?;
+    verify_section(bytes)?;
+    let architecture = architecture_of(bytes)?;
     let function_count = u32::from_le_bytes(bytes[12..16].try_into().expect("计数字段"));
     let safepoint_count = u32::from_le_bytes(bytes[16..20].try_into().expect("计数字段"));
     let map_count = u32::from_le_bytes(bytes[20..24].try_into().expect("计数字段"));
@@ -739,25 +839,51 @@ pub fn decode_tables(bytes: &[u8]) -> Result<DecodedSection, RawModelError> {
             u64::from_le_bytes(bytes[base..base + 8].try_into().expect("索引字段")) as usize;
         let end =
             u64::from_le_bytes(bytes[base + 8..base + 16].try_into().expect("索引字段")) as usize;
-        maps.push(decode_map(&bytes[start..end])?);
+        maps.push(decode_map(&bytes[start..end], architecture)?);
     }
-    Ok(DecodedSection {
+    let section = DecodedSection {
+        architecture,
         functions,
         safepoints,
         maps,
-    })
+    };
+    if architecture == StackMapArchitecture::Aarch64 {
+        for function in &section.functions {
+            for point in &section.safepoints[function.safepoint_start as usize
+                ..(function.safepoint_start + function.safepoint_count) as usize]
+            {
+                let map = &section.maps[point.map_index as usize];
+                let offset = map_index_offset + point.map_index as usize * 8;
+                let start =
+                    u64::from_le_bytes(bytes[offset..offset + 8].try_into().expect("map offset"))
+                        as usize;
+                let slots =
+                    u32::from_le_bytes(bytes[start..start + 4].try_into().expect("slot count"));
+                architecture.verify_site(
+                    point.kind,
+                    map.registers,
+                    slots,
+                    &map.typed,
+                    function.frame_size,
+                )?;
+            }
+        }
+    }
+    Ok(section)
 }
 
-fn decode_map(record: &[u8]) -> Result<DecodedMap, RawModelError> {
+fn decode_map(
+    record: &[u8],
+    architecture: StackMapArchitecture,
+) -> Result<DecodedMap, RawModelError> {
     let slot_count = u32::from_le_bytes(record[0..4].try_into().expect("槽字段"));
-    let mut registers = [0_u16; 5];
+    let mut registers = [0_u32; 5];
     for (index, mask) in registers.iter_mut().enumerate() {
-        let start = 4 + index * 2;
-        *mask = u16::from_le_bytes(record[start..start + 2].try_into().expect("掩码字段"));
+        *mask = read_mask(record, index, architecture);
     }
     let bytes = slot_count.div_ceil(8) as usize;
     let mut slots: [Vec<u32>; 5] = std::array::from_fn(|_| Vec::new());
-    let mut cursor = 16_usize;
+    let mut cursor = architecture.map_header_bytes();
     for class in &mut slots {
         for byte_index in 0..bytes {
             let byte = record[cursor + byte_index];

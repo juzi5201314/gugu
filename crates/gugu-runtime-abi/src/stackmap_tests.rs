@@ -20,6 +20,9 @@ use super::stackmap_codec::{
 };
 use crate::target::PointerCompression;
 
+#[path = "a64_stackmap_tests.rs"]
+mod a64;
+
 /// 镜像内 runtime 逐字读取 section header 的前 12 字节，并在版本不符时 `fatal` 退出；
 /// 这里把 Gugu 源码里的字面量与 Rust 契约常量对起来，防止版本漂移只在真实镜像上爆炸。
 #[test]

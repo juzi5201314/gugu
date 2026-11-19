@@ -555,6 +555,21 @@ x64 source section 代码原样移入 metadata/source.rs，以保持修改文件
 processor 迁移、精确 PC/CFA、空函数和大 frame；既有 VM 同时增加 LDAR acquire 读建模。
 这些测试不执行 native 代码、GC 或真实协程调度，不登记目标，不接 plan/frontend。
 
+### A64 stack-map codec 与 walker（4c.2a）
+
+4c.2 再分为 codec/walker 基础与 lowering/协程集成两部分。前者在 runtime-abi 的原有
+stackmap_codec 中增加 encode_for(architecture, ...)，SafepointLayout<R=u16> 保留 x64
+默认输入，A64 用 u32；排序、去重、typed root 与 bitmap 编解码仍是同一实现。
+x64 默认 encode 继续输出相同 v4 section，既有 RuntimeRawContract 不改 schema/指纹；
+A64 v5 显式 tag 与寄存器编号见 stack-maps.md。默认 x64 路径不产生新的 header 字节。
+
+解码表携带 architecture，并检查 A64 frame/PC 对齐、根范围、保留寄存器和强制落槽规则。
+Rust reference walker 的 scan_frame 消费最终 section 表、精确返回 PC、frame words 和
+入口 scratch；frame/寄存器都复用已有 scan_roots，不复制 handle/compression 或五类根算法。
+初始化门控、实际 handle/compressed 引用和 MorestackEntry x0-x8 均由合成 VM snapshot 测试。
+此部分不放宽 compile_runtime：LIR 根集/分配器 force-slot 接线、managed call map、序列化
+unwind/CFA 和 Context switch/restore 仍属下一部分；不声称生产镜像 runtime 已支持 A64。
+
 ### A64 运行时机器片段
 
 独立片段通过同一编码表输出字节与片段内重定位；不进入现有 x64 运行时契约，也不登记目标。
