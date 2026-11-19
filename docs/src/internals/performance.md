@@ -8,6 +8,13 @@
 - 默认 `cargo nextest run --workspace` 不跑任何 bench；全部 workload 由 `cargo bench -p gugu-compiler --bench <name>`（`harness = false`）手工验收，输出人读指标。
 - 指标单位固定：吞吐 `item/us` 或 `op/us`，时间 `µs`，镜像 `B`；每次运行必须同时报告规模（items/producers/rounds），单独的数字不算记录。
 
+## 默认正确性套件
+
+编译器自身的默认正确性套件在进程内验证语言契约。资源协议用例直接解释构建期
+artifact 中的生产 LIR，并为每个场景创建独立内存与平台钩子；用户源码到镜像、
+栈图与目标 ABI 的集成检查仍单独执行完整编译。教程围栏逐块验证，较重章节按
+围栏拆分，不能通过跳过示例或删减协议断言缩短默认套件。
+
 ## 已登记 workload
 
 | bench | 覆盖面 | 指标 |
