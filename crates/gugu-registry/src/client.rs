@@ -190,10 +190,17 @@ impl<'a, T: Transport> Client<'a, T> {
         if let Some(mirror) = &self.download_origin {
             url = format!("{mirror}{}", &url[crate::identity::origin(&url).len()..]);
         }
+        // 跨 origin 的下载目标（如 CDN）不携带 registry 凭据。
+        let headers = if crate::identity::origin(&url) == crate::identity::origin(&self.fetch_base)
+        {
+            auth_headers(self.token.as_deref())
+        } else {
+            Vec::new()
+        };
         let response = self.transport.request(&Request {
             method: Method::Get,
             url: url.clone(),
-            headers: auth_headers(self.token.as_deref()),
+            headers,
             body: None,
             max_body: MAX_ARCHIVE_BODY,
         })?;
