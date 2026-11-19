@@ -35,6 +35,27 @@ pub(super) fn accepts(source: &str) -> bool {
     c.is_success()
 }
 
+#[test]
+fn discarded_if_without_else_is_accepted_in_nested_statement_positions() {
+    assert!(accepts(
+        "fn stmt_block(a: int) { { if a > 3 { panic(\"a\") } }\n _ = a }\n\
+         fn nested_if(a: int) { if a > 0 { if a > 1 { panic(\"b\") } }\n _ = a }\n\
+         fn arm(a: Option[int]) { match a {\n Some(n) => { if n > 1 { panic(\"c\") } }\n None => {}\n }\n _ = a }\n\
+         fn tail(a: int) { if a > 0 { if a > 1 { panic(\"d\") } } }\n\
+         fn bodies(a: int) { for j in 0..3 { if j == a { panic(\"e\") } }\n\
+         while a > 3 { if a == 9 { panic(\"f\") } }\n\
+         loop { if a > 0 { break } } }\n\
+         fn main() {}"
+    ));
+}
+
+#[test]
+fn value_used_if_without_else_is_still_rejected_through_blocks() {
+    assert!(!accepts(
+        "fn f(b: bool) int { let x = { if b { 1 } }\n x }\nfn main() {}"
+    ));
+}
+
 /// 逐条断言的语义用例：一条断言一次整体编译（约 1 秒），聚合会让单个测试超过 3 秒上限，
 /// 因此一行一个测试。`true` 表示该源码必须被接受，`false` 表示必须被拒绝。
 #[cfg(feature = "slow-tests")]

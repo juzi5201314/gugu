@@ -59,11 +59,19 @@ impl Checker<'_, '_> {
                 .all(|s| s.initialized.get(i) == Some(&true));
         }
     }
+    /// 在值被丢弃的位置检查表达式：语句、循环体，以及值被丢弃的块尾、`if` 分支与 `match` 臂。
+    pub(super) fn discarded(&mut self, id: ExprId) -> Ty {
+        let outer = self.discarded_expression.replace(id);
+        let ty = self.expression(id, None);
+        self.discarded_expression = outer;
+        ty
+    }
     pub(super) fn block(
         &mut self,
         stmts: AstRange<StmtId>,
         tail: Option<ExprId>,
         expected: Option<&Ty>,
+        discarded: bool,
     ) -> Ty {
         let names = self.state.names.clone();
         let cleanup_floor = self.defers.len();
@@ -81,11 +89,8 @@ impl Checker<'_, '_> {
                         ..
                     }
                 );
-            if statement_if {
-                let outer = self.discarded_expression.replace(id);
-                let ty = self.expression(id, None);
-                self.discarded_expression = outer;
-                ty
+            if discarded || statement_if {
+                self.discarded(id)
             } else {
                 self.expression(id, expected)
             }
@@ -198,9 +203,7 @@ impl Checker<'_, '_> {
                             stmt.span.clone(),
                         );
                     }
-                    let outer = self.discarded_expression.replace(value);
-                    self.expression(value, None);
-                    self.discarded_expression = outer;
+                    self.discarded(value);
                 } else {
                     let left = self.place(place, op != AssignOp::Assign);
                     let trait_assignment =
@@ -254,9 +257,7 @@ impl Checker<'_, '_> {
                 }
             }
             StmtKind::Expr { expr, .. } => {
-                let outer = self.discarded_expression.replace(expr);
-                let ty = self.expression(expr, None);
-                self.discarded_expression = outer;
+                let ty = self.discarded(expr);
                 self.note_discarded_must_use(expr, &ty);
             }
             StmtKind::Defer { body, ret } => self.register_defer(id, body, ret),
@@ -329,10 +330,17 @@ impl Checker<'_, '_> {
     ) -> Ty {
         let base = self.state.clone();
         let failed_condition = self.condition(cond);
-        let left = self.expression(yes, expected);
+        let arm = |this: &mut Self, id| {
+            if value_used {
+                this.expression(id, expected)
+            } else {
+                this.discarded(id)
+            }
+        };
+        let left = arm(self, yes);
         let success = self.state.clone();
         self.state = failed_condition;
-        let right = no.map_or(Ty::Unit, |id| self.expression(id, expected));
+        let right = no.map_or(Ty::Unit, |id| arm(self, id));
         let failure = self.state.clone();
         self.merge(&base, &[success, failure]);
         if no.is_none() {
@@ -353,6 +361,7 @@ impl Checker<'_, '_> {
         scrutinee: ExprId,
         arms: AstRange<MatchArm>,
         expected: Option<&Ty>,
+        discarded: bool,
     ) -> Ty {
         let ty = self.expression(scrutinee, None);
         let ty = self.pattern_type(&ty);
@@ -378,7 +387,11 @@ impl Checker<'_, '_> {
             } else {
                 self.state.clone()
             };
-            let body = self.expression(arm.body, expected);
+            let body = if discarded {
+                self.discarded(arm.body)
+            } else {
+                self.expression(arm.body, expected)
+            };
             result = self.join(&body, &result, &arm.span);
             if self.state.reachable {
                 states.push(self.state.clone());
@@ -441,7 +454,7 @@ impl Checker<'_, '_> {
             value_allowed: cond.is_none() && iter.is_none(),
             cleanup_floor: self.defers.len(),
         });
-        self.expression(body, None);
+        self.discarded(body);
         let loop_state = self.loops.pop().expect("循环上下文已建立");
         let mut exits = loop_state.exits;
         if let Some(state) = natural_exit {
