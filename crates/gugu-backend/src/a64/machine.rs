@@ -35,6 +35,7 @@ pub struct MInst {
 
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub enum Item {
+    Atomic(super::atomic::Atomic),
     Inst(MInst),
     Constant {
         dest: u32,
@@ -138,6 +139,9 @@ impl Item {
     pub fn events(&self) -> Vec<(MReg, Access)> {
         let mut events = Vec::new();
         match self {
+            Self::Atomic(_) => {
+                events.extend((9..=15).map(|id| (MReg::Physical(id), Access::ReadWrite)))
+            }
             Self::Inst(inst) => operand_events(&inst.operands, &mut events),
             Self::Branch { operands, .. } => operand_events(operands, &mut events),
             Self::Constant { dest, .. }

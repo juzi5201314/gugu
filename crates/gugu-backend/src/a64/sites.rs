@@ -94,7 +94,7 @@ impl<'a> Emitter<'a> {
             anchors: vec![],
         })
     }
-    fn label(&mut self) -> Result<u32, Error> {
+    pub(super) fn label(&mut self) -> Result<u32, Error> {
         let label = self.next;
         self.next = label
             .checked_add(1)

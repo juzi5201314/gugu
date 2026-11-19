@@ -1,4 +1,6 @@
 //! Hand-built leaf fixtures; no host assembler, native code or processes.
+mod atomic;
+mod atomic_vm;
 mod calls;
 mod control;
 mod fp;
@@ -154,7 +156,12 @@ impl Fixture {
         let results = self.args(&output);
         let memory = if matches!(
             op,
-            Op::Load(_) | Op::Store(_) | Op::Call(_) | Op::StackCheck | Op::SafepointPoll { .. }
+            Op::Load(_)
+                | Op::Store(_)
+                | Op::Atomic { .. }
+                | Op::Call(_)
+                | Op::StackCheck
+                | Op::SafepointPoll { .. }
         ) {
             let next = self.value(
                 Type::Mem,

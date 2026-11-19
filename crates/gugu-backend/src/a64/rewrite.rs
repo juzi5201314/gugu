@@ -360,6 +360,7 @@ fn rewrite_item(
     runtime: &mut super::sites::Emitter<'_>,
 ) -> Result<(), Error> {
     match item {
+        Item::Atomic(atomic) => atomic.emit(out, runtime),
         Item::RootInit {
             slot,
             bit,
