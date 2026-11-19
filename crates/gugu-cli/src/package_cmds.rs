@@ -391,13 +391,17 @@ fn filter_archive_files(
         .files()
         .iter()
         .filter(|(path, _)| {
-            if include.is_empty() {
-                !default_excluded(path)
-            } else {
-                include.iter().any(|pattern| glob_match(pattern, path))
+            if is_protected(path) {
+                return true;
             }
+            if !include.is_empty() && !include.iter().any(|p| glob_match(p, path)) {
+                return false;
+            }
+            if include.is_empty() && default_excluded(path) {
+                return false;
+            }
+            !exclude.iter().any(|p| glob_match(p, path))
         })
-        .filter(|(path, _)| is_protected(path) || !exclude.iter().any(|p| glob_match(p, path)))
         .map(|(path, bytes)| (path.clone(), bytes.clone()))
         .collect();
     gugu_compiler::PackageFiles::new(filtered).map_err(|error| error.to_string())
