@@ -374,6 +374,7 @@ section_len:          u64
 所有 pool offset 8 字节对齐、位于 section 内且不重叠。record、program 和 name 按内容稳定排序后布局，但 `TypeRecord` 本身仍按 `TypeId` 顺序。所有 padding 为 0。
 
 type section 的版本 3 把记录固定为 80 byte：`size u64`、`align u32`、`flags u32`（九位类型旗标，见上表）、`name_offset/name_len u32`、`trace_offset/trace_len u32`、`value_offset/value_len u32`、`copy/drop/publish_glue_rva u64` 与两个保留字，记录里不再存放稳定键，记录顺序即 `TypeId`。本表的编码是规范性定义：encoder 只负责产出能被本表解码且语义等价的字节，不要求与表逐字节一致；`trace_kind` 与 type flag 的一致性由 verifier 交叉校验。
+零长度数组没有 pointer word，即使元素含 managed 指针，其 direct/interior flags 也必须为零。
 
 `Symbol::TypeDescriptor(key)` 与 `type section` 是同一条记录：符号地址等于 section 起点加 `records_offset` 再加 `type_id * 80`，记录本身就是描述符。编译器不再为每个类型另写一份只含 `size`/`align` 的副本，运行期按该地址读到的字节与 verifier 校验过的记录逐字节相同。`TypeId` 是真空编号（`spec/types.md`）：`type_id[T]()` 在 LIR 期就物化为 `u32` 常量，`as_int()` 之后可作数组下标，不依赖任何链接期地址。
 

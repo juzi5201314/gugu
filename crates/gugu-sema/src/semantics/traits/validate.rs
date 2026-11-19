@@ -1,5 +1,5 @@
 use super::super::super::ast::{BoundKind, FnBody, GenericParamKind, ItemKind, TyKind, Visibility};
-use super::super::model::{Model, Ty, substitute};
+use super::super::model::{ArrayLength, Model, Ty, substitute};
 use super::select::covers;
 use super::{Implementation, Member, MemberKind, Obligation};
 use crate::Diagnostic;
@@ -440,8 +440,16 @@ impl Model<'_> {
 fn overlap(a: &Implementation, b: &Implementation) -> bool {
     let renamed: BTreeMap<_, _> = b
         .parameters
-        .keys()
-        .map(|name| (name.clone(), Ty::Param(format!("$rhs:{name}"))))
+        .iter()
+        .map(|(name, ty)| {
+            let renamed = format!("$rhs:{name}");
+            let ty = if matches!(ty, Ty::Const(_)) {
+                Ty::Const(ArrayLength::Param(renamed))
+            } else {
+                Ty::Param(renamed)
+            };
+            (name.clone(), ty)
+        })
         .collect();
     let mut bindings = BTreeMap::new();
     if !intersect(&a.self_ty, &substitute(&b.self_ty, &renamed), &mut bindings) {
@@ -460,7 +468,7 @@ fn overlap(a: &Implementation, b: &Implementation) -> bool {
 fn intersect(a: &Ty, b: &Ty, bindings: &mut BTreeMap<String, Ty>) -> bool {
     let resolve = |ty: &Ty| {
         let mut value = ty.clone();
-        while let Ty::Param(name) = &value {
+        while let Ty::Param(name) | Ty::Const(ArrayLength::Param(name)) = &value {
             let Some(next) = bindings.get(name) else {
                 break;
             };
@@ -480,6 +488,15 @@ fn intersect(a: &Ty, b: &Ty, bindings: &mut BTreeMap<String, Ty>) -> bool {
         bindings.insert(name.clone(), ty.clone());
         return true;
     }
+    if let (Ty::Const(ArrayLength::Param(name)), ty @ Ty::Const(_))
+    | (ty @ Ty::Const(_), Ty::Const(ArrayLength::Param(name))) = (&a, &b)
+    {
+        if occurs(name, ty, bindings) {
+            return false;
+        }
+        bindings.insert(name.clone(), ty.clone());
+        return true;
+    }
     match (&a, &b) {
         (Ty::Ref(a), Ty::Ref(b))
         | (Ty::Ptr(a), Ty::Ptr(b))
@@ -488,7 +505,10 @@ fn intersect(a: &Ty, b: &Ty, bindings: &mut BTreeMap<String, Ty>) -> bool {
         | (Ty::Chan(a), Ty::Chan(b))
         | (Ty::Join(a), Ty::Join(b))
         | (Ty::MaybeUninit(a), Ty::MaybeUninit(b)) => intersect(a, b, bindings),
-        (Ty::Array(a, n), Ty::Array(b, m)) => n == m && intersect(a, b, bindings),
+        (Ty::Array(a, n), Ty::Array(b, m)) => {
+            intersect(&Ty::Const(n.clone()), &Ty::Const(m.clone()), bindings)
+                && intersect(a, b, bindings)
+        }
         (Ty::Tuple(a), Ty::Tuple(b)) => intersect_list(a, b, bindings),
         (Ty::Named(i, a), Ty::Named(j, b)) => i == j && intersect_list(a, b, bindings),
         (Ty::Result(a, e), Ty::Result(b, f)) => {
@@ -505,7 +525,7 @@ fn intersect_list(a: &[Ty], b: &[Ty], bindings: &mut BTreeMap<String, Ty>) -> bo
 }
 fn occurs(name: &str, ty: &Ty, bindings: &BTreeMap<String, Ty>) -> bool {
     match ty {
-        Ty::Param(other) => {
+        Ty::Param(other) | Ty::Const(ArrayLength::Param(other)) => {
             name == other
                 || bindings
                     .get(other)

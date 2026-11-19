@@ -73,12 +73,13 @@ fn main() {
 等参数算术。具体实参必须是非负整数编译期常量；类型实参与值实参不能混用。
 函数可从数组实参的长度推断 comptime 泛型参数，也可通过 `f::[int, 3](...)`
 显式指定。参数名在函数体中是 `int` 值，可用于重复数组字面量与局部数组类型。
-不同长度是不同的类型与单态化实例。trait 及 trait impl 的 comptime 泛型参数、
-数组上的 comptime 泛型 trait impl 匹配仍待实现。下方缺口示例的目标语义是：数组 Clone
-按元素产生新的数组值；每个输出元素仅在其 clone 成功后成为已初始化元素，全部完成后输出数组才可读取。
+不同长度是不同的类型与单态化实例。数组的 trait impl 可声明 `comptime N: int`，从数组长度绑定参数；
+trait 参数列表中的 comptime 参数及非数组 trait impl 的 comptime 参数仍不支持，并须诊断。
+数组 Clone 按元素调用所选的 Clone 方法产生新的数组值；每个输出元素仅在其 clone 成功后成为已初始化元素，全部完成后输出数组才可读取。
 
-<!-- docs-example: gap 未解析的编译期名称 -->
 ```gugu
+use std.io.{println}
+
 impl[T: Clone, comptime N: int] Clone for [T; N] {
     fn clone(self: &Self) [T; N] {
         let out: [T; N]
@@ -88,7 +89,22 @@ impl[T: Clone, comptime N: int] Clone for [T; N] {
         out
     }
 }
+
+fn main() {
+    let a = ["a", "b"].clone()
+    let b = ["c", "d", "e"].clone()
+    println(a[1])
+    println(b[2])
+}
 ```
+<!-- docs-example: output -->
+```text
+b
+e
+```
+
+数组 Clone 的编译器实现是无显式候选时的回退，不是预导入模块中的源 impl。
+上例的泛型源 impl 在匹配时优先使用，因此没有与预导入 impl 的重叠冲突。
 
 `comptime` 参数必须是编译期已知的值（日常是 `int`）。出现在数组长度、`repr(align(N))`、`match` 范围端点等处。类型实参与 comptime 实参都写在同一对 `[]` 里，贴在类型名上：`Block[int, 4] { data: [0; 4] }`。禁止 `Block::[int, 4] { ... }`：`::[...]` 只给泛型函数与方法，见上表。函数的 comptime 形参仍可写在参数表里：`fn repeat[T](comptime n: int, x: T)`。禁止另搞一套 const 泛型尖括号。
 
