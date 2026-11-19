@@ -265,12 +265,15 @@ pub enum Rt0Boundary {
     LinuxSyscall,
     /// Windows 薄 IAT 入口。
     WindowsThinImport,
+    /// macOS libSystem/dyld 入口。
+    MacosLibSystem,
 }
 impl std::fmt::Display for Rt0Boundary {
     fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         formatter.write_str(match self {
             Self::LinuxSyscall => "linux-syscall",
             Self::WindowsThinImport => "windows-thin-import",
+            Self::MacosLibSystem => "macos-libsystem",
         })
     }
 }
@@ -280,6 +283,7 @@ impl From<Rt0Kind> for Rt0Boundary {
         match value {
             Rt0Kind::LinuxSyscall => Self::LinuxSyscall,
             Rt0Kind::WindowsThinImport => Self::WindowsThinImport,
+            Rt0Kind::MacosLibSystem => Self::MacosLibSystem,
         }
     }
 }

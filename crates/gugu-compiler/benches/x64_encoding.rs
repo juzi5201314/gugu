@@ -4,23 +4,31 @@
 //! 的 checked 解码（解码夹具）。任何不匹配都以非零退出码结束并打印首个失败细节。
 //! 该二进制不进默认测试套件，供 `cargo bench --bench x64_encoding` 与手工验证使用。
 
+#[cfg(target_arch = "x86_64")]
 #[path = "support/vm.rs"]
 mod vm;
 
+#[cfg(target_arch = "x86_64")]
 use gugu_compiler::{EMBEDDED_ARTIFACTS, TargetName, X64Case, X64Harness, X64Register};
 
 /// 代码区大小：片段、冷边 stub 与末尾 `ret` 都放得下。
+#[cfg(target_arch = "x86_64")]
 const CODE_BYTES: usize = 4096;
 /// 数据区大小：内存槽位与冷边计数都在里面。
+#[cfg(target_arch = "x86_64")]
 const DATA_BYTES: usize = 4096;
 /// 冷边计数字节在数据区末尾。
+#[cfg(target_arch = "x86_64")]
 const COUNTER_OFFSET: usize = DATA_BYTES - 16;
 /// `ret` 指令。
+#[cfg(target_arch = "x86_64")]
 const RET: u8 = 0xC3;
 /// `inc byte ptr [rip + disp32]` 的操作码。
+#[cfg(target_arch = "x86_64")]
 const INC_RIP_BYTE: [u8; 2] = [0xFE, 0x05];
 
 /// 执行结果：通过的用例数与失败说明（最多保留 [`MAX_FAILURES`] 条，避免刷屏）。
+#[cfg(target_arch = "x86_64")]
 #[derive(Clone, Debug, Eq, PartialEq)]
 struct Outcome {
     matched: u32,
@@ -28,8 +36,10 @@ struct Outcome {
 }
 
 /// 失败详情上限。
+#[cfg(target_arch = "x86_64")]
 const MAX_FAILURES: usize = 16;
 
+#[cfg(target_arch = "x86_64")]
 impl Outcome {
     fn ok(&mut self) {
         self.matched += 1;
@@ -42,6 +52,10 @@ impl Outcome {
     }
 }
 
+#[cfg(not(target_arch = "x86_64"))]
+fn main() {}
+
+#[cfg(target_arch = "x86_64")]
 fn main() {
     let target = if cfg!(target_os = "windows") {
         TargetName::X86_64Windows
@@ -90,6 +104,7 @@ fn main() {
 }
 
 /// 在宿主上执行一个用例并比较结果。
+#[cfg(target_arch = "x86_64")]
 fn run_case(case: &X64Case, outcome: &mut Outcome) {
     if std::env::var_os("X64_BENCH_VERBOSE").is_some() {
         let bytes: Vec<String> = case
@@ -178,6 +193,7 @@ fn run_case(case: &X64Case, outcome: &mut Outcome) {
 }
 
 /// 执行解码夹具：逐字执行解码片段并核对计数。
+#[cfg(target_arch = "x86_64")]
 fn run_decode(harness: &X64Harness, outcome: &mut Outcome) -> (u64, u64) {
     let fixture = harness.decode();
     let data = vm::reserve(DATA_BYTES);
@@ -240,6 +256,7 @@ fn run_decode(harness: &X64Harness, outcome: &mut Outcome) -> (u64, u64) {
 }
 
 /// 把片段与冷边 stub 写进代码区，返回片段末尾（`ret` 之后）的地址。
+#[cfg(target_arch = "x86_64")]
 fn write_fragment(
     code: &vm::Mapping,
     bytes: &[u8],
@@ -276,6 +293,7 @@ fn write_fragment(
 }
 
 /// 补齐 `cage-control` 的 PC 相对重定位。
+#[cfg(target_arch = "x86_64")]
 fn patch_control_relocations(
     code: &vm::Mapping,
     _end: *mut u8,
@@ -298,6 +316,7 @@ fn patch_control_relocations(
 }
 
 /// 控制记录字段的当前值。
+#[cfg(target_arch = "x86_64")]
 fn read_field(control: *mut u8, field: (u32, u32)) -> u64 {
     let mut bytes = [0_u8; 8];
     let offset = usize::try_from(field.0).expect("字段偏移适配 usize");
@@ -314,11 +333,13 @@ fn read_field(control: *mut u8, field: (u32, u32)) -> u64 {
 }
 
 /// 内存槽位的字节偏移。
+#[cfg(target_arch = "x86_64")]
 fn slot_offset(index: u32) -> usize {
     usize::try_from(index).expect("槽位下标适配 usize") * 8
 }
 
 /// 写入寄存器初值。
+#[cfg(target_arch = "x86_64")]
 fn set_register(state: &mut [u64; vm::STATE_WORDS], register: X64Register, value: u128) {
     match register {
         X64Register::Gpr(code) => state[usize::from(code)] = low(value),
@@ -331,6 +352,7 @@ fn set_register(state: &mut [u64; vm::STATE_WORDS], register: X64Register, value
 }
 
 /// 读取寄存器结果。
+#[cfg(target_arch = "x86_64")]
 fn get_register(state: &[u64; vm::STATE_WORDS], register: X64Register) -> u128 {
     match register {
         X64Register::Gpr(code) => u128::from(state[usize::from(code)]),
@@ -341,10 +363,12 @@ fn get_register(state: &[u64; vm::STATE_WORDS], register: X64Register) -> u128 {
     }
 }
 
+#[cfg(target_arch = "x86_64")]
 fn low(value: u128) -> u64 {
     u64::try_from(value & u128::from(u64::MAX)).expect("低 64 位适配 u64")
 }
 
+#[cfg(target_arch = "x86_64")]
 fn high(value: u128) -> u64 {
     u64::try_from(value >> 64).expect("高 64 位适配 u64")
 }

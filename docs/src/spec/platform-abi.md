@@ -54,6 +54,8 @@ Linux 目标在没有动态 FFI、系统 Resolver 或可达环境 API 需求时�
 
 ### 新目标登记
 
+目标描述符的架构、操作系统、镜像格式、rt0 边界、CPU 基线与指针压缩能力是独立维度。实现可以预先表示 `aarch64`、`macos`、`macho64`、libSystem/dyld 启动边界和 `armv8.0-a` 基线；这些维度值不构成已登记目标，也不使其任意组合成为合法目标名。`armv8.0-a` 不接受任何 x86 CPU 特性；AArch64 指针压缩能力声明采用 48 位虚拟地址、最大 4 GiB cage 与 2 MiB 最小对齐，不表示已有对应后端或运行时。目标注册表及宿主目标选择仍只接受上述两行，`aarch64-linux` 与 `aarch64-macos` 均必须拒绝。
+
 增加目标必须同时提供并登记：
 
 - `arch`、`os`、字节序、指针宽度和 C 数据模型；
@@ -67,6 +69,8 @@ Linux 目标在没有动态 FFI、系统 Resolver 或可达环境 API 需求时�
 ### 宿主与目标
 
 `host` 是执行 `build.gg` 和工具链辅助程序的平台；`target` 是普通程序、测试或 bench 镜像的平台。二者可以不同。目标相关的 `cfg` 和 `[target.'cfg(...)']` 依赖按 target 求值，`build.gg` 的宿主条件按 host 求值。host 不能改变 target 的数据模型、ABI 或镜像格式。
+
+Gugu 源码仓库的 Rust workspace 全目标构建不要求宿主为 `x86_64`。直接在宿主 CPU 上执行 x86_64 机器码的 `coroutine_context`、`morestack_entry`、`x64_encoding` 和 `x64_frame` 基准只在 Rust 的 `target_arch = "x86_64"` 时执行；其它构建架构保留空入口。这不新增 Gugu 编译目标。
 
 ## 目标键与条件编译
 
