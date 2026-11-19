@@ -1,6 +1,41 @@
 use super::{CompileRequest, Compiler, TargetName, printing::output};
 
 #[test]
+fn early_array_arguments_match_explicit_lengths_during_type_formation() {
+    for (parameter, argument, count) in [
+        ("[T; N]", "[1, 2]", 3),
+        ("[T; N]", "[0; 0]", 1),
+        ("[[T; N]; 1]", "[[1]]", 2),
+        ("([T; N], bool)", "([1], true)", 2),
+        ("[T; 2]", "[1]", 2),
+    ] {
+        let source = format!(
+            "fn length[T, comptime N: int](a: {parameter}) int {{ N }}\nstruct Storage {{ data: [int; length::[int, {count}]({argument})] }}\nfn main() {{}}"
+        );
+        let compiled = Compiler::shared().compile(CompileRequest::single_file(
+            "main.gg",
+            &source,
+            TargetName::X86_64Linux,
+        ));
+        assert!(
+            !compiled.is_success(),
+            "ill-typed array-length call was accepted"
+        );
+        assert!(
+            compiled
+                .diagnostics()
+                .items()
+                .iter()
+                .any(|diagnostic| diagnostic
+                    .message()
+                    .contains("comptime 数组实参长度与参数长度不一致")),
+            "{:?}",
+            compiled.diagnostics().items()
+        );
+    }
+}
+
+#[test]
 fn source_macro_const_arguments_preserve_script_locals_and_comptime_parameters() {
     let actual: Vec<_> = output(
         r#"

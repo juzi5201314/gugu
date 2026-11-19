@@ -17,6 +17,7 @@ use crate::query::{QueryEngine, QueryKey, QueryKind};
 use crate::source::{ExpansionId, SourceMap, SourceSlot, SourceSnapshot};
 use crate::string;
 use crate::{Diagnostic, DiagnosticCode};
+mod arguments;
 mod generics;
 
 /// ParseSource query 的 schema 版本。
@@ -1254,6 +1255,7 @@ impl Model<'_> {
             return Err(self.fail(module, expression, "被调端点不是函数"));
         }
         let generics = self.call_const_arguments(module, expression, def, state)?;
+        self.check_const_array_arguments(def, &arguments, &generics, &span)?;
         self.interpret_function(def, &arguments, &generics, &span, state)
     }
 
