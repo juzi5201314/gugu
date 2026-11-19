@@ -277,6 +277,11 @@ impl Checker<'_, '_> {
                 if let Some(context) = self.loops.last() {
                     self.run_cleanups(context.cleanup_floor, false);
                 }
+                if self.state.reachable
+                    && let Some(context) = self.loops.last_mut()
+                {
+                    context.back_edges.push(self.state.clone());
+                }
                 self.state.reachable = false;
                 Ty::Never
             }

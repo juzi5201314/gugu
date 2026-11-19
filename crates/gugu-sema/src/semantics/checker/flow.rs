@@ -476,7 +476,7 @@ impl Checker<'_, '_> {
         }
         self.loops.push(LoopState {
             entry_slots: self.slots.len(),
-            written: Default::default(),
+            back_edges: Vec::new(),
             pack,
             values: Vec::new(),
             exits: Vec::new(),
@@ -484,22 +484,16 @@ impl Checker<'_, '_> {
             cleanup_floor: self.defers.len(),
         });
         self.discarded(body);
-        let loop_state = self.loops.pop().expect("循环上下文已建立");
+        let mut loop_state = self.loops.pop().expect("循环上下文已建立");
+        if self.state.reachable {
+            loop_state.back_edges.push(self.state.clone());
+        }
         let mut exits = loop_state.exits;
         if let Some(state) = natural_exit {
             exits.push(state);
         }
         self.merge(&base, &exits);
-        for slot in loop_state.written {
-            if let Some(initialized) = self.state.maybe_initialized.get_mut(slot) {
-                *initialized = true;
-            }
-            for path in self.state.cleanup_paths.values_mut() {
-                if let Some(initialized) = path.maybe_initialized.get_mut(slot) {
-                    *initialized = true;
-                }
-            }
-        }
+        self.merge_loop_back_edges(&loop_state.back_edges);
         let mut result = if loop_state.value_allowed {
             Ty::Never
         } else {
@@ -509,5 +503,30 @@ impl Checker<'_, '_> {
             result = self.join(&ty, &result, &self.arena().exprs[body.0 as usize].span);
         }
         result
+    }
+
+    fn merge_loop_back_edges(&mut self, back_edges: &[State]) {
+        if !self.state.reachable {
+            return;
+        }
+        for back_edge in back_edges.iter().filter(|state| state.reachable) {
+            for (initialized, &incoming) in self
+                .state
+                .maybe_initialized
+                .iter_mut()
+                .zip(&back_edge.maybe_initialized)
+            {
+                *initialized |= incoming;
+            }
+            for (&id, path) in &mut self.state.cleanup_paths {
+                let incoming = back_edge
+                    .cleanup_paths
+                    .get(&id)
+                    .map_or(&back_edge.maybe_initialized, |path| &path.maybe_initialized);
+                for (initialized, &incoming) in path.maybe_initialized.iter_mut().zip(incoming) {
+                    *initialized |= incoming;
+                }
+            }
+        }
     }
 }

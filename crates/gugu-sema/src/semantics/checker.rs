@@ -56,7 +56,7 @@ struct Slot {
 }
 struct LoopState {
     entry_slots: usize,
-    written: std::collections::BTreeSet<usize>,
+    back_edges: Vec<State>,
     pack: bool,
     values: Vec<Ty>,
     exits: Vec<State>,
@@ -756,11 +756,6 @@ impl<'m, 'a> Checker<'m, 'a> {
         }
         self.state.initialized[slot] = value;
         self.state.maybe_initialized[slot] = value;
-        if value {
-            for loop_state in &mut self.loops {
-                loop_state.written.insert(slot);
-            }
-        }
         for path in self.state.cleanup_paths.values_mut() {
             path.initialized.resize(self.slots.len(), false);
             path.initialized[slot] = value;

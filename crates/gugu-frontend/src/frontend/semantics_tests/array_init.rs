@@ -194,7 +194,26 @@ macro_rules! rejects {
     )*};
 }
 
+#[test]
+fn diverging_loop_writes_do_not_reach_later_init_loops() {
+    for earlier_loop in [
+        "for j in 0..2 { if flag { a = [1, 2]\n return a } }",
+        "while flag { a = [1, 2]\n return a }",
+        "for j in 0..2 { if flag { loop { a = [1, 2]\n return a } } }",
+    ] {
+        accepts(
+            &format!(
+                "fn f(flag: bool) [int; 2] {{ let a: [int; 2]\n {earlier_loop}\n for i in 0..2 {{ a[i] = i }}\n a }}"
+            ),
+            hir::ArrayLength::Known(2),
+        );
+    }
+}
+
 rejects! {
+    previous_loop_fallthrough_write: "fn f(flag: bool) { let a: [int; 2]\n for j in 0..2 { if flag { a = [1, 2] } }\n for i in 0..2 { a[i] = i } }";
+    previous_loop_continue_write: "fn f(flag: bool) { let a: [int; 2]\n for j in 0..2 { if flag { a = [1, 2]\n continue } }\n for i in 0..2 { a[i] = i } }";
+    previous_loop_break_write: "fn f(flag: bool) { let a: [int; 2]\n for j in 0..2 { if flag { a = [1, 2]\n break } }\n for i in 0..2 { a[i] = i } }";
     only_cfg_removed_store: "fn f() [int; 2] { let a: [int; 2]\n for i in 0..2 { #[cfg(false)] a[i] = i }\n a }";
     reused_array_outside_outer_for: "fn f() { let a: [int; 2]\n for round in 0..2 { for i in 0..2 { a[i] = i } } }";
     reused_array_outside_outer_while: "fn f() { let a: [int; 2]\n let round = 0\n while round < 2 { for i in 0..2 { a[i] = i }\n round += 1 } }";
