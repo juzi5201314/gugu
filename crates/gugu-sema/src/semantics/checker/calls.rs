@@ -392,6 +392,9 @@ impl Checker<'_, '_> {
         &self,
         expression: ExprId,
     ) -> Option<super::super::model::ArrayLength> {
+        let expression = self
+            .model
+            .unparenthesized_expression(self.module, expression);
         let ExprKind::Path(path) = self.arena().exprs[expression.0 as usize].kind else {
             return None;
         };

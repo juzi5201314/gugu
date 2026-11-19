@@ -1,6 +1,58 @@
 use super::{CompileRequest, Compiler, TargetName, printing::output};
 
 #[test]
+fn dependent_value_parameters_forward_parenthesized_constants() {
+    let bytes: Vec<_> = output(
+        r#"
+use std.io.{println}
+fn g(comptime n: int) [int; n] { [9; n] }
+fn f(comptime n: int) [int; n] { g(((n))) }
+const EARLY: [int; 2] = f(2)
+fn main() {
+    let a = f(3)
+    let empty: [int; 0] = f(0)
+    _ = empty
+    println(EARLY[1])
+    println(a[2])
+}
+"#,
+        &[],
+    )
+    .into_iter()
+    .flat_map(|(_, bytes)| bytes)
+    .collect();
+    assert_eq!(bytes, b"9\n9\n");
+}
+
+#[test]
+fn early_dependent_array_arguments_check_parenthesized_lengths() {
+    let compiled = Compiler::shared().compile(CompileRequest::single_file(
+        "main.gg",
+        r#"
+fn take(comptime n: int, a: [int; ((n))]) int { a[0] }
+const VALUE: int = comptime source {
+    let value = take(2, [1, 2, 3])
+    std.syntax.parse_source(f"{value}")
+}
+fn main() { _ = VALUE }
+"#,
+        TargetName::X86_64Linux,
+    ));
+    assert!(!compiled.is_success());
+    assert!(
+        compiled
+            .diagnostics()
+            .items()
+            .iter()
+            .any(|diagnostic| diagnostic
+                .message()
+                .contains("数组实参长度与参数长度不一致")),
+        "{:?}",
+        compiled.diagnostics().items()
+    );
+}
+
+#[test]
 fn dependent_value_parameter_method_dispatch_uses_bound_signature() {
     let bytes: Vec<_> = output(
         r#"

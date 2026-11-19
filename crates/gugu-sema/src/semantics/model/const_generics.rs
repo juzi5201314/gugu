@@ -14,6 +14,19 @@ impl ArrayLength {
 }
 
 impl Model<'_> {
+    pub(in super::super) fn unparenthesized_expression(
+        &self,
+        module: usize,
+        mut expression: ExprId,
+    ) -> ExprId {
+        while let ExprKind::Paren(inner) =
+            self.modules[module].arena.exprs[expression.0 as usize].kind
+        {
+            expression = inner;
+        }
+        expression
+    }
+
     pub fn scoped_array_length(
         &self,
         module: usize,
@@ -154,7 +167,8 @@ impl Model<'_> {
         params: &BTreeMap<String, Ty>,
     ) -> Result<ArrayLength, Diagnostic> {
         let arena = &self.modules[module].arena;
-        if let ExprKind::Path(path) = arena.exprs[expression.0 as usize].kind {
+        let inner = self.unparenthesized_expression(module, expression);
+        if let ExprKind::Path(path) = arena.exprs[inner.0 as usize].kind {
             let parts = self.path(module, path);
             if parts.len() == 1
                 && let Some(Ty::Const(value)) = params.get(parts[0])

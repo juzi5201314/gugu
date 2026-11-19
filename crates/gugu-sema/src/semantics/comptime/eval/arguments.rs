@@ -70,6 +70,7 @@ impl Model<'_> {
         let arena = &self.modules[module].arena;
         match (arena.tys[ty.0 as usize].kind, value) {
             (TyKind::Array { elem, len }, ConstantValue::Array(items)) => {
+                let len = self.unparenthesized_expression(module, len);
                 let expected = match arena.exprs[len.0 as usize].kind {
                     ExprKind::Literal(literal) => self.literal_value(module, literal),
                     ExprKind::Path(path) => match self.path(module, path).as_slice() {
