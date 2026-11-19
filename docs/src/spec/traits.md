@@ -194,6 +194,8 @@ impl Vec[T] {
 - 语言可以对 `dyn Trait` 写固有 impl（`impl dyn Any`）。用户不能给 `dyn Trait` 写固有方法。语言为数组和元组生成的 `Eq` / `Ord` / `Print` 视为定义处 impl，用户不能再写一份重叠的固有 impl。数组 `Clone` 是没有显式 trait impl 时的回退；显式数组 `Clone` impl 按普通一致性与特化规则选择。
 - 关联类型与关联常量都走 `::`：`Iter::Item`、`Dim::N`。在 impl 里写 `type Output = Point`、`const N = 4`；在签名里用 `Self::Output` / `Self::N`，不要靠裸名。
 
+数组 Clone 的显式候选可以覆盖含内置标量元素的数组，包括 `impl[comptime N: int] Clone for [int; N]`；显式否定 impl 同样阻止回退。这不允许覆盖标量自身不可重写的语言实现。
+
 关联调用遵循[类型路径的分段泛型规则](types.md)。`Self` 在关联项签名和函数体中都指当前实现的完整 Self 类型，可以直接用于构造该类型。
 
 `self` 的类型可以写 `self`、`self: Point`、`self: &Point`。按值 `self` 拷贝接收者；`&Point` 按引用。句柄类型（`Vec`）的方法接 `self` 就是拷贝句柄，能 `push` 到同一块载荷。大位结构体应接 `&Self`。

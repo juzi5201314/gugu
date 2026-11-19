@@ -96,6 +96,7 @@ impl Model<'_> {
         let definition = &self.traits.interfaces[interface.id];
         if definition.definition.is_none() {
             if self.builtin_trait(&implementation.self_ty, interface)
+                && !(definition.name == "Clone" && matches!(implementation.self_ty, Ty::Array(..)))
                 && !(self.modules[def.module].builtin
                     && self.modules[def.module].path == "std.fmt"
                     && matches!(

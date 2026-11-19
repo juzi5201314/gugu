@@ -82,6 +82,32 @@ fn main() { let values = [["a", "b"], ["c", "d"], ["e", "f"]]
 }
 
 #[test]
+fn array_clone_explicit_primitive_const_impl_overrides_fallback() {
+    let source = r#"
+use std.io.{println}
+impl[comptime N: int] Clone for [int; N] {
+    fn clone(self: &Self) Self { println(N)
+        [9; N] }
+}
+fn main() {
+    let source: [int; 2] = [1, 2]
+    let a = source.clone()
+    println(a[1])
+    let source: [int; 3] = [1, 2, 3]
+    let b = source.clone()
+    println(b[2])
+    let empty: [int; 0] = []
+    _ = empty.clone()
+}
+"#;
+    let bytes: Vec<_> = output(source, &[])
+        .into_iter()
+        .flat_map(|(_, bytes)| bytes)
+        .collect();
+    assert_eq!(bytes, b"2\n9\n3\n9\n0\n");
+}
+
+#[test]
 fn array_impl_lengths_use_distinct_const_argument_identities() {
     let source = "trait Length { fn length(self: &Self) int }\nimpl[T, comptime N: int] Length for [T; N] { fn length(self: &Self) int { N } }\nfn main() { _ = [1, 2].length()\n _ = [1, 2, 3].length()\n _ = [1, 2].length() }";
     let queries = crate::QueryEngine::new();
@@ -209,6 +235,22 @@ fn rejects(source: &str, message: &str) {
             .any(|diagnostic| diagnostic.message().contains(message)),
         "{:?}",
         compiled.diagnostics().items()
+    );
+}
+
+#[test]
+fn array_clone_explicit_negative_blocks_fallback() {
+    rejects(
+        "impl !Clone for [int; 2] {}\nfn take[T: Clone](value: T) {}\nfn main() { let values: [int; 2] = [1, 2]\n take(values) }",
+        "否定",
+    );
+}
+
+#[test]
+fn scalar_clone_remains_non_overridable() {
+    rejects(
+        "impl Clone for int { fn clone(self: &Self) Self { *self } }\nfn main() {}",
+        "不能覆盖编译器提供的语言实现",
     );
 }
 
