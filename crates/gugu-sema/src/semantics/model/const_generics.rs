@@ -147,8 +147,8 @@ impl Model<'_> {
             expr.span.start() >= span.start()
                 && expr.span.end() <= span.end()
                 && matches!(expr.kind, ExprKind::Path(path)
-                    if self.path(module, path).as_slice().first().is_some_and(|name|
-                        matches!(params.get(*name), Some(Ty::Const(_)))))
+                    if matches!(self.path(module, path).as_slice(), [name]
+                        if matches!(params.get(*name), Some(Ty::Const(_)))))
         })
     }
 

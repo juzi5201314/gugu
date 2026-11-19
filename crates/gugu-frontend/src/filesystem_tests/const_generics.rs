@@ -1,5 +1,25 @@
 use super::{CompileRequest, Compiler, TargetName, printing::output};
 
+#[test]
+fn qualified_repeat_lengths_are_not_bare_const_parameters() {
+    let actual: Vec<_> = output(
+        r#"
+use std.io.{println}
+use std.test as Mod
+fn length[comptime Mod: int](x: int) int {
+    let values = [x; Mod.FLAG_IGNORE]
+    values.len()
+}
+fn main() { println(length::[4](7)) }
+"#,
+        &[],
+    )
+    .into_iter()
+    .flat_map(|(_, bytes)| bytes)
+    .collect();
+    assert_eq!(actual, b"1\n");
+}
+
 fn requires_explicit_early_const_arguments(source: &str) {
     let compiled = Compiler::shared().compile(CompileRequest::single_file(
         "main.gg",
