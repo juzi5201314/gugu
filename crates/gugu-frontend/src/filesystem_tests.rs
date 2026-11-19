@@ -8,6 +8,7 @@ mod formatting;
 mod harness;
 mod hashing;
 mod network;
+mod normalization;
 mod platform;
 mod printing;
 mod process;
