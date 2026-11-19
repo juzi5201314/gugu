@@ -44,7 +44,17 @@ pub fn allocate(function: &Function, registers: &impl RegisterFile) -> Result<Al
                 .and_then(|p| p.checked_mul(2))
                 .ok_or_else(|| super::error("A64 allocation position overflow"))?;
             let call = site.item.is_call();
-            let mut fixed = if call { abi::CALLER_SAVED } else { RegSet(0) };
+            let mut fixed = if matches!(site.item, super::machine::Item::Poll { .. }) {
+                RegSet(
+                    abi::POOL
+                        .iter()
+                        .fold(0, |mask, reg| mask | (1_u64 << reg.0)),
+                )
+            } else if call {
+                abi::CALLER_SAVED
+            } else {
+                RegSet(0)
+            };
             for (reg, access) in site.item.events() {
                 let MReg::Virtual(id) = reg else {
                     if let MReg::Physical(id) = reg {

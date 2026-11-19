@@ -69,6 +69,19 @@ signal/APC handler不在任意PC直接扫描用户 stack。它只设置当前 pr
 
 ## 寄存器规则
 
+### 内部 A64 runtime-site 边界（4c.1）
+
+A64 fragment 暂只发布无根运行时站点的最终 BL 返回 PC 与 CFA 诊断，不发布此处二进制
+section。返回 PC 必须精确匹配，不能用最近站点代替；MorestackEntry 的 frame 尚未建立，
+原始 LR 在 x10；PollResume 按 CFA=SP+frame.size，原始 LR 在 SP+record+8 恢复。
+x29 指向 FP/LR record，但 poll 后不能假设 x29 的值有效，因此诊断使用 SP-based CFA。
+
+下表的 v4 寄存器编号仅适用于 x64，不能把 xN 强行解释为同号 x64 bit。A64 编号、
+schema 架构区分、掩码宽度、frame 对齐与 walker 消费在 4c.2 同时引入；当前 codec 的
+u16 mask 和 frame_size%16==8 都是 x64 约束，不为 A64 伪造转换或复用已占用位。
+有根 A64 函数、managed call 和 coroutine handoff 在此阶段仍拒绝，等待强制根 spill
+与原有 LIR 逻辑根集接线；空根诊断不是可运行用户镜像的栈图承诺。
+
 stack map 的通用寄存器编号固定为：
 
 | bit | 寄存器 | bit | 寄存器 |

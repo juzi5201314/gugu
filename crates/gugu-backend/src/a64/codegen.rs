@@ -17,6 +17,7 @@ pub struct LeafFragment {
     pub frame: Frame,
     pub allocation: Allocation,
     pub selected: Function,
+    pub runtime_sites: Vec<super::sites::RuntimeSite>,
 }
 
 pub fn compile_leaf(body: &Body) -> Result<LeafFragment, Error> {
@@ -32,17 +33,31 @@ pub(crate) fn compile_function_with_registers(
     body: &Body,
     registers: &impl RegisterFile,
 ) -> Result<LeafFragment, Error> {
-    compile(body, registers, false)
+    compile(body, registers, false, None)
 }
 
 pub(crate) fn compile_with_registers(
     body: &Body,
     registers: &impl RegisterFile,
 ) -> Result<LeafFragment, Error> {
-    compile(body, registers, true)
+    compile(body, registers, true, None)
 }
 
-fn compile(body: &Body, registers: &impl RegisterFile, leaf: bool) -> Result<LeafFragment, Error> {
+/// Root-free checked entries and polls; serialized GC/unwind integration is 4c.2.
+pub fn compile_runtime(
+    body: &Body,
+    bindings: &super::glue::RuntimeBindings,
+) -> Result<LeafFragment, Error> {
+    bindings.validate()?;
+    compile(body, &abi::A64Registers, false, Some(bindings))
+}
+
+fn compile(
+    body: &Body,
+    registers: &impl RegisterFile,
+    leaf: bool,
+    bindings: Option<&super::glue::RuntimeBindings>,
+) -> Result<LeafFragment, Error> {
     let compile = || {
         for reg in registers.pool(abi::GPR, false) {
             if !abi::POOL.contains(reg) {
@@ -51,7 +66,9 @@ fn compile(body: &Body, registers: &impl RegisterFile, leaf: bool) -> Result<Lea
                 ));
             }
         }
-        let selected = if leaf {
+        let selected = if bindings.is_some() {
+            super::select::select_runtime(body)?
+        } else if leaf {
             super::select::select(body)?
         } else {
             super::select::select_function(body)?
@@ -72,8 +89,10 @@ fn compile(body: &Body, registers: &impl RegisterFile, leaf: bool) -> Result<Lea
         }
         let allocation = alloc::allocate(&selected, registers)?;
         let frame = frame::layout(body, &allocation)?;
-        let rewritten = super::rewrite::rewrite(&selected, &allocation, &frame)?;
+        let (rewritten, anchors) =
+            super::rewrite::rewrite_runtime(&selected, &allocation, &frame, bindings)?;
         let (bytes, layout, relocations) = layout::assemble_function(&rewritten)?;
+        let runtime_sites = super::sites::resolve(&anchors, &layout, &frame)?;
         Ok(LeafFragment {
             symbol: abi::symbol(&body.instance),
             bytes,
@@ -82,6 +101,7 @@ fn compile(body: &Body, registers: &impl RegisterFile, leaf: bool) -> Result<Lea
             frame,
             allocation,
             selected,
+            runtime_sites,
         })
     };
     compile().map_err(|error: Error| Error(format!("A64 {}: {error}", body.name)))

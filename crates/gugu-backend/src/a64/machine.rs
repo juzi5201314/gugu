@@ -49,6 +49,10 @@ pub enum Item {
         index: u32,
     },
     Copies(Vec<(MReg, MReg)>),
+    Poll {
+        block: u32,
+        instruction: u32,
+    },
     Call {
         target: String,
         arguments: Vec<u32>,
@@ -82,6 +86,7 @@ pub struct Block {
 pub struct Function {
     pub name: String,
     pub entry: usize,
+    pub checked_entry: bool,
     pub types: Vec<Type>,
     pub blocks: Vec<Block>,
 }
@@ -117,7 +122,10 @@ pub fn zero() -> MOperand {
 
 impl Item {
     pub fn is_call(&self) -> bool {
-        matches!(self, Self::Call { .. } | Self::TailCall { .. })
+        matches!(
+            self,
+            Self::Call { .. } | Self::TailCall { .. } | Self::Poll { .. }
+        )
     }
 
     pub fn events(&self) -> Vec<(MReg, Access)> {
@@ -151,7 +159,7 @@ impl Item {
                         .map(|id| (MReg::Virtual(*id), Access::Read)),
                 );
             }
-            Self::Return => {}
+            Self::Return | Self::Poll { .. } => {}
         }
         events
     }

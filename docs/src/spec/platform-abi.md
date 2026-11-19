@@ -56,6 +56,8 @@ A64 内部整数叶 lowering 使用私有寄存器约定与共享分配核心；
 内部 lowering 的调用参数只在函数进入时物化；回到 LIR 入口块的控制流边必须使用该边传入的参数值，不能重新读取初始 ABI 参数。
 内部 A64 直接调用与尾调只在显式隔离、预留栈容量的边界可用，必须保留 LIR 的 poll-free 证明；需要 checked entry 或 stack map 的生产调用仍被拒绝。这不是目标登记、外部 C ABI 或 runtime 接通的声明。
 
+内部 A64 runtime-site lowering 可为无根整数函数生成 checked entry 与 poll：入口在写栈前按当前水位检查，morestack 返回后恢复 LR 并重试；poll 慢路前保存所有跨点用户值。此分阶段接口尚无序列化栈图/展开及协程集成，不允许带根或普通调用的生产函数，也不声明 AArch64 用户镜像可运行。
+
 Linux 目标在没有动态 FFI、系统 Resolver 或可达环境 API 需求时不依赖动态解释器或 libc 初始化。闭世界实际可达的系统 Resolver、环境 API 及通过环境快照依赖它的 Command.spawn 自动采用目标工具链登记的 libc、pthread 与解释器。args/current_dir/set_current_dir、普通 fs、数字网络和空程序仍使用静态 syscall 路径。Windows 目标不链接 CRT，通过薄 IAT 使用运行时所需的系统 DLL；可达的网络功能按需加入 Winsock，进程创建遵守 [CreateProcessW](https://learn.microsoft.com/en-us/windows/win32/api/processthreadsapi/nf-processthreadsapi-createprocessw) 的 application、命令行、环境与继承句柄契约。其它动态库必须通过显式 FFI 构建配置加入，不能由宿主链接器隐式补齐。系统需求与显式配置合并后的库、符号、Function/Data 种类和解释器均进入 action key；同名符号来自冲突库或具有冲突种类时必须拒绝，不能替换调用方配置。详见[程序与编译模型](program-model.md)和[包、依赖与构建模型](packages-builds.md)。
 
 ### 新目标登记

@@ -18,7 +18,20 @@ pub fn rewrite(
     allocation: &Allocation,
     frame: &Frame,
 ) -> Result<Vec<layout::Item>, Error> {
+    Ok(rewrite_runtime(function, allocation, frame, None)?.0)
+}
+
+pub(crate) fn rewrite_runtime(
+    function: &Function,
+    allocation: &Allocation,
+    frame: &Frame,
+    bindings: Option<&super::glue::RuntimeBindings>,
+) -> Result<(Vec<layout::Item>, Vec<super::sites::Anchor>), Error> {
     let mut out = Vec::new();
+    let mut runtime = super::sites::Emitter::new(bindings, function.blocks.len())?;
+    if bindings.is_some() && (function.checked_entry || frame.size != 0) {
+        runtime.entry(&mut out, frame.size)?;
+    }
     prologue(&mut out, frame)?;
     if function.entry != 0 {
         out.push(layout::Item::Branch {
@@ -30,14 +43,24 @@ pub fn rewrite(
     for (index, block) in function.blocks.iter().enumerate() {
         out.push(layout::Item::Label(index as u32));
         for site in &block.items {
+            if let Item::Poll { block, instruction } = site.item {
+                runtime
+                    .poll(&mut out, block, instruction)
+                    .map_err(|e| Error(format!("{}: {e}", site.context)))?;
+                continue;
+            }
             rewrite_item(&mut out, &site.item, allocation, frame)
                 .map_err(|e| Error(format!("{}: {e}", site.context)))?;
         }
     }
-    Ok(out)
+    Ok((out, runtime.anchors))
 }
 
-fn emit(out: &mut Vec<layout::Item>, key: &str, operands: Vec<Operand>) -> Result<(), Error> {
+pub(super) fn emit(
+    out: &mut Vec<layout::Item>,
+    key: &str,
+    operands: Vec<Operand>,
+) -> Result<(), Error> {
     out.push(layout::Item::Inst(machine::inst(key, operands)?));
     Ok(())
 }
@@ -83,7 +106,7 @@ pub fn constant(out: &mut Vec<layout::Item>, dest: u8, bits: u64) -> Result<(), 
     Ok(())
 }
 
-fn adjust(
+pub(super) fn adjust(
     out: &mut Vec<layout::Item>,
     dest: Reg,
     source: Reg,
@@ -302,6 +325,7 @@ fn rewrite_item(
     frame: &Frame,
 ) -> Result<(), Error> {
     match item {
+        Item::Poll { .. } => Err(super::error("poll requires runtime bindings")),
         Item::Constant { dest, .. } | Item::StackAddr { dest, .. } => {
             let Some(loc) = location(MReg::Virtual(*dest), allocation)? else {
                 return Ok(());
