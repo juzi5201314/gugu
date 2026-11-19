@@ -744,3 +744,33 @@ pub fn gc_initiator_frame(entry_rsp: uint) (uint, uint) {
     }
     (found_frame, found_pc)
 }
+
+/// Architecture-independent access to an already validated immutable metadata image.
+#[cfg(arch = "aarch64")]
+pub fn gc_metadata_word(address: uint, bytes: uint) uint {
+    if bytes == 8 { return roots_word(address) }
+    if bytes == 4 { return roots_word32(address) }
+    if bytes == 2 { return roots_word16(address) }
+    roots_byte(address)
+}
+
+/// Exact function/safepoint indices; the sentinel kind selects a caller-return site.
+#[cfg(arch = "aarch64")]
+pub fn gc_metadata_lookup(section: uint, offset: uint, kind: uint) (uint, uint) {
+    let function = roots_find_function(section, offset)
+    let point = ROOT_NO_ENTRY
+    if function != ROOT_NO_ENTRY {
+        let relative = offset - roots_function_rva(section, function)
+        if kind == ROOT_NO_ENTRY {
+            point = roots_find_return_safepoint(section, function, relative)
+        } else {
+            point = roots_find_safepoint(section, function, relative, kind)
+        }
+    }
+    (function, point)
+}
+
+#[cfg(arch = "aarch64")]
+pub fn gc_metadata_emit(out: uint, capacity: uint, address: uint, kind: uint, value: uint) {
+    roots_emit(out, capacity, address, kind, value)
+}

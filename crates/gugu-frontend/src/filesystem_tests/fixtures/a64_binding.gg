@@ -1,0 +1,13 @@
+use std.runtime.a64 as a64
+
+#[used]
+fn a64_bind_control(state: *a64.A64ControlBlock, hot: uint, system: uint) bool = a64.a64_bind_control(state, hot, system)
+
+#[used]
+fn a64_morestack_snapshot(state: *a64.A64ControlBlock, snapshot: *a64.A64Snapshot, resume: uint) bool = a64.a64_morestack_snapshot(state, snapshot, resume)
+
+#[used]
+fn gc_a64_scan_frame(out: uint, capacity: uint, section: uint, length: uint, base: uint, frame: uint, pc: uint, kind: uint, gpr: uint, valid: uint) uint = a64.gc_a64_scan_frame(out, capacity, section, length, base, frame, pc, kind, gpr, valid)
+
+#[used]
+fn gc_a64_walk_roots(out: uint, capacity: uint, payload: uint, bias: uint, snapshot: *a64.A64Snapshot, kind: uint, low: uint, high: uint, limit: uint) uint = a64.gc_a64_walk_roots(out, capacity, payload, bias, snapshot, kind, low, high, limit)

@@ -597,7 +597,7 @@ terminator 前写 byte；回边不经过清零代码。byte store 和大偏移�
 入口块存在回边时，A64 保守使用 byte gate，不让回边的初始化事实证明第一次进入已初始化。
 这不改变共享 InitSlots/x64 的现行策略。init-byte 布局、事件推进和 local-root 放置从 x64
 提取到共享 metadata.rs；x64 继续使用原来的静态证明和序列化顺序。
-4c.2b.2b.1 接通内部 Context/copy 边界；生产 Gugu decoder/image 接线仍留在下一部分，
+4c.2b.2b.1 接通内部 Context/copy 边界；4c.2b.2b.2 的显式数据绑定见下文，
 不新增目标登记，也不把内部 API 当作可运行的生产协程调度器。
 
 Context、MorestackMailbox、MorestackScratch 现在由 runtime-abi 定义，fragments 复用同一
@@ -646,6 +646,29 @@ LR=SP+record+8。Rust ABI decoder 校验两表 code range/frame/PC 完全一致�
 StackInterior map 可交给既有 copy_input 生成 fixup 槽表。尚未执行 A64 Context 保存恢复或
 完整换栈修正，也未把 x64 CoroutineContext 当成 A64 context 复用。完整 4c.2b 超过约 2000 行，
 先交付本部分，下一部分完成 gated locals、A64 coroutine/stack-copy 与生产 decoder 集成。
+
+### A64 生产源与镜像数据绑定
+
+`runtime/a64.gg` 随已有 runtime source table 提供，用现有 `#![cfg(arch = "aarch64")]`
+按 descriptor 的规范架构名裁项；x64 不编译其中的声明，也不执行 A64 布局校验。
+roots.gg 中供 A64 调用的三个 metadata bridge 也使用同一 arch cfg，避免进入 x64 runtime-owner 集合。
+不引入目标名、frontend dispatch、plan 分支或 opt-in 开关。
+A64Context、A64MorestackScratch、A64MorestackMailbox、A64ControlBlock 与 A64Snapshot
+按 Rust 权威布局定义；GIR 派生时用冻结 HIR 与具体布局逐字段校验，不靠解析源码推测偏移。
+a64_records 只在独立类型视图中校验，不加入 executable/contract roots。
+它们不加入旧 CoroutineRuntimeContract.records，避免改变 x64 控制块与 raw fingerprint。
+
+ControlBlock 把 Context、16-byte scratch 和 mailbox 放在不移动的 owner 存储；bind 只设置
+hot、scratch、mutator_context 与 system_context 链接，不清空已有寄存器、entry SP 或 SIMD。
+morestack snapshot 保留 Context.pc 的恢复位置，另取 scratch.return_pc 作为用户 metadata PC，
+复制 x0–x8 并把 caller_lr 放在 x10，其他 snapshot GPR 清零。Gugu/Rust Snapshot 使用同一 C 布局。
+
+`a64_binding::Sections` 聚合隔离 lowering 已生成的 metadata，并在 Rt0Payload 的已有字段中
+绑定 map/CFA 地址；同一数据可被 Gugu bounded walker 和 Rust stack copier 消费。它不替代
+尚不存在的 A64 platform writer、启动接线或 scheduler 的架构选择。默认 x64 collector 不改路由，
+也不通过把 x64 CoroutineCold 当成 A64 record 来宣称生产调度已完成。测试解释生产 Gugu LIR，
+不执行 native A64、真实 GC、真实线程或 OS 服务。解释器 fixture 仅把文件的架构谓词重定向到
+宿主，函数体不变；另校验三个 x64 artifact 均已裁去 A64 声明。
 
 ### A64 运行时机器片段
 

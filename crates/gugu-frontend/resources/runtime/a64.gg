@@ -1,0 +1,255 @@
+#![cfg(arch = "aarch64")]
+
+/* Explicit A64 metadata/data-ABI entry points, not a selectable target or scheduler.
+ * The image owner validates immutable map/CFA sections before publishing Rt0Payload.
+ * Failure returns ROOT_NO_ENTRY; callers must discard the entire output on failure.
+ */
+use std.runtime.roots.{gc_metadata_word, gc_metadata_lookup, gc_metadata_emit, ROOT_NO_ENTRY, ROOT_SCAN_HEADER_BYTES, ROOT_RECORD_BYTES}
+
+#[repr(C)]
+pub struct A64Context {
+    pub sp: uint,
+    pub pc: uint,
+    pub x19_to_x26: [uint; 8],
+    pub x29: uint,
+    pub d8_to_d15: [uint; 8],
+}
+
+#[repr(C)]
+pub struct A64MorestackMailbox {
+    pub hot: uint,
+    pub entry_sp: uint,
+    pub candidate: uint,
+    pub required: uint,
+    pub scratch: uint,
+    pub mutator_context: uint,
+    pub system_context: uint,
+}
+
+#[repr(C, align(16))]
+pub struct A64MorestackScratch {
+    pub return_pc: uint,
+    pub caller_lr: uint,
+    pub vector: [[byte; 16]; 8],
+    pub gpr: [uint; 9],
+}
+
+#[repr(C, align(16))]
+pub struct A64ControlBlock {
+    pub context: A64Context,
+    pub scratch: A64MorestackScratch,
+    pub mailbox: A64MorestackMailbox,
+}
+
+#[repr(C)]
+pub struct A64Snapshot {
+    pub context: A64Context,
+    pub return_pc: uint,
+    pub registers: [uint; 31],
+}
+
+#[used]
+pub fn a64_records(state: &A64ControlBlock, snapshot: &A64Snapshot) uint {
+    state.context.sp + snapshot.return_pc
+}
+
+pub fn a64_bind_control(state: *A64ControlBlock, hot: uint, system: uint) bool {
+    let base = unsafe { std.mem.transmute[*A64ControlBlock, uint](state) }
+    let valid = base != 0 && base % 16 == 0 && hot != 0 && system != 0 && system % 8 == 0
+    if valid {
+        unsafe {
+            (*state).mailbox.hot = hot
+            (*state).mailbox.scratch = std.mem.transmute[*A64MorestackScratch, uint](std.ptr.addr_of((*state).scratch))
+            (*state).mailbox.mutator_context = base
+            (*state).mailbox.system_context = system
+        }
+    }
+    valid
+}
+
+/// Capture the user boundary, not the switch-fragment resume PC.
+pub fn a64_morestack_snapshot(state: *A64ControlBlock, snapshot: *A64Snapshot, resume: uint) bool {
+    let valid = false
+    unsafe {
+        valid = (*state).context.pc == resume && resume % 4 == 0 && (*state).context.sp == (*state).mailbox.entry_sp && (*state).mailbox.entry_sp % 16 == 0 && (*state).mailbox.required <= 4294967295 && (*state).mailbox.entry_sp - (*state).mailbox.candidate == (*state).mailbox.required
+        if valid {
+            (*snapshot).context.sp = (*state).context.sp
+            (*snapshot).context.pc = (*state).context.pc
+            (*snapshot).context.x19_to_x26 = (*state).context.x19_to_x26
+            (*snapshot).context.x29 = (*state).context.x29
+            (*snapshot).context.d8_to_d15 = (*state).context.d8_to_d15
+            (*snapshot).return_pc = (*state).scratch.return_pc
+            let index: uint = 0
+            while index < 31 {
+                (*snapshot).registers[int(index)] = 0
+                index = index + 1
+            }
+            index = 0
+            while index < 9 {
+                (*snapshot).registers[int(index)] = (*state).scratch.gpr[int(index)]
+                index = index + 1
+            }
+            (*snapshot).registers[10] = (*state).scratch.caller_lr
+        }
+        ()
+    }
+    valid
+}
+
+fn read(address: uint) uint = gc_metadata_word(address, 8)
+fn read32(address: uint) uint = gc_metadata_word(address, 4)
+fn byte_at(address: uint) uint = gc_metadata_word(address, 1)
+
+fn store(address: uint, value: uint) {
+    unsafe { std.ptr.ptr_write[uint](std.mem.transmute[uint, *uint](address), value) }
+}
+
+fn header(section: uint, length: uint) bool {
+    let valid = section != 0 && length >= 72
+    if valid {
+        valid = read(section) == 0x31304d5355475547 && read32(section + 8) == 0x01080005 && read32(section + 24) == 183 && read(section + 64) == length
+    }
+    valid
+}
+
+/// One exact frame; register slots use physical xN=N and never include SP.
+pub fn gc_a64_scan_frame(out: uint, capacity: uint, section: uint, length: uint, base: uint, frame: uint, pc: uint, kind: uint, gpr: uint, valid: uint) uint {
+    if !header(section, length) || pc < base || pc % 4 != 0 || frame % 16 != 0 { return ROOT_NO_ENTRY }
+    let (function, point) = gc_metadata_lookup(section, pc - base, kind)
+    if point == ROOT_NO_ENTRY { return ROOT_NO_ENTRY }
+    let record = section + read(section + 32) + function * 32
+    let size = read32(record + 12)
+    let site = section + read(section + 40) + point * 12
+    if byte_at(site + 9) & 2 == 0 { return ROOT_NO_ENTRY }
+    let map_index = read32(site + 4)
+    let indices = section + read(section + 48)
+    let start = read(indices + map_index * 8)
+    let end = read(indices + map_index * 8 + 8)
+    if start > end || end > length || end - start < 28 { return ROOT_NO_ENTRY }
+    let map = section + start
+    let slots = read32(map)
+    let bytes = (slots + 7) / 8
+    let tail = (24 + 5 * bytes + 3) / 4 * 4
+    if slots > size / 8 || tail + 4 > end - start { return ROOT_NO_ENTRY }
+    let count = read32(map + tail)
+    if count > (end - start - tail - 4) / 12 { return ROOT_NO_ENTRY }
+    let masks: uint = 0
+    let class: uint = 0
+    while class < 5 {
+        let mask = read32(map + 4 + class * 4)
+        if mask & 0x80000000 != 0 || mask & masks != 0 || mask & valid != mask || (mask != 0 && gpr == 0) { return ROOT_NO_ENTRY }
+        if byte_at(site + 8) != 4 && mask != 0 { return ROOT_NO_ENTRY }
+        if byte_at(site + 8) == 4 && mask & 0xfffffe00 != 0 { return ROOT_NO_ENTRY }
+        masks = masks | mask
+        class = class + 1
+    }
+    if byte_at(site + 8) == 4 && (slots != 0 || count != 0) { return ROOT_NO_ENTRY }
+    let cursor = map + tail + 4
+    let left = count
+    while left > 0 {
+        if read32(cursor) >= size / 8 || read32(cursor + 4) >= 5 || read32(cursor + 8) >= size { return ROOT_NO_ENTRY }
+        cursor = cursor + 12
+        left = left - 1
+    }
+    class = 0
+    while class < 5 {
+        let mask = read32(map + 4 + class * 4)
+        let bit: uint = 0
+        while bit < 31 {
+            if mask & (uint(1) << bit) != 0 { gc_metadata_emit(out, capacity, gpr + bit * 8, class, read(gpr + bit * 8)) }
+            bit = bit + 1
+        }
+        let index: uint = 0
+        while index < slots {
+            if byte_at(map + 24 + class * bytes + index / 8) & (uint(1) << (index % 8)) != 0 {
+                gc_metadata_emit(out, capacity, frame + index * 8, class, read(frame + index * 8))
+            }
+            index = index + 1
+        }
+        class = class + 1
+    }
+    cursor = map + tail + 4
+    left = count
+    while left > 0 {
+        if byte_at(frame + read32(cursor + 8)) != 0 {
+            let address = frame + read32(cursor) * 8
+            gc_metadata_emit(out, capacity, address, read32(cursor + 4), read(address))
+        }
+        cursor = cursor + 12
+        left = left - 1
+    }
+    store(out + 16, read(out + 16) + 1)
+    read(out)
+}
+
+fn cfa_site(section: uint, length: uint, function: uint, offset: uint) uint {
+    if section == 0 || length < 24 { return ROOT_NO_ENTRY }
+    if read(section) != 0x3130444155475547 || read32(section + 12) != 183 || function >= read32(section + 8) { return ROOT_NO_ENTRY }
+    let first = read(section + 16 + function * 8)
+    let end = read(section + 24 + function * 8)
+    if first > end || end > length || end - first < 40 { return ROOT_NO_ENTRY }
+    let table = section + first
+    if read(table) != 0x3130464355475547 || read32(table + 8) != 183 { return ROOT_NO_ENTRY }
+    let count = read32(table + 32)
+    if count > (end - first - 40) / 16 { return ROOT_NO_ENTRY }
+    let low: uint = 0
+    let high = count
+    while low < high {
+        let middle = (low + high) / 2
+        if read32(table + 40 + middle * 16) < offset { low = middle + 1 } else { high = middle }
+    }
+    let result = ROOT_NO_ENTRY
+    if low < count && read32(table + 40 + low * 16) == offset { result = table + 40 + low * 16 }
+    result
+}
+
+/// Bounded walk of paired, validated image sections through the existing Rt0Payload.
+pub fn gc_a64_walk_roots(out: uint, capacity: uint, payload: uint, bias: uint, snapshot: *A64Snapshot, kind: uint, low: uint, high: uint, limit: uint) uint {
+    if read(payload) != 5 { return ROOT_NO_ENTRY }
+    let saved = unsafe { std.mem.transmute[*A64Snapshot, uint](snapshot) }
+    let section = read(payload + 48) + bias
+    let length = read(payload + 64)
+    let base = read(payload + 56) + bias
+    let unwind = read(payload + 72) + bias
+    let unwind_len = read(payload + 80)
+    let sentinel = read(payload + 40)
+    if sentinel != 0 { sentinel = sentinel + bias }
+    if !header(section, length) || low > high || low % 16 != 0 || high % 16 != 0 { return ROOT_NO_ENTRY }
+    let frame = read(saved)
+    let pc = read(saved + 152)
+    let gpr = saved + 160
+    let registers: uint = 0x1ff
+    let next_kind = kind
+    let steps: uint = 0
+    while pc != 0 && pc != sentinel && steps < limit {
+        if frame < low || frame > high || pc < base { return ROOT_NO_ENTRY }
+        let (function, point) = gc_metadata_lookup(section, pc - base, next_kind)
+        if point == ROOT_NO_ENTRY { return ROOT_NO_ENTRY }
+        let record = section + read(section + 32) + function * 32
+        let size = read32(record + 12)
+        let site = cfa_site(unwind, unwind_len, function, pc - base - read(record))
+        if site == ROOT_NO_ENTRY { return ROOT_NO_ENTRY }
+        if read32(site + 12) != 1 && size > high - frame { return ROOT_NO_ENTRY }
+        let result = gc_a64_scan_frame(out, capacity, section, length, base, frame, pc, next_kind, gpr, registers)
+        if result == ROOT_NO_ENTRY { return ROOT_NO_ENTRY }
+        let traced = read(out + 16) - 1
+        if traced < 8 { store(out + 32 + traced * 8, pc - base) }
+        if read32(site + 12) == 1 {
+            if steps != 0 || read32(site + 4) != 0 || read32(site + 8) != 10 { return ROOT_NO_ENTRY }
+            pc = read(gpr + 80)
+        } else {
+            if read32(site + 4) != size || read32(site + 8) < 8 || read32(site + 8) > size - 8 { return ROOT_NO_ENTRY }
+            let lr = frame + read32(site + 8)
+            pc = read(lr)
+            frame = frame + size
+        }
+        registers = 0
+        next_kind = ROOT_NO_ENTRY
+        steps = steps + 1
+    }
+    if pc != 0 && pc != sentinel { return ROOT_NO_ENTRY }
+    let stop: uint = 0
+    if pc >= base { stop = pc - base }
+    store(out + 24, stop)
+    read(out)
+}
