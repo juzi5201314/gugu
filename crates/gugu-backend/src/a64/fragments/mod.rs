@@ -12,6 +12,7 @@ mod linux_fd;
 mod linux_net;
 mod linux_signal;
 mod linux_syscall;
+mod linux_vm;
 mod poll;
 
 pub use atomic::{AtomicWidth, atomic};
@@ -29,6 +30,7 @@ pub(crate) use linux_entry::linux_main;
 pub use linux_fd::linux_fd_dispatch;
 pub use linux_net::linux_net_dispatch;
 pub use linux_signal::linux_signal_dispatch;
+pub use linux_vm::{linux_page_size, linux_vm};
 pub use poll::safepoint_slow;
 
 use super::{

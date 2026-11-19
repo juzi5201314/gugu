@@ -367,6 +367,10 @@ Linux 文件请求中的 stat 输出缓冲为调用方提供的至少 144 字节
 
 Linux resolver 当前不是运行时 UDP DNS：它使用 resolver_symbol(0/1) 的 libc getaddrinfo/freeaddrinfo 地址，通过 operation = ~uint(0) 的 foreign worker 调用，保留系统地址顺序和取消后释放迟到结果的契约。内部 aarch64 raw-syscall 镜像尚无 libc 导入和 foreign-call worker，因此此阶段不接通 resolver，也不以自建 DNS 或静默返回空结果替代；不新增 resolver 占位入口或公开目标。
 
+内部 aarch64 Linux VM 范围片段沿用平台原语协议：reserve_aligned 接收 x0 = bytes、x1 = alignment，其他操作接收 x0 = `(base, bytes)` 描述符地址，返回原始非负结果或负 errno。Reserve 以 mmap(PROT_NONE, MAP_PRIVATE|MAP_ANONYMOUS) 预留 bytes + alignment，修剪对齐范围两侧；空长度、非二次幂或零 alignment、加法溢出返回 -EINVAL，修剪失败释放仍然拥有的映射并保留错误，不触碰已经释放的前缀。Commit/Unprotect 用 mprotect(PROT_READ|PROT_WRITE)，ProtectGuard 用 PROT_NONE，Decommit 用 madvise(MADV_DONTNEED) 丢弃匿名页内容，Release 用 munmap；Decommit 不移除映射或写权限，下一次读取得到零填充。
+
+内部 Linux 页面探测片段接收进程入口的 envp，越过环境指针与终止零后读取 auxv 的 AT_PAGESZ（6）；未找到返回 0，不回退到固定 4096。VM 调用方必须用 OS 页大小舍入长度、提供页对齐的 base 和有效原生描述符，并选择二次幂 alignment；片段中不硬编码 4 KiB，支持 4/16/64 KiB 内核页。该内部库接口尚未接通完整 A64 runtime：已登记 x64 目标的 native_memory 固定页 profile 不因此改变，不能将该 profile 的 4096 舍入结果直接用于未来的 A64 目标。Wait/Wake、Entropy、Zero、dump/hint 等非本次范围操作不由此片段实现，不增加公开目标。
+
 static PIE自重定位、PE header字段、section排序和 archive编码见[后端内部规范](../internals/backend.md)，不得在该文档扩展本节公开镜像面。
 
 ### 入口、重定位与 TLS {#entry-relocation-tls}
