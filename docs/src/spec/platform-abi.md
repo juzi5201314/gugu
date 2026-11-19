@@ -305,6 +305,8 @@ PE 节名长度和节属性必须符合 PE/COFF 目标限制。`#[link_section]`
 Windows executable和 `cdylib` 使用 PE32+，包含合法 base-relocation table并设置 ASLR、high-entropy ASLR和 NX兼容标志；默认不导入 CRT。preferred image base、file/section排列和 padding是当前 writer实现细节，外部代码只能依赖本章登记的导入导出、逻辑节、入口、TLS和展开面。
 PE 的 C 导出函数必须登记可解析的异常展开地址；入口载荷里的镜像内函数地址使用 RVA，而不是 `.text` 内偏移。
 
+macOS 镜像格式为 Mach-O 64（`arm64` 与 `x86_64`）的 PIE `MH_EXECUTE`：由 `/usr/lib/dyld` 加载并经 `LC_MAIN` 进入，导入只经 dylib 两级命名空间绑定，`libSystem.B.dylib` 总是第一个 dylib；镜像必须带覆盖全部签名前字节的 ad-hoc `LC_CODE_SIGNATURE`，因为 arm64 内核拒绝执行未签名代码。macOS 目标尚未登记，这一镜像形式在目标登记前不对外承诺。
+
 static PIE自重定位、PE header字段、section排序和 archive编码见[后端内部规范](../internals/backend.md)，不得在该文档扩展本节公开镜像面。
 
 ### 入口、重定位与 TLS {#entry-relocation-tls}
