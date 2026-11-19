@@ -15,6 +15,30 @@ impl Model<'_> {
             unreachable!()
         };
         let declaration = &parsed.arena.fns[function.0 as usize];
+        let mut bindings = bindings.clone();
+        for (parameter, value) in declaration
+            .params
+            .as_slice(&parsed.arena.params)
+            .iter()
+            .enumerate()
+            .filter(|(index, _)| {
+                parsed
+                    .configured
+                    .param_active(declaration.params.start as usize + index)
+            })
+            .map(|(_, parameter)| parameter)
+            .zip(arguments)
+        {
+            if parameter.comptime
+                && let Some(pattern) = parameter.pat
+                && let PatKind::Ident(name) = parsed.arena.pats[pattern.0 as usize].kind
+            {
+                bindings.insert(
+                    self.name(definition.module, name).to_owned(),
+                    Some(value.clone()),
+                );
+            }
+        }
         for (parameter, value) in declaration
             .params
             .as_slice(&parsed.arena.params)
@@ -29,7 +53,7 @@ impl Model<'_> {
             .zip(arguments)
         {
             if let Some(ty) = parameter.ty {
-                self.check_const_array_value(definition.module, ty, value, bindings, span)?;
+                self.check_const_array_value(definition.module, ty, value, &bindings, span)?;
             }
         }
         Ok(())

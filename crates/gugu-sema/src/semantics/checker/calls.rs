@@ -174,6 +174,16 @@ impl Checker<'_, '_> {
                 return Ty::Error;
             }
         };
+        let offset = usize::from(receiver.is_some());
+        let ty = self.bind_comptime_arguments(ty, &args, offset);
+        if let Some((_, recorded)) = self
+            .expressions
+            .iter_mut()
+            .rev()
+            .find(|(id, _)| *id == callee)
+        {
+            *recorded = ty.clone();
+        }
         if let Some((params, ret)) = ty.signature() {
             if let Some(expected) = expected
                 && !matches!(ret, Ty::Projection(..))
@@ -234,7 +244,6 @@ impl Checker<'_, '_> {
             {
                 self.dependencies.push(definition);
             }
-            self.require_comptime_arguments(&ty, &args, offset);
             self.record_call_dependencies(callee);
             for &argument in &args {
                 self.require_value_captures(argument);
@@ -275,17 +284,19 @@ impl Checker<'_, '_> {
     }
 
     /// comptime 值参数的实参必须是早期常量；未求值立即失败，不推迟到运行时。
-    fn require_comptime_arguments(&mut self, ty: &Ty, args: &[ExprId], offset: usize) {
-        let Ty::Callable(id, ..) = ty else { return };
+    fn bind_comptime_arguments(&mut self, ty: Ty, args: &[ExprId], offset: usize) -> Ty {
+        let Ty::Callable(id, ..) = &ty else { return ty };
         let Some(definition) = self.model.function_definition(*id) else {
-            return;
+            return ty;
         };
         let parsed = &self.model.modules[definition.module];
         let ItemKind::Function(function) = parsed.arena.items[definition.item.0 as usize].kind
         else {
-            return;
+            return ty;
         };
         let declaration = &parsed.arena.fns[function.0 as usize];
+        let identities = self.model.value_const_parameters(*id);
+        let mut bindings = BTreeMap::new();
         let mut active_index: usize = 0;
         for (index, param) in declaration
             .params
@@ -311,22 +322,91 @@ impl Checker<'_, '_> {
             let span = self.arena().exprs[arg.0 as usize].span.clone();
             let name = param
                 .pat
-                .and_then(|pat| match self.arena().pats[pat.0 as usize].kind {
-                    PatKind::Ident(name) => Some(self.model.name(self.module, name).to_owned()),
+                .and_then(|pat| match parsed.arena.pats[pat.0 as usize].kind {
+                    PatKind::Ident(name) => {
+                        Some(self.model.name(definition.module, name).to_owned())
+                    }
                     _ => None,
                 })
                 .unwrap_or_else(|| "comptime 参数".to_owned());
-            if let Err(error) = self.model.constant_value(self.module, arg, &Ty::int()) {
+            let symbolic = self.symbolic_comptime_argument(arg);
+            let unavailable = self
+                .state
+                .names
+                .keys()
+                .map(|&name| (self.model.name(self.module, name).to_owned(), None))
+                .collect();
+            let value = symbolic
+                .map(|length| Ok(Ty::Const(length)))
+                .unwrap_or_else(|| {
+                    self.model
+                        .eval_early_const_with_bindings(self.module, arg, &Ty::int(), &unavailable)
+                        .map(|value| match value {
+                            super::super::model::ConstantValue::Int(value)
+                                if value >= 0 && value <= i128::from(i64::MAX) =>
+                            {
+                                Ty::Const(super::super::model::ArrayLength::Known(value as u64))
+                            }
+                            _ => Ty::Error,
+                        })
+                });
+            if let Err(error) = &value {
                 if error.code() == DiagnosticCode::LateComptime {
-                    self.errors.push(error);
+                    self.errors.push(error.clone());
                 } else {
                     self.error(
                         DiagnosticCode::ComptimeCapability,
                         format!("comptime 参数 `{name}` 需要编译期已知值"),
-                        span,
+                        span.clone(),
                     );
                 }
             }
+            if let Some((_, _, identity)) = identities
+                .iter()
+                .find(|(position, _, _)| *position == index)
+            {
+                let value = value.unwrap_or(Ty::Error);
+                if value == Ty::Error {
+                    self.error(
+                        DiagnosticCode::InvalidType,
+                        "数组长度需要非负 int 编译期常量",
+                        span,
+                    );
+                }
+                bindings.insert(identity.clone(), value);
+            }
+        }
+        super::super::model::substitute(&ty, &bindings)
+    }
+
+    pub(super) fn symbolic_comptime_argument(
+        &self,
+        expression: ExprId,
+    ) -> Option<super::super::model::ArrayLength> {
+        let ExprKind::Path(path) = self.arena().exprs[expression.0 as usize].kind else {
+            return None;
+        };
+        let segments = self.arena().paths[path.0 as usize]
+            .segments
+            .as_slice(&self.arena().segments);
+        let [segment] = segments else { return None };
+        if let Some(&slot) = self.state.names.get(&segment.name)
+            && !self.arena().params.iter().any(|param| {
+                param.comptime
+                    && param.pat.is_some_and(|pat| {
+                        let span = &self.arena().pats[pat.0 as usize].span;
+                        self.slots[slot].range == [span.start(), span.end()]
+                    })
+            })
+        {
+            return None;
+        }
+        let params = self
+            .model
+            .parameters_at(self.module, &self.arena().exprs[expression.0 as usize].span);
+        match params.get(self.model.name(self.module, segment.name)) {
+            Some(Ty::Const(length)) => Some(length.clone()),
+            _ => None,
         }
     }
 
