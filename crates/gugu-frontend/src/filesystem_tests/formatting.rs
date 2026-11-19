@@ -17,6 +17,10 @@ fn oracle(spec: &str, value: impl FnOnce(&mut fmt::Formatter)) -> String {
 }
 
 fn render(source: &str) -> String {
+    render_with_heap(source).0
+}
+
+fn render_with_heap(source: &str) -> (String, usize) {
     let source = format!("{source}\nfn main() {{ _ = render() }}");
     let output = Compiler::shared().compile(CompileRequest::single_file(
         "main.gg",
@@ -28,7 +32,26 @@ fn render(source: &str) -> String {
     let mut memory = vec![0; 262144];
     let result = harness.invoke("main.gg", "render", &[], &mut memory);
     let start = result[0] as usize;
-    String::from_utf8(memory[start..start + result[1] as usize].to_vec()).unwrap()
+    (
+        String::from_utf8(memory[start..start + result[1] as usize].to_vec()).unwrap(),
+        harness.heap,
+    )
+}
+
+#[test]
+fn runtime_format_append_allocation_is_linear() {
+    let (text, allocated) = render_with_heap(
+        r#"
+        use std.fmt.{Formatter}
+        fn render() string {
+            let out = Formatter::new()
+            for _ in 0..64 { out.write_str("0123456789abcdef") }
+            out.finish()
+        }
+        "#,
+    );
+    assert_eq!(text, "0123456789abcdef".repeat(64));
+    assert!(allocated < 32768, "formatter allocated {allocated} bytes");
 }
 
 #[test]

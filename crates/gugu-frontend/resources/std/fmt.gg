@@ -1,7 +1,7 @@
-use std.text.{Bytes, alloc_bytes}
+use std.text.{Bytes, ByteBuffer, alloc_bytes}
 
 pub struct Formatter {
-    text: string,
+    text: ByteBuffer,
     fill: char,
     alignment: int,
     sign: int,
@@ -13,11 +13,11 @@ pub struct Formatter {
 
 impl Formatter {
     pub fn new() Formatter = Formatter {
-        text: "", fill: ' ', alignment: 0, sign: 0,
+        text: ByteBuffer::new(), fill: ' ', alignment: 0, sign: 0,
         alternate: false, zero: false, width: 0, precision: -1,
     }
-    pub fn finish(self: &Self) string = self.text
-    pub fn write_str(self: &Self, value: string) { self.text = self.text + value }
+    pub fn finish(self: &Self) string = self.text.freeze().to_string_lossy()
+    pub fn write_str(self: &Self, value: string) { self.text.append(Bytes::from_string(value)) }
     pub fn write_char(self: &Self, value: char) { self.write_str(character(value)) }
     pub fn pad(self: &Self, value: string) {
         let bytes = unsafe { Bytes::from_string(value).as_slice() }
