@@ -52,6 +52,112 @@ fn target(code: &[Inst], offset: u32) -> u32 {
 }
 
 #[test]
+fn darwin_fd_dispatch_uses_native_packet_and_arm64_libsystem_abi() {
+    use crate::{NativeImport, macho::LIB_SYSTEM, runtime::foreign_schema::*};
+
+    let names = [
+        "read",
+        "write",
+        "open",
+        "close",
+        "lseek",
+        "stat",
+        "lstat",
+        "fstat",
+        "ftruncate",
+        "fsync",
+        "fcntl",
+        "__error",
+    ];
+    assert_eq!(
+        darwin_fd_imports(),
+        names.map(|name| NativeImport::function(LIB_SYSTEM, name)),
+    );
+    let fragment = darwin_fd_dispatch();
+    let code = instructions(&fragment);
+    let x0 = Reg::x(0);
+    let request = Reg::x(19);
+    assert_eq!(code[0].operands, [reg(SP), reg(SP), add_imm(32)]);
+    assert!(memory(
+        &code,
+        "ldr.X.Unsigned",
+        Reg::x(9),
+        request,
+        NATIVE_REQUEST_OPERATION
+    ));
+    assert!(memory(
+        &code,
+        "str.X.Unsigned",
+        x0,
+        request,
+        NATIVE_REQUEST_VALUE
+    ));
+    assert!(memory(
+        &code,
+        "str.X.Unsigned",
+        x0,
+        request,
+        NATIVE_REQUEST_ERROR
+    ));
+    assert_eq!(fragment.relocations.len(), names.len());
+    let errno = fragment.relocations.last().unwrap().offset;
+    assert!(memory(
+        &code[(errno / 4) as usize..],
+        "ldr.W.Unsigned",
+        Reg::w(0),
+        x0,
+        0
+    ));
+    for (index, (site, name)) in fragment.relocations.iter().zip(names).enumerate() {
+        assert_eq!(site.relocation.kind, RelocKind::Call26);
+        assert_eq!(site.relocation.target, format!("__gugu_darwin_c_{name}"));
+        if name == "__error" {
+            break;
+        }
+        let variadic = matches!(name, "open" | "fcntl");
+        let fixed = [3usize, 3, 2, 1, 3, 2, 2, 2, 2, 1, 2][index];
+        let end = (site.offset / 4) as usize;
+        let args = &code[end - fixed - if variadic { 2 } else { 0 }..end];
+        for i in 0..fixed {
+            assert!(memory(
+                args,
+                "ldr.X.Unsigned",
+                Reg::x(i as u8),
+                request,
+                NATIVE_REQUEST_ARGUMENTS + i * 8
+            ));
+        }
+        if variadic {
+            let mode = Reg::w(10);
+            assert!(!memory(
+                args,
+                "ldr.X.Unsigned",
+                Reg::x(2),
+                request,
+                NATIVE_REQUEST_ARGUMENTS + 16
+            ));
+            assert!(memory(
+                args,
+                "ldr.W.Unsigned",
+                mode,
+                request,
+                NATIVE_REQUEST_ARGUMENTS + 16
+            ));
+            assert!(memory(args, "str.W.Unsigned", mode, SP, 0));
+        }
+        let wide = matches!(name, "read" | "write" | "lseek");
+        assert_eq!(
+            form(&code[end + 1]),
+            if wide { "adds.X.imm" } else { "sbfm.X" }
+        );
+        assert_eq!(
+            target(&code, site.offset + if wide { 8 } else { 12 }),
+            errno
+        );
+    }
+}
+
+#[test]
 fn context_saves_machine_state_and_restore_entry_joins_the_shared_body() {
     let context = context_switch();
     assert!(context.fragment.relocations.is_empty());
