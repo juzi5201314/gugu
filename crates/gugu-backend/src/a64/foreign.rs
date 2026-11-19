@@ -67,7 +67,7 @@ fn chunks(bytes: u32, mut slot: impl FnMut(u32) -> Slot) -> Vec<Piece> {
 fn hfa(ty: &Type) -> Option<(u8, Vec<u32>)> {
     match &ty.kind {
         Kind::Float { bits } => Some(((*bits / 8) as u8, vec![0])),
-        Kind::Aggregate { hfa: Some(hfa) } => Some((
+        Kind::Aggregate { hfa: Some(hfa), .. } => Some((
             (hfa.bits / 8) as u8,
             hfa.offsets.iter().map(|offset| *offset as u32).collect(),
         )),
@@ -109,6 +109,9 @@ impl State {
         }
         let mut bytes = ty.bytes as u32;
         let mut alignment = ty.align;
+        if !darwin && let Kind::Aggregate { natural_align, .. } = ty.kind {
+            alignment = natural_align.min(16);
+        }
         if promote_float {
             bytes = 8;
             alignment = 8;
@@ -158,7 +161,8 @@ impl State {
                 self.gpr = 8;
             }
         }
-        let grain = if darwin && !anonymous && !matches!(ty.kind, Kind::Aggregate { hfa: None }) {
+        let grain = if darwin && !anonymous && !matches!(ty.kind, Kind::Aggregate { hfa: None, .. })
+        {
             1
         } else {
             8
@@ -183,7 +187,7 @@ pub fn classify(signature: &Signature, platform: Platform) -> Result<Layout, Err
             .arguments
             .iter()
             .chain([&signature.result])
-            .any(|ty| ty.bytes > i32::MAX as u64 || ty.align > 16)
+            .any(|ty| ty.bytes > i32::MAX as u64 || platform == Platform::Darwin && ty.align > 16)
     {
         return Err(error("invalid or oversized/overaligned A64 C signature"));
     }

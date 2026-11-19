@@ -12,7 +12,10 @@ fn aggregate(bytes: u64, align: u32) -> Type {
     Type {
         bytes,
         align,
-        kind: Kind::Aggregate { hfa: None },
+        kind: Kind::Aggregate {
+            hfa: None,
+            natural_align: align,
+        },
     }
 }
 fn float(bits: u16) -> Type {
@@ -54,6 +57,19 @@ fn integer_pairs_do_not_split_and_linux_rounds_aligned_register_numbers() {
         classify(&sig, Platform::Darwin).unwrap().arguments[1].pieces[0].slot,
         Slot::Integer(1)
     );
+}
+
+#[test]
+fn linux_adjusts_overaligned_composite_copies_without_relaxing_darwin_limits() {
+    let mut large = aggregate(32, 32);
+    if let Kind::Aggregate { natural_align, .. } = &mut large.kind {
+        *natural_align = 8;
+    }
+    let sig = signature(vec![integer(8, 8), large]);
+    let layout = classify(&sig, Platform::Linux).unwrap();
+    assert!(layout.arguments[1].indirect);
+    assert_eq!(layout.arguments[1].pieces[0].slot, Slot::Integer(1));
+    assert!(classify(&sig, Platform::Darwin).is_err());
 }
 
 #[test]
@@ -108,6 +124,7 @@ fn hfas_are_all_or_stack_and_large_non_hfas_are_indirect() {
         bytes: 24,
         align: 8,
         kind: Kind::Aggregate {
+            natural_align: 8,
             hfa: Some(Hfa {
                 bits: 64,
                 offsets: vec![0, 8, 16],

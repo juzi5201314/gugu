@@ -32,7 +32,10 @@ fn aggregate(bytes: u64, hfa: Option<Hfa>) -> CType {
     CType {
         bytes,
         align: 8,
-        kind: Kind::Aggregate { hfa },
+        kind: Kind::Aggregate {
+            hfa,
+            natural_align: 8,
+        },
     }
 }
 fn fixture(params: &[Type], results: &[Type], darwin: bool) -> Fixture {
@@ -179,6 +182,74 @@ fn foreign_bridge_uses_all_eight_integer_lanes_stack_and_dirty_maps() {
 }
 
 #[test]
+fn natural_composite_alignment_reaches_register_and_stack_packets() {
+    for darwin in [false, true] {
+        for stacked in [false, true] {
+            let n = if stacked { 9 } else { 1 };
+            let mut f = fixture(&[], &[], darwin);
+            let bits = (0..n)
+                .map(|i| i as u64)
+                .chain([0x400000003f800000, 0x40400000, 10])
+                .collect::<Vec<_>>();
+            let args = bits
+                .iter()
+                .map(|bits| f.constant(Type::I64, *bits))
+                .collect::<Vec<_>>();
+            let mut call = call(vec![ValueType::scalar(Type::I64); n + 3], vec![]);
+            let padded = CType {
+                bytes: 16,
+                align: 16,
+                kind: Kind::Aggregate {
+                    hfa: None,
+                    natural_align: 4,
+                },
+            };
+            let sig = call.foreign_signature.as_mut().unwrap();
+            sig.arguments = vec![scalar(Type::I64); n];
+            sig.arguments.extend([padded, scalar(Type::I64)]);
+            call.foreign_arguments.truncate(n);
+            call.foreign_arguments.extend([
+                ForeignArgument {
+                    first: n as u32,
+                    lanes: 2,
+                    bytes: 16,
+                    align: 16,
+                    memory: false,
+                },
+                ForeignArgument {
+                    first: n as u32 + 2,
+                    lanes: 1,
+                    bytes: 8,
+                    align: 8,
+                    memory: false,
+                },
+            ]);
+            invoke(&mut f, call, &args);
+            f.ret(&[]);
+            let fragment = compile(&f);
+            let mut harness = Harness {
+                foreign: Some(Foreign::default()),
+                ..Default::default()
+            };
+            run(&fragment, &[], darwin, &mut harness);
+            let packet = &harness.foreign.unwrap().packets[0];
+            let at = if stacked {
+                208 + if darwin { 16 } else { 8 }
+            } else {
+                24
+            };
+            for (index, expected) in bits[n..].iter().enumerate() {
+                let at = at + index * 8;
+                assert_eq!(
+                    u64::from_le_bytes(packet[at..at + 8].try_into().unwrap()),
+                    *expected
+                );
+            }
+        }
+    }
+}
+
+#[test]
 fn padding_only_argument_eightbytes_are_zero_not_the_following_argument() {
     for darwin in [false, true] {
         let mut f = fixture(&[], &[], darwin);
@@ -191,7 +262,10 @@ fn padding_only_argument_eightbytes_are_zero_not_the_following_argument() {
         call.foreign_signature.as_mut().unwrap().arguments[0] = CType {
             bytes: 16,
             align: 16,
-            kind: Kind::Aggregate { hfa: None },
+            kind: Kind::Aggregate {
+                hfa: None,
+                natural_align: 8,
+            },
         };
         call.foreign_arguments[0].bytes = 16;
         call.foreign_arguments[0].align = 16;
@@ -219,7 +293,10 @@ fn padding_only_result_eightbytes_do_not_require_lir_lanes() {
         call.foreign_signature.as_mut().unwrap().result = CType {
             bytes: 16,
             align: 16,
-            kind: Kind::Aggregate { hfa: None },
+            kind: Kind::Aggregate {
+                hfa: None,
+                natural_align: 8,
+            },
         };
         let result = invoke(&mut f, call, &[]);
         let bits = f.op(Op::Convert(Conversion::Bitcast), &result, &[Type::I64]);
@@ -246,6 +323,7 @@ fn hfa_arguments_and_four_results_repack_legacy_integer_lanes() {
         bytes: 16,
         align: 4,
         kind: Kind::Aggregate {
+            natural_align: 4,
             hfa: Some(Hfa {
                 bits: 32,
                 offsets: vec![0, 4, 8, 12],

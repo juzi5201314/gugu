@@ -125,6 +125,59 @@ fn verify(target: TargetName) {
     assert_eq!(signature.result.kind, signature.arguments[0].kind);
 }
 
+#[test]
+fn overaligned_composites_keep_object_alignment_but_use_linux_natural_pcs_alignment() {
+    use crate::backend::a64::foreign::{Platform, Slot, classify};
+    let compilation = Compiler::shared().compile(CompileRequest::single_file(
+        "main.gg",
+        include_str!("fixtures/foreign_overaligned.gg"),
+        TargetName::X86_64Linux,
+    ));
+    assert!(
+        compilation.is_success(),
+        "{:?}",
+        compilation.diagnostics().items()
+    );
+    let mut signatures = std::collections::BTreeMap::new();
+    for body in compilation.lir.as_ref().unwrap().bodies() {
+        let calls = body
+            .instructions
+            .iter()
+            .filter_map(|inst| match &inst.op {
+                Op::ForeignCall(call) => Some(call),
+                _ => None,
+            })
+            .chain(
+                body.blocks
+                    .iter()
+                    .filter_map(|block| match &block.terminator {
+                        Terminator::Invoke { call, .. } => Some(call),
+                        _ => None,
+                    }),
+            );
+        for call in calls {
+            if let CallTarget::External { name, .. } = &call.target
+                && (name == "reg" || name == "stack")
+            {
+                signatures.insert(name.as_str(), call.foreign_signature.as_ref().unwrap());
+            }
+        }
+    }
+    let reg = signatures["reg"];
+    assert_eq!((reg.arguments[1].bytes, reg.arguments[1].align), (16, 16));
+    for platform in [Platform::Linux, Platform::Darwin] {
+        let layout = classify(reg, platform).unwrap();
+        assert_eq!(layout.arguments[1].pieces[0].slot, Slot::Integer(1));
+        assert_eq!(layout.arguments[1].pieces[1].slot, Slot::Integer(2));
+        assert_eq!(layout.arguments[2].pieces[0].slot, Slot::Integer(3));
+        let layout = classify(signatures["stack"], platform).unwrap();
+        let start = if platform == Platform::Linux { 8 } else { 16 };
+        assert_eq!(layout.arguments[9].pieces[0].slot, Slot::Stack(start));
+        assert_eq!(layout.arguments[9].pieces[1].slot, Slot::Stack(start + 8));
+        assert_eq!(layout.arguments[10].pieces[0].slot, Slot::Stack(start + 16));
+    }
+}
+
 fn verify_metadata(calls: &std::collections::BTreeMap<&str, &Call>) {
     use crate::lir::foreign::{Hfa, Kind};
     for call in calls.values() {
@@ -139,6 +192,7 @@ fn verify_metadata(calls: &std::collections::BTreeMap<&str, &Call>) {
     assert_eq!(
         signature("array").result.kind,
         Kind::Aggregate {
+            natural_align: 4,
             hfa: Some(Hfa {
                 bits: 32,
                 offsets: vec![0, 4, 8, 12]
@@ -152,6 +206,7 @@ fn verify_metadata(calls: &std::collections::BTreeMap<&str, &Call>) {
     assert_eq!(
         signature("floats").result.kind,
         Kind::Aggregate {
+            natural_align: 8,
             hfa: Some(Hfa {
                 bits: 64,
                 offsets: vec![0, 8]
@@ -161,6 +216,7 @@ fn verify_metadata(calls: &std::collections::BTreeMap<&str, &Call>) {
     assert_eq!(
         signature("small").result.kind,
         Kind::Aggregate {
+            natural_align: 4,
             hfa: Some(Hfa {
                 bits: 32,
                 offsets: vec![0]
@@ -170,6 +226,7 @@ fn verify_metadata(calls: &std::collections::BTreeMap<&str, &Call>) {
     assert_eq!(
         signature("nested").result.kind,
         Kind::Aggregate {
+            natural_align: 4,
             hfa: Some(Hfa {
                 bits: 32,
                 offsets: vec![0, 4, 8]
@@ -177,7 +234,13 @@ fn verify_metadata(calls: &std::collections::BTreeMap<&str, &Call>) {
         }
     );
     for name in ["mixed", "large", "too_many"] {
-        assert_eq!(signature(name).result.kind, Kind::Aggregate { hfa: None });
+        assert_eq!(
+            signature(name).result.kind,
+            Kind::Aggregate {
+                hfa: None,
+                natural_align: if name == "too_many" { 4 } else { 8 }
+            }
+        );
     }
     assert_eq!(
         signature("transparent").result.kind,
@@ -198,6 +261,7 @@ fn verify_metadata(calls: &std::collections::BTreeMap<&str, &Call>) {
     assert_eq!(
         signature("unions").arguments[0].kind,
         Kind::Aggregate {
+            natural_align: 4,
             hfa: Some(Hfa {
                 bits: 32,
                 offsets: vec![0, 4, 8]
@@ -206,7 +270,10 @@ fn verify_metadata(calls: &std::collections::BTreeMap<&str, &Call>) {
     );
     assert_eq!(
         signature("unions").arguments[1].kind,
-        Kind::Aggregate { hfa: None }
+        Kind::Aggregate {
+            hfa: None,
+            natural_align: 8
+        }
     );
     assert_eq!(
         signature("enums").arguments[0].kind,

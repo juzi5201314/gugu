@@ -49,10 +49,40 @@ fn canonical_hfa_excludes_tail_and_nested_padding_but_keeps_dense_overalignment(
         assert_eq!(
             ty.kind,
             Kind::Aggregate {
+                natural_align: if index == 4 { 16 } else { 4 },
                 hfa: expected.map(|offsets| Hfa { bits: 32, offsets })
             },
             "type {index}"
         );
         assert!(ty.valid());
+    }
+    for (kind, c_repr) in [
+        (
+            TypeKind::Array {
+                element: 2,
+                count: 1,
+            },
+            None,
+        ),
+        (
+            TypeKind::Aggregate {
+                tag_bytes: 0,
+                variants: vec![vec![Field { ty: 0, offset: 0 }, Field { ty: 2, offset: 0 }]],
+            },
+            Some(crate::gir::concrete::CRepresentation::Union),
+        ),
+    ] {
+        types.push(TypeLayout {
+            kind,
+            c_repr,
+            ..types[2].clone()
+        });
+        assert_eq!(
+            describe(&types, types.len() as u32 - 1).kind,
+            Kind::Aggregate {
+                hfa: None,
+                natural_align: 16
+            }
+        );
     }
 }

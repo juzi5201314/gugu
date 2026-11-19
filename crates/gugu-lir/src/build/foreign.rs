@@ -176,6 +176,7 @@ pub(crate) fn describe(types: &[TypeLayout], ty: u32) -> crate::foreign::Type {
                 let homogeneous = homogeneous(types, ty, 0, &mut hfa) && hfa.valid_for(layout.size);
                 Kind::Aggregate {
                     hfa: homogeneous.then_some(hfa),
+                    natural_align: natural_alignment(types, ty),
                 }
             }
         }
@@ -185,6 +186,20 @@ pub(crate) fn describe(types: &[TypeLayout], ty: u32) -> crate::foreign::Type {
         align: layout.align as u32,
         kind,
     }
+}
+
+fn natural_alignment(types: &[TypeLayout], ty: u32) -> u32 {
+    let alignment = |index: u32| types[index as usize].layout.expect("C 成员布局").align;
+    (match &types[ty as usize].kind {
+        TypeKind::Array { element, .. } => alignment(*element),
+        TypeKind::Aggregate { variants, .. } => variants
+            .iter()
+            .flatten()
+            .map(|field| alignment(field.ty))
+            .max()
+            .unwrap_or(1),
+        _ => alignment(ty),
+    }) as u32
 }
 
 fn homogeneous(types: &[TypeLayout], ty: u32, base: u64, hfa: &mut crate::foreign::Hfa) -> bool {

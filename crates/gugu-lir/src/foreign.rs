@@ -11,10 +11,17 @@ pub struct Type {
 #[derive(Clone, Debug, Eq, PartialEq, Serialize, Deserialize)]
 pub enum Kind {
     Unit,
-    Integer { signed: bool },
-    Float { bits: u16 },
+    Integer {
+        signed: bool,
+    },
+    Float {
+        bits: u16,
+    },
     Pointer,
-    Aggregate { hfa: Option<Hfa> },
+    Aggregate {
+        hfa: Option<Hfa>,
+        natural_align: u32,
+    },
 }
 
 #[derive(Clone, Debug, Eq, PartialEq, Serialize, Deserialize)]
@@ -56,8 +63,10 @@ impl Type {
             Kind::Integer { .. } => matches!(self.bytes, 1 | 2 | 4 | 8 | 16),
             Kind::Float { bits } => matches!(bits, 32 | 64) && self.bytes == u64::from(*bits / 8),
             Kind::Pointer => self.bytes == 8 && self.align == 8,
-            Kind::Aggregate { hfa: None } => true,
-            Kind::Aggregate { hfa: Some(hfa) } => hfa.valid_for(self.bytes),
+            Kind::Aggregate { hfa, natural_align } => {
+                natural_align.is_power_of_two()
+                    && hfa.as_ref().is_none_or(|hfa| hfa.valid_for(self.bytes))
+            }
         }
     }
 }
@@ -147,6 +156,7 @@ mod tests {
             bytes: 32,
             align: 8,
             kind: Kind::Aggregate {
+                natural_align: 8,
                 hfa: Some(Hfa { bits, offsets }),
             },
         };
@@ -165,5 +175,34 @@ mod tests {
         ] {
             assert!(!aggregate(bits, offsets).valid());
         }
+    }
+
+    #[test]
+    fn composite_natural_alignment_must_be_a_power_of_two_independently_of_object_alignment() {
+        for (natural_align, valid) in [(0, false), (3, false), (4, true), (16, true), (32, true)] {
+            assert_eq!(
+                Type {
+                    bytes: 16,
+                    align: 16,
+                    kind: Kind::Aggregate {
+                        hfa: None,
+                        natural_align
+                    }
+                }
+                .valid(),
+                valid
+            );
+        }
+        assert!(
+            Type {
+                bytes: 9,
+                align: 1,
+                kind: Kind::Aggregate {
+                    hfa: None,
+                    natural_align: 8
+                }
+            }
+            .valid()
+        );
     }
 }
