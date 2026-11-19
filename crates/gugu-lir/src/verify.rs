@@ -66,7 +66,7 @@ fn valid_range(value: &Range<u32>, len: usize) -> bool {
 
 fn structure(body: &Body, module: &hir::Module) -> Result<(), Diagnostic> {
     if body.revision != super::body::REVISION
-        || crate::TargetName::parse(&body.target).is_err()
+        || crate::TargetName::from_compiler_artifact(&body.target).is_err()
         || body.entry.index() >= body.blocks.len()
         || body.source_scopes.is_empty()
     {

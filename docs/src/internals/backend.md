@@ -10,9 +10,9 @@
 
 ## 目标描述符与数值 lowering
 
-`TargetDescriptor` 分别保存 `arch`、`os`、`object_format`、`pointer_width`、`rt0`、`cpu_baseline` 与 `pointer_compression`；架构、操作系统与格式的规范 `name()` 同时用于 descriptor 身份编码与 cfg 比较（cfg 只比较架构和操作系统）。这些维度可表示 AArch64、macOS、Mach-O64 与 libSystem/dyld 边界，但 `TargetName` 仍只有两个已登记的 x86_64 目标。平台 profile 从已登记目标映射，不为未登记组合提供替代实现。image planner 按 `object_format` 选择 ELF64 或 PE32+ writer；Mach-O64 明确返回缺少 writer 的错误，不回退到其它格式。维度扩展不改变目标注册表或宿主目标选择。
+`TargetDescriptor` 分别保存 `arch`、`os`、`object_format`、`pointer_width`、`rt0`、`cpu_baseline` 与 `pointer_compression`；架构、操作系统与格式的规范 `name()` 同时用于 descriptor 身份编码与 cfg 比较（cfg 只比较架构和操作系统）。内部 `X86_64Macos` 描述符绑定 Mach-O64、Darwin 平台 profile 和构建期 runtime artifact。image planner 按 `object_format` 选择 ELF64、PE32+ 或 Mach-O64 writer；公开目标注册表和宿主目标选择仍只支持 Linux 与 Windows 两个 x86_64 目标。
 
-当前后端只实现平台注册表中的`x86_64-linux`和`x86_64-windows`。每个toolchain安装携带不可变`TargetDescriptor { name, object_format, page_size, cpu_baseline, linux_interpreter, sysroot_digest, import_policy_revision, runtime_tuning_profile_digest, backend_cost_profile_digest }`；目标运行时路径与宿主sysroot分离，descriptor整体进入compiler identity和action key，backend不探测宿主PATH。runtime tuning profile至少固定`LocalDequeMode`、remote/injection shard数和queue padding；backend cost profile固定寄存器保留、inline code-size与spill上限。release镜像只编入该profile选中的一种deque，不生成运行时mode分支。`runtime_tuning_profile_digest`取`RUNTIME_TUNING_PROFILE.digest()`（域`gugu-runtime-tuning-profile-v1`），`RuntimeRawContractV1::verify`交叉校验调度段与profile的容量、分片、batch、service节奏与填充字段。
+每个toolchain安装携带不可变`TargetDescriptor { name, object_format, page_size, cpu_baseline, linux_interpreter, sysroot_digest, import_policy_revision, runtime_tuning_profile_digest, backend_cost_profile_digest }`；目标运行时路径与宿主sysroot分离，descriptor整体进入compiler identity和action key，backend不探测宿主PATH。runtime tuning profile至少固定`LocalDequeMode`、remote/injection shard数和queue padding；backend cost profile固定寄存器保留、inline code-size与spill上限。release镜像只编入该profile选中的一种deque，不生成运行时mode分支。`runtime_tuning_profile_digest`取`RUNTIME_TUNING_PROFILE.digest()`（域`gugu-runtime-tuning-profile-v1`），`RuntimeRawContractV1::verify`交叉校验调度段与profile的容量、分片、batch、service节奏与填充字段。
 
 CPU可接受面只读取[平台 CPU 基线](../spec/platform-abi.md#cpu-baseline)，后端 instruction verifier拒绝任何超出 descriptor的机器指令。数值 lowering只实现[类型系统](../spec/types.md)给定的整数/浮点结果；SSE2、NaN、overflow、shift和conversion选择是这些结果的机器实现，不在本章创建另一套数值规则。`I8` 与 `I16` 在寄存器中保持零扩展到 64 位。内存 `Load` 用 `movzx` 写入 32 位目的寄存器来建立这个规范形；只覆盖低 8 位或低 16 位的 `mov` 不能作为载入。
 
@@ -391,9 +391,11 @@ C 导出入口的 `.pdata` 在常量符号 RVA 发布后追加，`UNWIND_INFO` �
 
 load command 依次为各段、`LC_DYLD_CHAINED_FIXUPS`、`LC_DYLD_EXPORTS_TRIE`（空 trie）、`LC_SYMTAB`、`LC_DYSYMTAB`（只有本地符号）、`LC_LOAD_DYLINKER`、`LC_UUID`、`LC_BUILD_VERSION`（macOS 12.0）、`LC_MAIN`、每个 dylib 一条 `LC_LOAD_DYLIB` 和最后的 `LC_CODE_SIGNATURE`。导入使用 chained fixups：指针格式 `DYLD_CHAINED_PTR_64_OFFSET`、导入格式 `DYLD_CHAINED_IMPORT`，每个含 fixup 的段按页写链起点，链内 stride 为 4 字节且不跨页；rebase 槽保存目标相对镜像基址的 36 位偏移，bind 槽保存导入序号与 8 位 addend。dylib 序号 8 位且 `0xF0..=0xFF` 是 dyld 的负数特殊序号，因此镜像最多链接 239 个 dylib。fixup 槽必须是 `__DATA_CONST`/`__DATA` 内 8 字节对齐的有文件内容槽，重复槽、越界目标与缺失导入在写出前失败。`LC_UUID` 取签名前字节 BLAKE3 摘要的前 16 字节。
 
-签名是 linker-signed ad-hoc SuperBlob，只含一个 CodeDirectory（版本 `0x20400`、`CS_ADHOC | CS_LINKER_SIGNED`、SHA-256、4 KiB 页、无 special slot），`execSeg` 指向 `__TEXT` 并标记 main binary；页哈希覆盖 `[0, 签名偏移)`，因此签名最后写入。该模块尚未接入编译管线与目标注册。
+签名是 linker-signed ad-hoc SuperBlob，只含一个 CodeDirectory（版本 `0x20400`、`CS_ADHOC | CS_LINKER_SIGNED`、SHA-256、4 KiB 页、无 special slot），`execSeg` 指向 `__TEXT` 并标记 main binary；页哈希覆盖 `[0, 签名偏移)`，因此签名最后写入。
 
 `macho::append_native_imports` 将后端的 `NativeImport` 转换为两级导入及 `__DATA_CONST,__got` 中的 bind 槽，保留声明顺序；纯库依赖仅加入 dylib 列表。返回的槽位置和导入种类不依赖架构，供后端生成调用入口或引用数据。x86_64 在节大小及 dylib 列表固定后为 Function 写出 `jmp [rip+GOT]`，不为 Data 创建代码入口。
+
+内部 x86_64 链接器根据闭世界片段的重定位登记 libSystem 调用，布局确定后修补代码位移和元数据地址。LC_MAIN 启动片段保存启动参数，由参数块地址推导加载偏移并调用 `rt0_start`，正常返回交给 libSystem 的 `exit`。Darwin 文件和进程 worker 通过 pthread 及 C ABI 运行，套接字等待使用 kqueue。该路径不提供 Mach-O C 导出、strip 或 arm64 机器入口。
 
 ## 直接编码与验证
 

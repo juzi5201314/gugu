@@ -8,6 +8,18 @@ fn compile(source: &str, target: TargetName) -> gugu_compiler::Compilation {
 }
 
 #[test]
+fn macos_process_image_imports_spawn_and_wait_from_libsystem() {
+    let output = compile(
+        include_str!("fixtures/process_output.gg"),
+        TargetName::X86_64Macos,
+    );
+    let image = output.image_plan().unwrap().macos_image();
+    for name in [b"_posix_spawn\0".as_slice(), b"_waitpid\0", b"_pipe\0"] {
+        assert!(image.windows(name.len()).any(|value| value == name));
+    }
+}
+
+#[test]
 fn linux_process_image_imports_environment_as_data_not_a_plt_function() {
     let output = compile(
         include_str!("fixtures/process_env.gg"),

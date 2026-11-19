@@ -263,6 +263,7 @@ fn image_bytes(target: TargetName, plan: &gugu_compiler::ImagePlan) -> &[u8] {
     match target {
         TargetName::X86_64Linux => plan.linux_image(),
         TargetName::X86_64Windows => plan.windows_image(),
+        TargetName::X86_64Macos => plan.macos_image(),
     }
 }
 
@@ -270,6 +271,7 @@ fn image_kind<'a>(target: TargetName, linux: &'a str, windows: &'a str) -> &'a s
     match target {
         TargetName::X86_64Linux => linux,
         TargetName::X86_64Windows => windows,
+        TargetName::X86_64Macos => "macho",
     }
 }
 

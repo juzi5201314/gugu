@@ -6,5 +6,5 @@ pub use std.net.socket.{TcpListener, TcpStream, UdpSocket, TcpReadHalf, TcpWrite
 pub use std.net.address.{UnixAddr}
 #[cfg(arch = "x86_64")]
 pub use std.net.unix.{UnixStream, UnixListener, UnixReadHalf, UnixWriteHalf}
-#[cfg(os = "linux")]
+#[cfg(any(os = "linux", os = "macos"))]
 pub use std.net.unix.{UnixDatagram, UnixDatagramRead, UnixDatagramPacket}

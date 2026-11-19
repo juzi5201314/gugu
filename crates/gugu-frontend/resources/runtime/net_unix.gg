@@ -20,14 +20,14 @@ fn resolve(address: UnixAddr) Result[UnixAddr, Error] {
 pub fn encode(address: UnixAddr, out: uint) Result[uint, Error] { unsafe {
     let bytes = resolve(address)?.path().as_os().to_bytes()
     let data = bytes.as_slice()
-    std.ptr.write_unaligned[u16](std.mem.transmute[uint, *u16](out), u16(1))
+    native.put_family(out, 1, uint(data.len()) + 3)
     endpoint.copy_in(out + 2, bytes)
     std.ptr.ptr_write[byte](std.mem.transmute[uint, *byte](out + 2 + uint(data.len())), byte(0))
     Ok(uint(data.len()) + 3)
 } }
 pub fn decode(data: uint, length: uint) Result[Option[UnixAddr], Error] { unsafe {
     if length < 2 || length > 110 { return Err(Error::InvalidData) }
-    if std.ptr.read_unaligned[u16](std.mem.transmute[uint, *u16](data)) != u16(1) { return Err(Error::InvalidData) }
+    if native.get_family(data) != 1 { return Err(Error::InvalidData) }
     if length == 2 || std.ptr.read_unaligned[byte](std.mem.transmute[uint, *byte](data + 2)) == byte(0) { return Ok(None) }
     let count: uint = 0
     while count < length - 2 && std.ptr.read_unaligned[byte](std.mem.transmute[uint, *byte](data + 2 + count)) != byte(0) { count = count + 1 }
@@ -37,7 +37,7 @@ pub fn decode(data: uint, length: uint) Result[Option[UnixAddr], Error] { unsafe
     let path = path_from_bytes(Bytes::from_owned(bytes))?
     match UnixAddr::from_path(path) { Ok(value) => Ok(Some(value)), Err(_) => Err(Error::InvalidData) }
 } }
-#[cfg(os = "linux")]
+#[cfg(any(os = "linux", os = "macos"))]
 fn path_from_bytes(bytes: Bytes) Result[Path, Error] = Ok(Path::from_os(OsString::from_bytes(bytes)))
 #[cfg(os = "windows")]
 fn path_from_bytes(bytes: Bytes) Result[Path, Error] {
@@ -84,7 +84,7 @@ pub fn address(cell: &ResourceCell, peer: bool) Result[Option[UnixAddr], Error] 
     _ = native.checked(native.call(if peer { 6 } else { 5 }, handle, raw, raw + 112, 0, 0, 0))?
     decode(raw, heap_word32(raw + 112))
 }
-#[cfg(os = "linux")]
+#[cfg(any(os = "linux", os = "macos"))]
 pub fn send(cell: &ResourceCell, bytes: Bytes, target: Option[UnixAddr], cancel: uint) Result[(), Error] {
     let target = match target { Some(value) => Some(resolve(value)?), None => None }
     endpoint.connected(cell, match target { Some(_) => false, None => true })?
@@ -100,7 +100,7 @@ pub fn send(cell: &ResourceCell, bytes: Bytes, target: Option[UnixAddr], cancel:
     if sent != length { return Err(if sent == 0 { Error::WriteZero } else { Error::InvalidData }) }
     Ok(())
 }
-#[cfg(os = "linux")]
+#[cfg(any(os = "linux", os = "macos"))]
 pub fn receive(cell: &ResourceCell, destination: &[byte], cancel: uint, connected: bool) Result[(int, Option[UnixAddr], bool), Error] {
     endpoint.connected(cell, connected)?
     let capacity = uint(destination.len())
@@ -115,7 +115,7 @@ pub fn receive(cell: &ResourceCell, destination: &[byte], cancel: uint, connecte
     let source = if heap_word(node + 96) == 0 { None } else { decode(node + transport.ADDRESS, heap_word(node + 96))? }
     Ok((int(count), source, received > capacity))
 }
-#[cfg(os = "linux")]
+#[cfg(any(os = "linux", os = "macos"))]
 pub fn datagram_connect(cell: &ResourceCell, address: Option[UnixAddr]) Result[(), Error] {
     let address = match address { Some(value) => Some(resolve(value)?), None => None }
     let node = transport.allocate(cell.control, match address { Some(_) => transport.UDP_CONNECT, None => transport.UDP_DISCONNECT }, 0, 0, 0)

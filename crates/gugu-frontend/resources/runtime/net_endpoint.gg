@@ -17,7 +17,7 @@ pub fn create(handle: uint, family: uint) ResourceCell {
     close_packet(result.control, handle)
     result
 }
-#[cfg(os = "linux")]
+#[cfg(any(os = "linux", os = "macos"))]
 fn close_packet(control: uint, handle: uint) { _ = control
     _ = handle }
 #[cfg(os = "windows")]

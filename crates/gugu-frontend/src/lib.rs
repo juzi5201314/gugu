@@ -1909,6 +1909,7 @@ pub struct ImagePlan {
     linux_interpreter: String,
     linux_image_fingerprint: [u8; 32],
     windows_image: Vec<u8>,
+    macos_image: Vec<u8>,
     windows_image_kind: String,
     windows_entry_rva: u32,
     windows_reloc_count: u32,
@@ -2166,6 +2167,7 @@ impl ImagePlan {
             linux_interpreter: plan.linux_interpreter,
             linux_image_fingerprint: plan.linux_image_fingerprint,
             windows_image: plan.windows_image,
+            macos_image: plan.macos_image,
             windows_image_kind: plan.windows_image_kind,
             windows_entry_rva: plan.windows_entry_rva,
             windows_reloc_count: plan.windows_reloc_count,
@@ -2507,6 +2509,12 @@ impl ImagePlan {
     /// 返回 Windows PE 镜像字节。Linux 目标为空。
     pub fn windows_image(&self) -> &[u8] {
         &self.windows_image
+    }
+
+    /// 内部 macOS 目标的 Mach-O 镜像。
+    #[doc(hidden)]
+    pub fn macos_image(&self) -> &[u8] {
+        &self.macos_image
     }
 
     /// 返回 `exe`、`cdylib`，或 Linux 上的空串。

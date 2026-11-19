@@ -76,6 +76,18 @@ fn numeric_listener_and_datagram_bind_link_static_linux() {
 }
 
 #[test]
+fn listener_and_datagram_bind_link_macos_libsystem() {
+    let output = compile(
+        include_str!("fixtures/net_bind.gg"),
+        TargetName::X86_64Macos,
+    );
+    let image = output.image_plan().unwrap().macos_image();
+    for name in [b"_socket\0".as_slice(), b"_bind\0", b"_kevent\0"] {
+        assert!(image.windows(name.len()).any(|value| value == name));
+    }
+}
+
+#[test]
 fn listener_and_datagram_bind_link_windows_winsock() {
     let output = compile(
         include_str!("fixtures/net_bind.gg"),

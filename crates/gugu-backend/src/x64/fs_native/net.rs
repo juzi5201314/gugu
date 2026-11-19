@@ -18,24 +18,27 @@ pub(super) fn resolver_fragment(target: TargetName) -> FragmentBlob {
         compare(&mut b, Rax, op);
         jump(&mut b, "jne", next);
         match target {
-            TargetName::X86_64Linux => b.emit(
-                "lea",
-                &[K::Mem, K::R64],
-                Access::Address,
-                vec![
-                    Operand::Rip(
-                        RelocTarget::Lir(Symbol::External {
-                            key: hash_domain("gugu-native-c-symbol-v1", name.as_bytes()),
-                            name: name.into(),
-                        }),
-                        0,
-                    ),
-                    reg(gpr(Rax)),
-                ],
-            ),
-            TargetName::X86_64Windows => {
-                b.emit("mov", MOV, Access::Read, vec![iat(name), reg(gpr(Rax))])
+            TargetName::X86_64Linux => {
+                b.emit(
+                    "lea",
+                    &[K::Mem, K::R64],
+                    Access::Address,
+                    vec![
+                        Operand::Rip(
+                            RelocTarget::Lir(Symbol::External {
+                                key: hash_domain("gugu-native-c-symbol-v1", name.as_bytes()),
+                                name: name.into(),
+                            }),
+                            0,
+                        ),
+                        reg(gpr(Rax)),
+                    ],
+                );
             }
+            TargetName::X86_64Windows => {
+                b.emit("mov", MOV, Access::Read, vec![iat(name), reg(gpr(Rax))]);
+            }
+            TargetName::X86_64Macos => darwin::c_address(&mut b, Rax, name),
         };
         ret(&mut b);
         b.define(next);
@@ -48,12 +51,24 @@ pub(super) fn fragment(target: TargetName) -> FragmentBlob {
     let mut code = match target {
         TargetName::X86_64Linux => linux(),
         TargetName::X86_64Windows => windows(),
+        TargetName::X86_64Macos => darwin(),
     };
     let callback = code.label();
     // 关闭回调独立采用 C ABI；net_call 的 op=19 返回它的 code pointer。
     let start = code.instruction_count();
     code.define(callback);
     match target {
+        TargetName::X86_64Macos => {
+            adjust(&mut code, "sub", Rsp, 8);
+            darwin::c_call(&mut code, "close");
+            let done = code.label();
+            compare(&mut code, Rax, 0);
+            jump(&mut code, "je", done);
+            darwin::errno(&mut code);
+            code.define(done);
+            adjust(&mut code, "add", Rsp, 8);
+            ret(&mut code);
+        }
         TargetName::X86_64Linux => {
             number(&mut code, Rax, 3);
             syscall(&mut code);
@@ -102,6 +117,42 @@ pub(super) fn fragment(target: TargetName) -> FragmentBlob {
 // 网络请求九个参数后接 value/error；与 net_platform.gg 的布局逐项校验。
 const RESULT: i32 = 72;
 const FAILURE: i32 = 80;
+fn darwin() -> Builder {
+    let mut b = Builder::new();
+    push(&mut b, R12);
+    rr(&mut b, R12, Rbx);
+    set(&mut b, R12, RESULT, 0);
+    set(&mut b, R12, FAILURE, 0);
+    let done = b.label();
+    close_address(&mut b, done);
+    let methods = [
+        (0, "socket", -1),
+        (1, "setsockopt", -1),
+        (2, "bind", -1),
+        (3, "listen", -1),
+        (4, "accept", -1),
+        (5, "getsockname", -1),
+        (6, "getpeername", -1),
+        (7, "close", -1),
+        (8, "kqueue", -1),
+        (9, "kevent", -1),
+        (10, "poll", -1),
+        (21, "connect", -1),
+        (22, "shutdown", -1),
+        (23, "getsockopt", -1),
+        (24, "recvfrom", -1),
+        (25, "sendto", -1),
+        (26, "fcntl", -1),
+    ];
+    let native_done = b.label();
+    super::darwin::dispatch(&mut b, &methods, 0, RESULT, FAILURE, native_done);
+    b.define(native_done);
+    b.define(done);
+    load(&mut b, Rax, R12, RESULT);
+    pop(&mut b, R12);
+    ret(&mut b);
+    b
+}
 const LINUX: &[(i32, i32)] = &[
     (0, 41),
     (1, 54),

@@ -387,6 +387,7 @@ impl ProcessExitCode {
     pub fn fixed(target: TargetName) -> Self {
         let mut builder = Builder::new();
         match target {
+            TargetName::X86_64Macos => super::fs_native::darwin::exit(&mut builder),
             TargetName::X86_64Linux => {
                 // 内部 ABI 的第一个整数实参在 rax，退出码由 LIR 放在那里。
                 builder.emit(
@@ -552,6 +553,7 @@ impl ReportWriteCode {
     pub fn fixed(target: TargetName) -> Self {
         let mut builder = Builder::new();
         match target {
+            TargetName::X86_64Macos => super::fs_native::darwin::report(&mut builder),
             TargetName::X86_64Linux => {
                 // 内部 ABI：rax = fd、rbx = data、rcx = len；搬到 syscall 的 rdi/rsi/rdx。
                 builder.emit(
@@ -724,6 +726,7 @@ impl PlatformRangeCode {
     pub fn fixed(op: PlatformOp, target: TargetName) -> Self {
         let mut builder = Builder::new();
         match (op, target) {
+            (op, TargetName::X86_64Macos) => super::fs_native::darwin::range(&mut builder, op),
             (PlatformOp::ReserveAligned, TargetName::X86_64Linux) => {
                 linux_reserve_aligned(&mut builder);
             }

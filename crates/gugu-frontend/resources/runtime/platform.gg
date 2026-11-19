@@ -13,6 +13,7 @@
 pub enum PlatformProfile {
     Linux,
     Windows,
+    Macos,
 }
 
 /// 平台失败的统一分类；与契约中的 `FaultClass` 逐项对应。
@@ -55,6 +56,15 @@ pub fn table() PlatformTable = PlatformTable {
 #[cfg(os = "windows")]
 pub fn table() PlatformTable = PlatformTable {
     profile: PlatformProfile::Windows,
+    page_bytes: 4096,
+    huge_page_bytes: 2097152,
+    guard_bytes: 4096,
+    dump_policy_default: DumpPolicy::Included,
+}
+
+#[cfg(os = "macos")]
+pub fn table() PlatformTable = PlatformTable {
+    profile: PlatformProfile::Macos,
     page_bytes: 4096,
     huge_page_bytes: 2097152,
     guard_bytes: 4096,

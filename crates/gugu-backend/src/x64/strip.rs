@@ -34,6 +34,7 @@ pub fn strip_image(target: TargetName, bytes: &[u8]) -> Result<StripResult, Stri
     match target {
         TargetName::X86_64Linux => strip_elf(bytes),
         TargetName::X86_64Windows => strip_pe(bytes),
+        TargetName::X86_64Macos => Err("Mach-O strip is not supported".into()),
     }
 }
 

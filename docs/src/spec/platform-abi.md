@@ -314,13 +314,15 @@ macOS 镜像格式为 Mach-O 64（`arm64` 与 `x86_64`）的 PIE `MH_EXECUTE`：
 
 macOS 的 C 导入声明使用 C 名字，由写出器加一个前导下划线形成 dyld 名字。每个 Function 或 Data 导入有一个 dyld bind 槽；只有 Function 可以生成可调用入口，且入口在镜像布局确定后以指向该槽的地址写入。仅声明 dylib 依赖不创建 bind 槽。
 
+内部验证目标 `x86_64-macos` 使用 Darwin x86-64 C 调用约定；启动入口接收 dyld 提供的 `argc`、`argv` 与环境指针。运行时经 libSystem 访问文件、套接字和子进程，并按 Darwin errno 解释原生错误。内部验证入口不改变目标名解析、公开目标列表或宿主默认选择。
+
 static PIE自重定位、PE header字段、section排序和 archive编码见[后端内部规范](../internals/backend.md)，不得在该文档扩展本节公开镜像面。
 
 ### 入口、重定位与 TLS {#entry-relocation-tls}
 
 Linux 镜像的入口由 ELF `e_entry` 指向 rt0；`_start` 是默认启动约定。Windows 镜像的 PE 入口同样直接指向 rt0 初始化路径。入口函数不经过 Gugu 普通函数 ABI，也不能触发 GC 或依赖已初始化的 runtime。
 
-编译器直接写出 ELF 或 PE，不把未解析的内部符号交给系统 `ld` 事后处理。所有重定位、节偏移、导入、入口和展开信息必须在镜像写出前验证；目标不支持的重定位是编译错误。
+编译器直接写出 ELF、PE 或内部验证用的 Mach-O，不把未解析的内部符号交给系统 `ld` 事后处理。所有重定位、节偏移、导入、入口和展开信息必须在镜像写出前验证；目标不支持的重定位是编译错误。
 
 `#[coroutine_local]` 与 `#[os_thread_local]` 的语义分别见[声明与模块](declarations.md)和[内存与对象模型](memory.md)。它们的实现可以使用目标 TLS、runtime 控制块或等价机制，但实现细节不是 C ABI；协程本地槽不能伪装成操作系统线程 TLS，操作系统线程槽也不能在协程迁移后继续当作同一槽使用。
 
@@ -339,6 +341,10 @@ rt0 和 runtime 通过 PE 导入表调用目标注册表允许的系统 DLL；�
 用户额外导入的 DLL、库名和符号必须在构建配置中登记。导入表由 Gugu 编译器直接写出；缺失导出、名称冲突、导入库未登记和不匹配的调用约定都是编译错误。
 
 普通终止信号的 Gugu 映射、订阅队列和默认动作见[运行时与运维语义](runtime.md)。Linux 的 signal handler、备用栈和 fatal fault 路径必须保持 signal-safe，Windows 的 console/SEH 回调不得直接运行 Gugu 用户代码；具体 syscall、导入符号和 handler 数据结构不是稳定 ABI。用户通过 FFI 修改 signal disposition、mask 或 console handler 后，运行时信号契约不再适用。
+
+### macOS（内部验证）
+
+rt0 和运行时通过 libSystem 调用 Darwin 接口；文件系统、套接字和进程接口使用同一标准库语义，但原生结构和错误码不与 Linux 互换。内部目标暂不提供 `std.signal` 信号订阅；该限制不改变子进程退出状态的报告。
 
 ### 外部错误状态
 

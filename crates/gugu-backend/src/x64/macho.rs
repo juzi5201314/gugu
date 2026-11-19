@@ -5,6 +5,9 @@ use crate::{
     macho::{self, Arch, ImportSlot, Location, MachORequest, Section, SectionContent, Segment},
 };
 
+mod world;
+pub use world::link_world;
+
 const STUB: [u8; 6] = [0xff, 0x25, 0, 0, 0, 0];
 
 /// 为 Function 导入追加 RIP 相对间接跳转，返回 C 名字对应的可调用地址。
