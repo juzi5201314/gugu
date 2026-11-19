@@ -8,6 +8,7 @@ mod callback_adapter;
 mod dump;
 mod effects;
 pub mod exports;
+pub mod foreign;
 pub mod function_adapter;
 pub mod installed;
 pub use pass::graph::Graph;
@@ -36,8 +37,8 @@ use query::{QueryEngine, QueryKey, QueryKind};
 use serde::{Deserialize, Serialize};
 use std::sync::Arc;
 
-/// LIR query 与 world 的 schema。22：结构化 IEEE 比较。
-pub const SCHEMA: u32 = 23;
+/// LIR query 与 world 的 schema。23：保留原始 C 签名。24：数组初始化的动态根地址。
+pub const SCHEMA: u32 = 24;
 
 #[derive(Clone, Debug, Eq, PartialEq, Serialize, Deserialize)]
 struct World {

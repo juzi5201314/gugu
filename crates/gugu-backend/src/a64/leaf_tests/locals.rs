@@ -448,6 +448,7 @@ fn rooted_locals_appear_in_managed_call_return_maps() {
             results: vec![],
             sret: None,
             by_value: vec![],
+            foreign_signature: None,
             foreign_arguments: vec![],
             may_allocate: true,
             may_suspend: false,

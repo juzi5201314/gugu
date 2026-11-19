@@ -33,6 +33,7 @@ fn caller(callee: &Fixture) -> Fixture {
         may_allocate: false,
         captures_arguments: false,
         by_value: vec![],
+        foreign_signature: None,
         foreign_arguments: vec![],
         sret: None,
         poll_free_leaf: true,

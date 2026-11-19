@@ -381,6 +381,30 @@ fragment relocation 封闭为：
 
 `staticlib` 写确定性 SysV ar archive，member timestamp/uid/gid 为 0、mode固定，成员按 symbol key排序；`cdylib` 写 ET_DYN、只导出显式 C symbol并包含自有闭世界 runtime/metadata。
 
+### 内部 AArch64 Linux ELF64
+
+`a64::elf` 是不依赖目标注册的纯库 static-PIE writer。`ElfRequest` 给出节、入口、指令重定位和绝对指针槽；复用 `macho` 的 `Section`、`SectionContent`、`Segment` 与 `Location` 容器，但 `DataConst` 在这里从装载开始就只读，RELATIVE 槽只能位于有文件内容的 `Data`。`layout` 按节大小和请求形状计算链接期虚址（同时是文件偏移），`link` 写出确定性的 `ET_DYN`、`EM_AARCH64 = 183` 镜像与 BLAKE3 指纹。此层不接入 target registry、CLI 或闭世界 image planner。
+
+程序头依次为 `PT_PHDR`、RX/R/RW 三个 `PT_LOAD` 与不可执行的 `PT_GNU_STACK`；不写 `PT_INTERP`。三个装载段按 64 KiB 对齐，RX 包含 ELF 和程序头，R 包含 `.rela.dyn` 与节表，RW 的零填充节排在有文件内容的节之后且不增加文件大小。`.rela.dyn` 每项为标准 ELF64 RELA（24 字节）：槽虚址、符号索引为零的 `R_AARCH64_RELATIVE = 1027`、目标链接期地址加 addend；没有重定位时仍保留零长度的表。重复槽、非可写或未对齐的指针槽、越界位置、布局溢出和不支持的指令重定位在写出前报错。
+
+`a64::relocation` 与 Darwin 启动路径共享 decode/encode 修补器；支持 `Call26`/`Branch26`、`AdrpPage21`、`AddLo12` 与 `LdStLo12`，按指令自身的 4 KiB 页计算 ADRP 和页内偏移，与 ELF 段的 64 KiB 对齐无关。修补时检查指令形式、访存缩放、位移范围和对齐，不用掩码截断无效值。
+
+`a64::elf::link_entry` 接收 `LinuxEntry`（`rt0_start`、可写载荷、初始槽与 processor），追加只读参数块、Linux `_start` 和共享 `a64::fragments::rt0`。参数块保存链接期值，入口由参数块运行时地址减去 `bias_baseline` 得到加载偏移，遍历 RELA 表把 `bias + addend` 写入 `bias + slot`。零条目跳过循环；内核不负责这批自重定位。入口从原始 sp 读取 argc，以 `sp + 8` 为 argv、`argv + 8 * (argc + 1)` 为 envp，保留它们直到以 x0–x4 = params、bias、envp、argc、argv 调用 rt0。rt0 初始化 x27/x28，写入载荷启动参数并调用 `rt0_start`，返回的 x0 直接交给 `exit_group`（x8 = 94，`svc #0`）。入口写入载荷 revision，并为载荷的 `initial_slot` 字段自动登记一项 RELATIVE；其他载荷指针由调用方提供。`examples/a64_linux_image.rs` 在默认测试之外生成读取已重定位指针槽、经 Linux write 输出消息并返回 42 的验证镜像；单元测试只在进程内检查结构与指令。
+
+`a64::fragments::linux_fd_dispatch` 是无导入、无外部重定位的 Builder 片段，在原生栈上保留 x19/x20/x29/x30，并预留 128 字节 arm64 kernel stat 暂存区。它接收 x0 = `NativeRequest*`，加载 `foreign_schema` 的 operation/arguments，按 Linux x86_64 请求号翻译为 asm-generic syscall：read/write/close/lseek = 63/64/57/62，open→openat 56，stat/lstat/newfstatat→newfstatat 79，fstat→80，fcntl→25，fsync/fdatasync/ftruncate→82/83/46，rename/mkdir/rmdir/link/unlink/symlink/readlink→38/34/35/37/35/36/78，getdents64→61。*at 转换插入 -100、`AT_REMOVEDIR` 或 `AT_SYMLINK_NOFOLLOW`；传入 newfstatat 的 dirfd/flags 原样保留。open 的 flags 与 fcntl 的 `F_SETFL` 输入、`F_GETFL` 输出交换位组 14–15 和 16–17，其他 flags 保持不变。负返回值转成正 errno，原返回值保留在 VALUE；未支持请求为 EINVAL。信号请求委派给同一片段内的共享信号分派生成器；此层不实现调度与完成发布。
+
+stat 成功后把暂存区复制为 x86_64 kernel stat：mode/nlink/uid/gid/rdev 调整偏移，32 位 nlink 零扩展、blksize 符号扩展，dev/ino/size/blocks/时间戳保持偏移，填充和保留字段清零。Linux `fs_platform::linux_stat` 从 +88/+96 读取修改时间秒/纳秒。解码往返与确定性 syscall 替身执行测试覆盖请求翻译、flags、完整 stat、负返回、零字节读取/目录 EOF 和不支持请求；不进行真实 I/O。`examples/a64_linux_fd_image.rs` 在默认测试之外生成经 worker 以 `O_EXCL` 创建 /tmp 文件（已存在则失败，不覆盖或删除已有文件）并写/关/stat/重开/读、目录 getdents、unlink 和 errno 检查的镜像；所有检查成功返回 0，失败返回 1。
+
+`a64::fragments::linux_net_dispatch` 接收 x0 操作号和 x1 网络 packet，以 Builder 生成无导入的系统调用分派：socket/setsockopt/bind/listen/accept4/getsockname/getpeername/close = 198/208/200/201/242/204/205/57，epoll_create1/ctl/pwait = 20/21/22，connect/shutdown/getsockopt/recvfrom/sendto = 203/210/209/207/206。value/error 仍在 packet 的 +72/+80；负内核返回转换成 value = 0 与正 errno。操作 19 以 ADR 返回同一片段中的原生 close 回调地址，成功返回 0、失败返回正 errno。
+
+epoll_ctl 将调用方的打包 12 字节事件展开到原生栈，DEL 不解引用 event；epoll_wait 在 2048 字节暂存区接收最多 128 个 arm64 事件，成功后逐项压缩为 x86_64 12 字节格式，保留完整 64 位 data。零事件或失败不写输出缓冲。maxevents 按有符号 int 解释，非正返回 EINVAL，正数批量上限为 128；epoll_pwait 的 sigmask = 0、sigsetsize = 8。片段不使用动态栈分配或 mmap，不在原生栈上按不可信 maxevents 分配内存。
+
+`linux_signal_dispatch` 和 `linux_fd_dispatch` 共享同一信号分派生成器；前者单独处理信号 NativeRequest，后者也路由现有运行时的 14/289。13/14/289 分别调用 134/135/74；39/62/186/200/234 分别调用 172/129/178/130/131。rt_sigaction 将输入复制到 32 字节栈缓冲，清除 SA_RESTORER 位并清零 restorer；成功时才复制旧 action。文件/信号保留原始负 VALUE 并写正 ERROR，与网络 packet 的错误归零约定不同。`linux_syscall` 共享原生栈保存、比较分支、svc 和取负辅助生成器。`signal.gg::arm` 修正 signalfd4 的参数：原先把 524288 放到 sigsetsize、flags 留零；现为 size = 8、flags = 524288，避免 x64 与 arm64 内核返回 EINVAL。
+
+Linux DNS 的 `net_resolver.gg` 经 `resolver_symbol` 获得 getaddrinfo/freeaddrinfo，再使用 foreign packet 调用 libc；Linux addrinfo 的 sockaddr 在 +24、next 在 +40。取消不提前释放仍被原生调用读取的 host/hints/result；迟到结果仍须 freeaddrinfo。此路径依赖 libc 导入、foreign-call worker，内部 A64 raw-syscall 层暂不实现 resolver_symbol，也不增加另一套 UDP DNS。FP/原子片段不是当前 socket/信号系统调用的依赖；完整 worker 启动、调度、foreign 调用和目标登记仍未接通。
+
+`examples/a64_linux_net_signal_image.rs` 手工生成通过适配器在 loopback 上 bind/listen/connect/accept、sendto/epoll/recvfrom，以及 block SIGUSR1、kill 自身、signalfd 读取的镜像；另外通过 sigaction 忽略 SIGUSR2、自发信号并恢复旧 action，同时检查网络 EINVAL/EBADF。默认 nextest 只运行解码/编码往返和确定性 syscall 替身，覆盖布局、完整 data、成功/零事件/错误、信号 action 转换和 signalfd 的运行时参数回归，不运行真实网络或子进程。
+
 ### Windows PE32+
 
 PE writer消费[平台 ABI](../spec/platform-abi.md#executable-image-forms)给出的 PE32+、ASLR/NX、入口、逻辑节和导入导出要求。当前私有 writer profile使用 image base `0x0000000140000000`、section alignment 4096、file alignment 512、COFF timestamp/checksum 0和 `WINDOWS_CUI` subsystem；这些字段不扩大平台稳定面。`DllCharacteristics` 固定带 dynamic base、high-entropy VA 和 NX。逻辑节按登记名各写一节，名字长于 8 字节则写出失败。用户片段仍与 `registered_fragments` 登记的机器片段一起按符号名排序、16 字节对齐接在 rt0 之后（栈图 `code_rva` 与 `.pdata` 都取自这次排序，两者必须与放置同源）；栈图 `code_rva` 相对该片段区，`.pdata` 里的 `RUNTIME_FUNCTION` 再加上片段区 RVA。`.xdata` 保留完整 `GUGUUN01` 容器，其平台尾里的 `UNWIND_INFO` 偏移改写成镜像 RVA。
@@ -682,6 +706,21 @@ Acquire fence 用 DMB ISHLD，其余合法 fence 用 DMB ISH；SeqCst 原子操�
 CAS 比较不等则 CLREX 后返回 actual/false，不写内存；只对排他存储失败重试。
 字节 VM 用显式 monitor、确定性的失败注入和并发写入替身检查重新读取、窄宽度、
 旧值返回、邻字节保护、顺序指令与有 spill 的寄存器别名情形；不执行 native 线程。
+
+### A64 外调参数包（4d.3a）
+
+runtime-ABI 的 `A64ForeignCallPacket` 保留完整的 176-byte `ForeignCallPacket`
+前缀：x0–x5 位于 16–56，v0–v7 的低 64 位仍在 64–120，x0/x1 与 d0/d1
+结果仍在 128–152，errno 在 160。扩展的 x6/x7 在 176/184，x8/sret 在 192；
+200 保存额外 HFA d2/d3 的 16-byte `FIXUP_OUTPUT` 目标指针。此指针与 sret
+都由既有 raw-copy/fixup 事务形成，不指向 coroutine stack。native 栈参数从完整
+208-byte header 后开始，长度向上取整到 16 字节，然后是 32-byte fixup 记录。
+`A64Layout` checked 计算全部边界，拒绝溢出。
+
+`runtime/foreign.gg` 的 `[128,168)` 回写窗口和错误状态位置不变；HFA 的额外结果
+通过普通 output fixup 回写，不另造 admission、credit、pin、cleanup 或 copy-back
+协议。shared prefix 的 reserved 字保持零。此阶段只定义布局和原始 C 签名，尚未把
+A64 worker、栈切换或 LIR 外调 lowering 接入；外调仍显式拒绝，不登记新目标。
 
 ### A64 生产源与镜像数据绑定
 

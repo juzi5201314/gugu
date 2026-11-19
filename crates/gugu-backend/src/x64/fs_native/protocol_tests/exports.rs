@@ -20,6 +20,7 @@ fn scalar_export() -> Export {
             may_allocate: false,
             captures_arguments: false,
             by_value: vec![],
+            foreign_signature: None,
             foreign_arguments: (0..2)
                 .map(|first| ForeignArgument {
                     first,

@@ -75,6 +75,7 @@ fn bridge_packet_roots_cover_register_and_stack_copies() {
                 captures_arguments: false,
                 by_value: (1..8).map(|index| (index, [0; 32], 24)).collect(),
                 sret: Some((0, 24, [0; 32])),
+                foreign_signature: None,
                 foreign_arguments: vec![],
                 poll_free_leaf: false,
             };

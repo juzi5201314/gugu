@@ -15,7 +15,9 @@ use std::{num::NonZeroU32, ops::Range};
 /// 17：压缩字编码从运行期 cage 基址计算 offset。
 /// 18：原生 cage 参数按值复制使用登记的 ForeignCopy 入口。
 /// 20：进程与环境机器操作目录。
-pub const REVISION: u32 = 24;
+/// 24：外调保留原始 C 类型、符号性、HFA 和固定参数边界。
+/// 25：数组初始化的动态逐根字节地址。
+pub const REVISION: u32 = 25;
 
 macro_rules! ids {
     ($($name:ident),* $(,)?) => { $(
@@ -437,6 +439,7 @@ pub struct Call {
     pub by_value: Vec<(u32, [u8; 32], u64)>,
     /// 非 managed 调用保留原始 C 参数边界，按 first 严格升序。
     pub foreign_arguments: Vec<ForeignArgument>,
+    pub foreign_signature: Option<crate::foreign::Signature>,
     pub sret: Option<(u32, u64, [u8; 32])>,
     /// poll pass 分类出的 managed 直接叶调用；region verifier 与预算数据流消费。
     pub poll_free_leaf: bool,

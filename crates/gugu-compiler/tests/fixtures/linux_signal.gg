@@ -1,0 +1,27 @@
+use std.io.{println}
+use std.process
+use std.signal.{Signal, subscribe}
+
+#[ffi(leaf)]
+extern "C" fn getpid() i32
+#[ffi(leaf)]
+extern "C" fn kill(pid: i32, signo: i32) i32
+
+fn main() {
+    let signals = [Signal::User1]
+    let sub = match subscribe(signals[..]) {
+        Ok(value) => value,
+        Err(_) => panic("subscribe failed"),
+    }
+    let sent = unsafe { kill(getpid(), 10) }
+    if sent != 0 { panic("kill failed") }
+    let event = match sub.recv() {
+        Ok(value) => value,
+        Err(_) => panic("recv failed"),
+    }
+    match event.signal { Signal::User1 => (), _ => panic("unexpected signal") }
+    if event.occurrences == 0 { panic("missing occurrence") }
+    sub.close()
+    println("Linux SIGUSR1 received: ", event.occurrences)
+    process.exit(37)
+}

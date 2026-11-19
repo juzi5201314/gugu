@@ -1,17 +1,12 @@
 use std::collections::BTreeMap;
 use std::mem::offset_of;
 
-use super::{
-    PAGE_SHIFT, append_import_stubs, import_stub_symbol, prebuilt_import_stubs,
-    relocate_import_stub,
-};
+use super::{append_import_stubs, import_stub_symbol, prebuilt_import_stubs, relocate_import_stub};
 use crate::{
     NativeImport, NativeImportKind,
     a64::{
-        decode, encode,
         fragments::{Fragment, darwin_main, rt0},
-        inst::{Operand, RelocKind, Target},
-        table,
+        relocation,
     },
     macho::{
         self, Arch, Fixup, ImportSlot, Layout, Location, MachImage, MachORequest, Section,
@@ -226,54 +221,10 @@ fn relocate(
     layout: &Layout,
     symbols: &BTreeMap<&str, Location>,
 ) -> Result<Vec<u8>, String> {
-    let base = layout.address(at)?;
-    let mut bytes = fragment.bytes;
-    for site in fragment.relocations {
-        let rel = site.relocation;
+    relocation::relocate(fragment, layout.address(at)?, |name| {
         let target = symbols
-            .get(rel.target.as_str())
-            .ok_or_else(|| format!("unresolved arm64 Mach-O startup symbol {}", rel.target))?;
-        let target = layout
-            .address(*target)?
-            .checked_add_signed(rel.addend)
-            .ok_or_else(|| format!("arm64 Mach-O startup target overflow: {}", rel.target))?;
-        let offset = site.offset as usize;
-        let field = &mut bytes[offset..offset + 4];
-        let word = u32::from_le_bytes(field.try_into().unwrap());
-        let patched =
-            patch(word, rel.kind, base + u64::from(site.offset), target).map_err(|error| {
-                format!(
-                    "arm64 Mach-O startup relocation for {}: {error}",
-                    rel.target
-                )
-            })?;
-        field.copy_from_slice(&patched);
-    }
-    Ok(bytes)
-}
-
-fn patch(word: u32, kind: RelocKind, pc: u64, target: u64) -> Result<[u8; 4], crate::a64::Error> {
-    let mut inst = decode::decode(word)?;
-    let low = (target & ((1 << PAGE_SHIFT) - 1)) as u16;
-    let (operand, value) = match (kind, table::get(inst.form)?.key) {
-        (RelocKind::AdrpPage21, "adrp") => {
-            let pages = (target >> PAGE_SHIFT) as i64 - (pc >> PAGE_SHIFT) as i64;
-            (1, Operand::Target(Target::Offset(pages << PAGE_SHIFT)))
-        }
-        (RelocKind::AddLo12, "add.X.imm") => (
-            2,
-            Operand::AddImm {
-                imm12: low,
-                shift12: false,
-            },
-        ),
-        (RelocKind::Call26, "bl") => {
-            let delta = i64::try_from(i128::from(target) - i128::from(pc))
-                .map_err(|_| crate::a64::error("call displacement overflow"))?;
-            (0, Operand::Target(Target::Offset(delta)))
-        }
-        _ => return Err(crate::a64::error("unexpected startup relocation")),
-    };
-    inst.operands[operand] = value;
-    Ok(encode::encode(&inst)?.bytes())
+            .get(name)
+            .ok_or_else(|| format!("unresolved arm64 Mach-O startup symbol {name}"))?;
+        layout.address(*target)
+    })
 }

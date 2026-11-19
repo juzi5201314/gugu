@@ -261,6 +261,8 @@ struct Header {
 
 ## `extern "C"` 调用约定
 
+编译器必须保留原始 C 签名的整数符号性、标量/聚合类别、大小与对齐，以及同质浮点聚合的成员类型和位置，不能从目标已展平的寄存器车道反推。所有目标遵守同一描述契约；它不改变现有 x64 的机器传参。为后续 A64 lowering 保留固定参数边界，但本版本前端仍拒绝 C 可变参数声明。A64 的描述与内部参数包布局不构成目标登记、完整外调实现或可运行镜像保证。
+
 ### 总则
 
 ABI 字符串目前只有 `"C"`。无函数体的 `extern` 是导入，有函数体且公开的 `pub extern "C" fn` 是导出；库名、符号和链接方式必须在构建配置中显式登记。导出边界不能把 Gugu panic 展开到 C 帧：未被 `std.panic.catch` 收集的 panic 必须按[运行时](runtime.md)规则终止进程。
@@ -348,6 +350,22 @@ macOS 镜像格式为 Mach-O 64（`arm64` 与 `x86_64`）的 PIE `MH_EXECUTE`：
 macOS 的 C 导入声明使用 C 名字，由写出器加一个前导下划线形成 dyld 名字。每个 Function 或 Data 导入有一个 dyld bind 槽；只有 Function 可以生成可调用入口，且入口在镜像布局确定后以指向该槽的地址写入。仅声明 dylib 依赖不创建 bind 槽。
 
 内部验证目标 `x86_64-macos` 使用 Darwin x86-64 C 调用约定；启动入口接收 dyld 提供的 `argc`、`argv` 与环境指针。运行时经 libSystem 访问文件、套接字和子进程，并按 Darwin errno 解释原生错误。内部验证入口不改变目标名解析、公开目标列表或宿主默认选择。
+
+内部 aarch64 Linux 镜像使用 ELF64 static PIE：`ET_DYN`、`EM_AARCH64 = 183`，无 `PT_INTERP`，具有 `PT_PHDR` 和分别为 R-X、R、RW 的三个 `PT_LOAD`，段按 64 KiB 对齐以兼容 4 KiB、16 KiB 和 64 KiB 内核页；不存在 W+X 映射。绝对指针槽只允许位于可写数据，登记为 `R_AARCH64_RELATIVE = 1027`，由镜像入口自行加上加载偏移，不依赖内核执行动态重定位。此形式不登记新目标，也不扩大 CLI 或闭世界编译的支持范围。
+
+内部 aarch64 Linux `_start` 从内核初始栈取得 `argc`、`argv`、`envp`，由参数块的运行时地址减去其链接期地址得到加载偏移，完成 RELATIVE 重定位后，以 x0–x4 = 参数块、加载偏移、`envp`、`argc`、`argv` 调用共享 rt0。rt0 初始化 x27/x28 并将原生启动参数写入 `Rt0Payload`，调用 `rt0_start`；正常返回后以 x0 为状态、x8 = 94 执行 `svc #0`（`exit_group`）。调用方提供载荷、初始槽、processor 和 `rt0_start`；入口只补写载荷版本与初始槽指针，其余镜像内载荷指针仍须由调用方登记 RELATIVE 重定位。此路径不声明 Linux 调度器、网络、信号、进程或 VM 适配器已接通。
+
+内部 aarch64 Linux 文件适配器接收 x0 = `NativeRequest*`，在原生栈上使用现有 Linux 请求协议（x86_64 syscall 编号与参数顺序），不使用 Darwin 的连续操作号。文件请求 0/1/2/3/5/8/72/74/75/77/82/83/84/86/87/88/89/217/262 分别为 read/write/open/close/fstat/lseek/fcntl/fsync/fdatasync/ftruncate/rename/mkdir/rmdir/link/unlink/symlink/readlink/getdents64/newfstatat；另支持 4 = stat、6 = lstat。路径请求按需补入 `AT_FDCWD = -100`，转换为 arm64 的 *at 系统调用；x8 为 asm-generic syscall 编号，以 `svc #0` 调用。open 与 fcntl 的 `F_SETFL`/`F_GETFL` 转换两种架构的 `O_DIRECT`、`O_LARGEFILE`、`O_DIRECTORY`、`O_NOFOLLOW` 位。成功清零 ERROR；失败保留负返回值于 VALUE，并写入正 errno；未支持请求写 VALUE = 0、ERROR = `EINVAL`（22）。此文件适配器不负责线程、调度或发布请求完成，信号请求 14/289 由同一 worker 转交信号适配器处理，见下文。
+
+Linux 文件请求中的 stat 输出缓冲为调用方提供的至少 144 字节有效可写原生内存，使用 x86_64 kernel stat 布局；arm64 适配器在系统调用成功后规范化原生 stat，失败不改写调用方缓冲。mode/size 与修改时间秒/纳秒分别位于 +24/+48/+88/+96，运行时由这些偏移构造文件元数据；内核目录项沿用 Linux dirent64 布局，无需转换。内部片段不登记公开目标或接通完整编译路径。
+
+内部 aarch64 Linux 网络适配器沿用 `net_call` 协议：x0 = 操作号，x1 = 128 字节网络请求地址，九个参数槽后接 +72 的 value 和 +80 的 error；这不是 `NativeRequest` 布局。操作 0–10、21–25 分别为 socket、setsockopt、bind、listen、accept4、getsockname、getpeername、close、epoll_create1、epoll_ctl、epoll_wait、connect、shutdown、getsockopt、recvfrom、sendto，参数顺序保持 Linux runtime 原样。操作 19 返回同一片段内的 C ABI 关闭回调，接收 x0 = fd、返回正 errno 或 0。网络调用成功返回并存储 value，失败 value = 0、error = 正 errno，未支持操作返回 EINVAL。所有系统调用经 x8 和 `svc #0`，不引入 C 导入。
+
+网络请求维持 x86_64 打包 epoll_event 协议（12 字节，events +0、data +4）；适配器在原生栈上转换为 arm64 的 16 字节布局（data +8），epoll_wait 经 epoll_pwait 且不临时改动信号掩码。每次至多返回 128 个事件（不超过请求 maxevents）；非正 maxevents 返回 EINVAL。超时、EINTR 和其他错误保持现有 Linux 语义。sockaddr、socket flags、选项和 Linux errno 沿用现有协议；所有被读取或写入的非空原生缓冲由调用方保证有效。
+
+内部 aarch64 Linux 信号适配器接收 `NativeRequest*`，支持 x86_64 请求号 13/14/289 的 rt_sigaction/rt_sigprocmask/signalfd4，以及 39/62/186/200/234 的 getpid/kill/gettid/tkill/tgkill。文件 worker 同样接受并分派这组请求，使现有 signal runtime 的 mask/signalfd 请求无需改变路由。signalfd4 参数为 fd、mask、sigsetsize（8）、flags；rt_sigaction 的 32 字节 kernel action 为 handler、flags、restorer、mask，arm64 不需要 x86_64 的 SA_RESTORER，适配器清除此输入位并使用 arm64 内核返回路径。新 action 和旧 action 缓冲由调用方保证有效；失败不复制旧 action。信号编号和 signalfd_siginfo 与 Linux runtime 一致；订阅、投递队列和 worker 线程管理仍由 runtime 负责。
+
+Linux resolver 当前不是运行时 UDP DNS：它使用 resolver_symbol(0/1) 的 libc getaddrinfo/freeaddrinfo 地址，通过 operation = ~uint(0) 的 foreign worker 调用，保留系统地址顺序和取消后释放迟到结果的契约。内部 aarch64 raw-syscall 镜像尚无 libc 导入和 foreign-call worker，因此此阶段不接通 resolver，也不以自建 DNS 或静默返回空结果替代；不新增 resolver 占位入口或公开目标。
 
 static PIE自重定位、PE header字段、section排序和 archive编码见[后端内部规范](../internals/backend.md)，不得在该文档扩展本节公开镜像面。
 
