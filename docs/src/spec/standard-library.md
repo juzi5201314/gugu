@@ -334,6 +334,8 @@ SmallVec[T, comptime N: int]
 SmallMap[K, V, comptime N: int]
 ```
 
+预导入的 `HashMap` / `HashSet` 与 `std.collections` 导出的同名类型相同；不需要显式 use 即可构造和使用。
+
 MultiMap 不作为独立标准类型；使用 `HashMap[K, Vec[V]]` 或 `BTreeMap[K, Vec[V]]` 组合，重复值顺序由所选 Vec 明确表达。
 
 Vec、Deque、BinaryHeap、LinkedList、BitSet、SmallVec 和全部 Map/Set 都是共享身份句柄：赋值只复制句柄，通过任一别名修改时，所有别名继续观察同一个逻辑集合。集合内部可以为快照迭代封存并替换 backing；这只改变物理表示，不把集合改成 COW 值语义。
