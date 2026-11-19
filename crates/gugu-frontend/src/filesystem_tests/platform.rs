@@ -167,6 +167,39 @@ fn compile(target: TargetName) -> Compilation {
 }
 
 #[test]
+fn linux_metadata_reads_x86_kernel_stat_fields() {
+    let output = compile(TargetName::X86_64Linux);
+    let mut stat = vec![0; 144];
+    for (offset, value) in [
+        (0, 11_u64),
+        (8, 12),
+        (24, 0o100640),
+        (48, 123),
+        (56, 4096),
+        (64, 8),
+        (88, 999),
+        (96, 888),
+    ] {
+        stat[offset..offset + 8].copy_from_slice(&value.to_le_bytes());
+    }
+    let reply = Reply::new(262, 0, 0)
+        .argument(1, !99)
+        .argument(2, INPUT)
+        .argument(4, 0)
+        .write(3, stat);
+    let mut adapter = Adapter::new(&output, vec![reply]);
+    let (result, memory) = adapter.run("fs_platform", "linux_stat", &[5, INPUT, 1, OUTPUT]);
+    assert_eq!(result, vec![0, 0]);
+    let actual: Vec<_> = memory[OUTPUT as usize..OUTPUT as usize + 64]
+        .as_chunks::<8>()
+        .0
+        .iter()
+        .map(|word| u64::from_le_bytes(*word))
+        .collect();
+    assert_eq!(actual, [123, 0o100640, 1, 4096, 8, 0, 11, 12]);
+}
+
+#[test]
 fn linux_metadata_failure_leaves_output_and_frees_scratch() {
     let output = compile(TargetName::X86_64Linux);
     let mut adapter = Adapter::new(&output, vec![Reply::new(262, 0, 13).argument(2, INPUT)]);
