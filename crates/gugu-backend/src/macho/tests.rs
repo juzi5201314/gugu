@@ -267,6 +267,67 @@ fn arm64_darwin_entry_resolves_startup_and_exit() {
 }
 
 #[test]
+fn arm64_darwin_entry_reuses_existing_exit_binding() {
+    use crate::{NativeImportKind, a64::macho as a64_macho};
+
+    for (bound, prebuilt) in [(true, false), (true, true), (false, false)] {
+        let (mut request, entry) = arm64_darwin_entry_fixture();
+        request.imports.push(Import {
+            dylib: LIB_SYSTEM.into(),
+            name: "_exit".into(),
+            weak: false,
+        });
+        let slot = at(2, 8);
+        if bound {
+            request.fixups.push(Fixup::Bind {
+                at: slot,
+                import: 0,
+                addend: 0,
+            });
+        } else {
+            request.sections[slot.section].name = "__unused_got".into();
+        }
+        let text = layout(&request).unwrap().address(at(1, 0)).unwrap() - IMAGE_BASE;
+        request.sections[1].content =
+            SectionContent::Data(vec![0; (Arch::Arm64.page_size() - text - 128) as usize]);
+        if prebuilt {
+            let slots = std::collections::BTreeMap::from([(
+                "exit".into(),
+                ImportSlot {
+                    at: slot,
+                    kind: NativeImportKind::Function,
+                },
+            )]);
+            a64_macho::append_import_stubs(&mut request, &slots).unwrap();
+        }
+        let old_got = layout(&request).unwrap().address(slot).unwrap();
+        let file = a64_macho::link_entry(request, entry).unwrap().bytes;
+        let (main, main_file) = section_address(&file, "__lc_main");
+        let (stub, stub_file) = section_address(&file, "__stubs");
+        let (got, got_file) = section_address(&file, "__got");
+        let slot_offset = if bound { slot.offset } else { 0 };
+        if bound {
+            assert_ne!(old_got, got + slot_offset);
+        }
+        assert_eq!(
+            branch_target(u32_at(&file, main_file + 28), main + 28),
+            stub
+        );
+        let adrp = u32_at(&file, stub_file);
+        let ldr = u32_at(&file, stub_file + 4);
+        let pages = ((((adrp >> 5) & 0x7ffff) << 2) | ((adrp >> 29) & 3)) as i32;
+        let page = (stub & !0xfff)
+            .checked_add_signed(i64::from((pages << 11) >> 11) * 4096)
+            .unwrap();
+        assert_eq!(page + u64::from((ldr >> 10) & 0xfff) * 8, got + slot_offset);
+        assert_eq!(u64_at(&file, got_file + slot_offset as usize) >> 63, 1);
+        let fixups = u32_at(&file, command(&file, 0x8000_0034) + 8) as usize;
+        assert_eq!(u32_at(&file, fixups + 16), 1);
+        assert_eq!(u32_at(&file, command(&file, 0x2) + 12), 2);
+    }
+}
+
+#[test]
 fn arm64_darwin_entry_rejects_a_payload_outside_writable_data() {
     let (request, mut entry) = arm64_darwin_entry_fixture();
     entry.payload = entry.rt0_start;

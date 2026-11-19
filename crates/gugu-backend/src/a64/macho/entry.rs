@@ -1,9 +1,9 @@
 use std::collections::BTreeMap;
 use std::mem::offset_of;
 
-use super::{PAGE_SHIFT, append_import_stubs, import_stub_symbol};
+use super::{PAGE_SHIFT, STUB_SIZE, append_import_stubs, encode_stub, import_stub_symbol};
 use crate::{
-    NativeImport,
+    NativeImport, NativeImportKind,
     a64::{
         decode, encode,
         fragments::{Fragment, darwin_main, rt0},
@@ -11,7 +11,8 @@ use crate::{
         table,
     },
     macho::{
-        self, Arch, Layout, Location, MachImage, MachORequest, Section, SectionContent, Segment,
+        self, Arch, Fixup, ImportSlot, Layout, Location, MachImage, MachORequest, Section,
+        SectionContent, Segment,
     },
     runtime::{
         entry::{INITIAL_SLOT_BYTES, Rt0Payload, rt0_params},
@@ -32,7 +33,7 @@ pub struct DarwinEntry {
     pub processor: Location,
 }
 
-/// 添加 arm64 Darwin 启动节和 libSystem 的 exit 导入，解析入口重定位并写出签名镜像。
+/// 添加 arm64 Darwin 启动节，绑定 libSystem 的 exit 并写出签名镜像。
 /// 调用方提供独立的 rt0_start 代码和其余运行时数据；原有 entry 字段被替换。
 pub fn link_entry(mut request: MachORequest, entry: DarwinEntry) -> Result<MachImage, String> {
     if request.arch != Arch::Arm64 {
@@ -61,24 +62,95 @@ pub fn link_entry(mut request: MachORequest, entry: DarwinEntry) -> Result<MachI
         SectionContent::Code(main.bytes.clone()),
     );
     request.entry = main_at;
-    let slots = macho::append_native_imports(
-        &mut request,
-        &[NativeImport::function(macho::LIB_SYSTEM, "exit")],
-    )?;
-    let stubs = append_import_stubs(&mut request, &slots)?;
+    let slot = exit_slot(&mut request)?;
+    let existing = request.symbols.iter().find(|symbol| symbol.name == exit);
+    let (exit_at, layout) = if let Some(symbol) = existing {
+        let at = symbol.at;
+        let layout = macho::layout(&request)?;
+        relocate_exit_stub(&mut request, &layout, at, slot.at)?;
+        (at, layout)
+    } else {
+        let stubs = append_import_stubs(&mut request, &BTreeMap::from([("exit".into(), slot)]))?;
+        (stubs[&exit], macho::layout(&request)?)
+    };
     let symbols = BTreeMap::from([
         (PARAMS, params),
         (RT0, boot),
         (RT0_START, entry.rt0_start),
-        (&exit, stubs[&exit]),
+        (&exit, exit_at),
     ]);
-    let layout = macho::layout(&request)?;
     for (at, fragment) in [(main_at, main), (boot, rt0)] {
         request.sections[at.section].content =
             SectionContent::Code(relocate(fragment, at, &layout, &symbols)?);
     }
     write_startup_data(&mut request, &layout, params, entry)?;
     macho::link(&request)
+}
+
+fn exit_slot(request: &mut MachORequest) -> Result<ImportSlot, String> {
+    let Some(import) = request
+        .imports
+        .iter()
+        .position(|import| import.dylib == macho::LIB_SYSTEM && import.name == "_exit")
+    else {
+        let slots = macho::append_native_imports(
+            request,
+            &[NativeImport::function(macho::LIB_SYSTEM, "exit")],
+        )?;
+        return Ok(slots["exit"]);
+    };
+    let at = if let Some(at) = request.fixups.iter().find_map(|fixup| match *fixup {
+        Fixup::Bind {
+            at,
+            import: index,
+            addend: 0,
+        } if index == import => Some(at),
+        _ => None,
+    }) {
+        at
+    } else {
+        let at = Location {
+            section: request.sections.len(),
+            offset: 0,
+        };
+        request.sections.push(Section {
+            segment: Segment::DataConst,
+            name: "__got".to_owned(),
+            align: 8,
+            content: SectionContent::Data(vec![0; 8]),
+        });
+        request.fixups.push(Fixup::Bind {
+            at,
+            import,
+            addend: 0,
+        });
+        at
+    };
+    Ok(ImportSlot {
+        at,
+        kind: NativeImportKind::Function,
+    })
+}
+
+fn relocate_exit_stub(
+    request: &mut MachORequest,
+    layout: &Layout,
+    at: Location,
+    slot: Location,
+) -> Result<(), String> {
+    let pc = layout.address(at)?;
+    let SectionContent::Code(bytes) = &mut request.sections[at.section].content else {
+        return Err("arm64 Mach-O exit stub is not in a code section".to_owned());
+    };
+    let offset = at.offset as usize;
+    let stub = bytes
+        .get_mut(offset..offset + STUB_SIZE)
+        .filter(|_| pc % 4 == 0)
+        .ok_or("invalid arm64 Mach-O exit stub location")?;
+    let mut code = Vec::with_capacity(STUB_SIZE);
+    encode_stub(&mut code, pc, layout.address(slot)?).map_err(|error| error.to_string())?;
+    stub.copy_from_slice(&code);
+    Ok(())
 }
 
 fn append(request: &mut MachORequest, name: &str, align: u64, content: SectionContent) -> Location {

@@ -403,7 +403,7 @@ load command 依次为各段、`LC_DYLD_CHAINED_FIXUPS`、`LC_DYLD_EXPORTS_TRIE`
 
 `a64::macho::append_import_stubs` 为每个 Function 导入在 `__TEXT,__stubs` 追加一条 `adrp x16` / `ldr x16, [x16, #pageoff]` / `br x16` 序列。page 和 pageoff 在镜像布局后按指令的 4 KiB 页解析，不使用 Mach-O 段的 16 KiB 页。调用方须先固定其余布局输入，然后使用返回的符号位置修补调用指令，不能再改变节的大小或对齐。内部符号名为 `__gugu_darwin_c_<C 声明名>`（例如 `__gugu_darwin_c_exit`、`__gugu_darwin_c_write`），不加 dyld 导入使用的前导下划线；`a64::macho::import_stub_symbol` 生成该名字。调用桩只占用 x16，不改变返回地址；调用方仍负责 AAPCS64 参数和系统栈切换，arm64 foreign/extern lowering 尚未接入。
 
-`a64::macho::link_entry` 在调用方提供的 arm64 镜像节上添加 Darwin `LC_MAIN`、参数块和共享的 `a64::fragments::rt0`。入口通过 `ADRP/ADD` 定位 `Rt0Params`，减去块中记录的镜像相对地址得到加载基址，并将参数块、基址、`envp`、`argc`、`argv` 放入 x0–x4。共享 rt0 初始化 x27/x28、保存启动参数到可写 `Rt0Payload`，然后调用 `rt0_start`。入口的页、页内偏移和 `BL` 重定位在布局后、签名前解析；退出经 `__gugu_darwin_c_exit`。调用方提供 runtime 载荷、初始槽、processor 和 `rt0_start` 位置，仍须负责其余 runtime 元数据；此路径不接入闭世界编译或 4d 的调用方 lowering。
+`a64::macho::link_entry` 在调用方提供的 arm64 镜像节上添加 Darwin `LC_MAIN`、参数块和共享的 `a64::fragments::rt0`。入口通过 `ADRP/ADD` 定位 `Rt0Params`，减去块中记录的镜像相对地址得到加载基址，并将参数块、基址、`envp`、`argc`、`argv` 放入 x0–x4。共享 rt0 初始化 x27/x28、保存启动参数到可写 `Rt0Payload`，然后调用 `rt0_start`。入口的页、页内偏移和 `BL` 重定位在布局后、签名前解析；退出经 `__gugu_darwin_c_exit`。链接器复用已有的 libSystem `_exit` 导入及其无偏移绑定槽；已有退出桩按最终布局重新编码。调用方提供 runtime 载荷、初始槽、processor 和 `rt0_start` 位置，仍须负责其余 runtime 元数据；此路径不接入闭世界编译或 4d 的调用方 lowering。
 
 ## 直接编码与验证
 
