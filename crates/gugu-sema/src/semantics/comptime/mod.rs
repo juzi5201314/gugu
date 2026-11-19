@@ -22,7 +22,7 @@ use crate::{Diagnostic, DiagnosticCode, SourceMap};
 use super::comptime::eval::ConstantValue;
 
 /// EarlyConst 结果 schema 版本。
-pub const EARLY_SCHEMA_VERSION: u32 = 2;
+pub const EARLY_SCHEMA_VERSION: u32 = 3;
 
 /// 表内条目的规范身份；`expr` 为 `u32::MAX` 表示项级初始化器。
 #[derive(
