@@ -154,6 +154,10 @@ impl TokenFileTable {
 }
 
 /// 展开主入口：驱动轮次闭包直至没有未展开宏。
+#[expect(
+    clippy::too_many_arguments,
+    reason = "宏展开需要源码、cfg、query 与 package 上下文"
+)]
 pub fn run(
     modules: &mut [ParsedModule],
     sources: &mut SourceMap,

@@ -550,7 +550,7 @@ impl RangeProvider for FakePlatform {
         };
         let mut output = Vec::with_capacity(len);
         while output.len() < len {
-            output.extend_from_slice(&self.seed.next().to_le_bytes());
+            output.extend_from_slice(&self.seed.next_u64().to_le_bytes());
         }
         output.truncate(len);
         self.stats.entropy_bytes += bytes;

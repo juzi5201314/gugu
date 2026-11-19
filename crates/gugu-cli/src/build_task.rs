@@ -313,7 +313,7 @@ fn fingerprint(
     rerun_envs: &[String],
 ) -> String {
     let mut hasher = Vec::<u8>::new();
-    hasher.extend_from_slice(&hash_file(&package.manifest()).to_le_bytes());
+    hasher.extend_from_slice(&hash_file(package.manifest()).to_le_bytes());
     hasher.extend_from_slice(&hash_file(&package.root().join("build.gg")).to_le_bytes());
     hasher.extend_from_slice(features.join(",").as_bytes());
     hasher.extend_from_slice(host.as_bytes());
@@ -515,6 +515,7 @@ fn parse_record(text: &str, out_dir: &Path) -> Record {
 /// 编译、（必要时）执行 build task，回收集合注入后续 target 编译。
 ///
 /// 返回 `None` 表示 package 没有 build target。
+#[expect(clippy::too_many_arguments, reason = "编排需要完整的编译与执行上下文")]
 pub(crate) fn run_build_task(
     workspace_root: &Path,
     package: &Package,

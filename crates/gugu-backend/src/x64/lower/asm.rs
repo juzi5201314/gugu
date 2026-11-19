@@ -27,7 +27,7 @@ pub(super) fn lower(
         .get(usize::try_from(index).expect("汇编下标适配 usize"))
         .ok_or(LoweringError::InvalidOperands)?;
     builder.clobbers_union(template.clobbers);
-    for line in template.template.split(|ch| ch == ';' || ch == '\n') {
+    for line in template.template.split([';', '\n']) {
         let line = line.trim();
         if line.is_empty() {
             continue;
@@ -190,10 +190,7 @@ fn find_form(mnemonic: &str, operands: Vec<Operand>) -> Option<(FormId, Vec<Oper
 }
 
 fn kind_candidates(operands: &[Operand]) -> Vec<Vec<OperandKind>> {
-    let mut out = Vec::new();
-    out.push(kinds_of(operands, false));
-    out.push(kinds_of(operands, true));
-    out
+    vec![kinds_of(operands, false), kinds_of(operands, true)]
 }
 
 fn kinds_of(operands: &[Operand], dest_as_r: bool) -> Vec<OperandKind> {
@@ -204,9 +201,7 @@ fn kinds_of(operands: &[Operand], dest_as_r: bool) -> Vec<OperandKind> {
             Operand::Reg(Reg::Gpr(_)) => {
                 if dest_as_r && index + 1 == operands.len() {
                     OperandKind::R64
-                } else if dest_as_r {
-                    OperandKind::Rm64
-                } else if index == 0 {
+                } else if dest_as_r || index == 0 {
                     OperandKind::Rm64
                 } else {
                     OperandKind::R64

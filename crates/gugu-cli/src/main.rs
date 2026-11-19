@@ -936,7 +936,6 @@ pub(crate) fn resolve_project_lock(
             registry_packages,
             git_packages,
             default_registry: fetch.default_identity.clone(),
-            ..ResolveOptions::default()
         })
         .map_err(|error| {
             emit_cli_error(format, &error.to_string());

@@ -115,6 +115,12 @@ pub struct CowBytes {
     sealed: bool,
 }
 
+impl Default for CowBytes {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
 impl CowBytes {
     /// 空的 unique 缓冲。
     pub fn new() -> Self {

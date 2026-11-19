@@ -162,7 +162,8 @@ impl Checker<'_, '_> {
             Ty::Dyn(_) | Ty::Function(..) => AdjustmentKind::Erase,
             Ty::Opaque(..) => AdjustmentKind::Opaque,
             Ty::Ref(inner)
-                if matches!(&**inner, Ty::Slice(_)) && matches!(source.deref(), Ty::Array(..)) =>
+                if matches!(&**inner, Ty::Slice(_))
+                    && matches!(source.strip_refs(), Ty::Array(..)) =>
             {
                 AdjustmentKind::ArrayToSlice
             }

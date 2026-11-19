@@ -40,10 +40,10 @@ pub fn encode(body: &Body) -> Vec<u8> {
 /// 本次编译可安装的 LIR 表项；压缩策略与录制不同则为空。
 ///
 /// 层 revision 与当前编译器不符是 compiler invariant：同一编译器构建的物化表必须一致。
-pub(crate) fn entries<'a>(
-    prebuilt: Option<&'a RuntimePrebuiltV1>,
+pub(crate) fn entries(
+    prebuilt: Option<&RuntimePrebuiltV1>,
     compression: CompressionPolicyV1,
-) -> Result<&'a [RuntimeFunctionArtifactV1], Diagnostic> {
+) -> Result<&[RuntimeFunctionArtifactV1], Diagnostic> {
     let Some(prebuilt) = prebuilt.filter(|prebuilt| !prebuilt.functions.is_empty()) else {
         return Ok(&[]);
     };

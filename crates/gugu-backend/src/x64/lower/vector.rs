@@ -635,7 +635,7 @@ pub(super) fn shuffle_supported(mask: [u8; 16]) -> bool {
 
 fn shuffle_plan(mask: &[u8; 16]) -> Option<ShufflePlan> {
     // 32 位粒度：每个 32 位 lane 的 4 字节必须连续取自同一源的同一 32 位 lane。
-    let aligned32 = mask.chunks_exact(4).all(|chunk| {
+    let aligned32 = mask.as_chunks::<4>().0.iter().all(|chunk| {
         chunk[0].is_multiple_of(4)
             && chunk[1] == chunk[0] + 1
             && chunk[2] == chunk[0] + 2
@@ -674,7 +674,7 @@ fn shuffle_plan(mask: &[u8; 16]) -> Option<ShufflePlan> {
         return None;
     }
     // 64 位粒度：每个 64 位 lane 的 8 字节连续且 8 对齐。
-    let aligned64 = mask.chunks_exact(8).all(|chunk| {
+    let aligned64 = mask.as_chunks::<8>().0.iter().all(|chunk| {
         chunk[0].is_multiple_of(8)
             && chunk.iter().enumerate().all(|(offset, value)| {
                 let step = u8::try_from(offset).expect("lane 内偏移适配 u8");

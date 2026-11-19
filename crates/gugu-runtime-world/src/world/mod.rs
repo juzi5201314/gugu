@@ -159,7 +159,7 @@ impl RawWorld {
         let registry = ReleaseRegistry::builtin()?;
         let integrity_secret = seed.secret();
         let provenance =
-            ProvenancePlane::new(integrity_secret, SafetyProfile::Release, seed.next())?;
+            ProvenancePlane::new(integrity_secret, SafetyProfile::Release, seed.next_u64())?;
         let mut owner_list = Vec::with_capacity(owners as usize);
         let mut resource_owners = Vec::with_capacity(owners as usize);
         let mut inboxes = Vec::with_capacity(owners as usize);
@@ -278,8 +278,6 @@ impl RawWorld {
             .accounting(self.owners[index as usize].token().owner_id)
             .expect("owner 必须已登记")
     }
-
-    /// 返回 owner 的 managed 物理页账本。
 
     /// 返回 slab 描述符表。
     pub const fn table(&self) -> &SlabTable {

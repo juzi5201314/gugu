@@ -21,6 +21,7 @@ use crate::{GlobalArgs, OutputFormat, emit_cli_error};
 const LAYOUT_DIRS: [&str; 2] = ["generated", "build-logs"];
 
 /// package target 编译成功后物化 `target/` 并登记 action record。
+#[expect(clippy::too_many_arguments, reason = "编排需要完整的编译与执行上下文")]
 pub(crate) fn materialize_target(
     workspace_root: &Path,
     package_target: &Target,
@@ -94,7 +95,7 @@ pub(crate) fn materialize_single_file(
     let kind = image_kind(target, plan.linux_image_kind(), plan.windows_image_kind());
     let stem = file
         .file_stem()
-        .map(|s| s.to_string_lossy().to_owned().to_string())
+        .map(|s| s.to_string_lossy().into_owned())
         .unwrap_or_else(|| "a".to_owned());
     let name = format!("{stem}{}", artifact_extension(target, kind));
     let bytes = finalize_bytes(
@@ -258,7 +259,7 @@ fn target_dir_name(kind: TargetKind) -> &'static str {
     }
 }
 
-fn image_bytes<'a>(target: TargetName, plan: &'a gugu_compiler::ImagePlan) -> &'a [u8] {
+fn image_bytes(target: TargetName, plan: &gugu_compiler::ImagePlan) -> &[u8] {
     match target {
         TargetName::X86_64Linux => plan.linux_image(),
         TargetName::X86_64Windows => plan.windows_image(),

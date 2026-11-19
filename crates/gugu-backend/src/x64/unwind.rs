@@ -314,7 +314,7 @@ fn unwind_info(function: &UnwindFunction, saves: &[(u8, u32)]) -> Result<Vec<u8>
 }
 
 fn push_alloc(codes: &mut Vec<Vec<u8>>, frame_size: u32, offset: u8) -> Result<(), String> {
-    if frame_size % 8 != 0 {
+    if !frame_size.is_multiple_of(8) {
         return Err("帧大小不能被 UNWIND_INFO 描述".to_owned());
     }
     let slots = frame_size / 8;
@@ -332,7 +332,7 @@ fn push_alloc(codes: &mut Vec<Vec<u8>>, frame_size: u32, offset: u8) -> Result<(
 }
 
 fn push_save(codes: &mut Vec<Vec<u8>>, offset: u8, register: u8, slot: u32) -> Result<(), String> {
-    if slot % 8 != 0 {
+    if !slot.is_multiple_of(8) {
         return Err("保存槽偏移不是 8 的倍数".to_owned());
     }
     let scaled = slot / 8;

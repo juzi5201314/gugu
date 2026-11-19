@@ -312,6 +312,10 @@ pub struct BackendPlan {
     pub windows_image_fingerprint: [u8; 32],
 }
 
+#[expect(
+    clippy::too_many_arguments,
+    reason = "后端计划需要各层 world、运行时契约与原生链接配置"
+)]
 pub fn plan(
     target: TargetName,
     hir: &Validated,

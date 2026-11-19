@@ -981,6 +981,10 @@ impl DataPool {
 /// 常量数据去重域；与 `mangle::data_key` 的输入（下标）不同，两者不会互相碰撞。
 const CONST_DATA_DOMAIN: &str = "gugu-const-data-v1";
 
+#[expect(
+    clippy::too_many_arguments,
+    reason = "代码生成需要 LIR、类型宇宙、运行时契约与 query 上下文"
+)]
 pub fn build(
     lir: &lir::Validated,
     universe: &TypeUniverse,
@@ -1040,6 +1044,10 @@ pub fn build(
 ///
 /// LIR 层从内建函数表安装的 body 安装录制的片段并跳过 `CodegenFragment` query；未录制本层的
 /// 安装 body 与现算 body 一样走 query。两条路径的片段都经同一个 verifier 校验。
+#[expect(
+    clippy::too_many_arguments,
+    reason = "片段生成需要 LIR、类型宇宙、运行时契约与 query 上下文"
+)]
 pub fn fragments(
     lir: &lir::Validated,
     universe: &TypeUniverse,
@@ -1101,6 +1109,10 @@ pub fn record_fragment(
 }
 
 /// 经 `CodegenFragment` query 现算或取缓存的单个片段。
+#[expect(
+    clippy::too_many_arguments,
+    reason = "query 键由 LIR 指纹、编码器契约与运行时契约共同组成"
+)]
 fn fragment_query(
     lir_fingerprint: [u8; 32],
     body: &Body,

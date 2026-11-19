@@ -556,9 +556,7 @@ fn windows_worker_preserves_argument_lanes_and_normalizes_results() {
             );
             let normalized = if name == "WaitForSingleObject" {
                 result & 0xffff_ffff
-            } else if name == "CreateEventW" {
-                result
-            } else if sentinel == -1 {
+            } else if name == "CreateEventW" || sentinel == -1 {
                 result
             } else {
                 u64::from(!failed)

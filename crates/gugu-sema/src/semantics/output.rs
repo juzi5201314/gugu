@@ -397,7 +397,7 @@ impl CheckedSemantics {
                         }
                         AdjustmentKind::Opaque => !matches!(erasure.target, Ty::Opaque(..)),
                         AdjustmentKind::ArrayToSlice => !matches!(
-                            (erasure.source.deref(), erasure.target.deref()),
+                            (erasure.source.strip_refs(), erasure.target.strip_refs()),
                             (Ty::Array(..), Ty::Slice(_))
                         ),
                     }

@@ -591,7 +591,7 @@ fn atomic_relaxed_load_is_mov_without_mfence() {
         .iter()
         .map(|inst| table::form(inst.form).mnemonic)
         .collect();
-    assert!(mnemonics.iter().any(|name| *name == "mov"), "{mnemonics:?}");
+    assert!(mnemonics.contains(&"mov"), "{mnemonics:?}");
     assert!(
         mnemonics.iter().all(|name| *name != "mfence"),
         "{mnemonics:?}"
@@ -641,10 +641,7 @@ fn acqrel_cas_has_lock_cmpxchg() {
         .iter()
         .map(|inst| table::form(inst.form).mnemonic)
         .collect();
-    assert!(
-        mnemonics.iter().any(|name| *name == "cmpxchg"),
-        "{mnemonics:?}"
-    );
+    assert!(mnemonics.contains(&"cmpxchg"), "{mnemonics:?}");
 }
 
 /// 组装「一条 rel32 跳转 + n 条 nop + 标签」的序列；标签在末尾。

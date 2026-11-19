@@ -438,7 +438,7 @@ fn heap_source_mirrors_large_mapping_layout() {
     );
     assert_eq!(
         heap_source_constant("LARGE_MAPPING_PAGE_BYTES"),
-        u64::from(profile.constants().page_bytes)
+        profile.constants().page_bytes
     );
     assert!(heap_source_constant("LARGE_MAPPING_CAPACITY") > 0);
 }

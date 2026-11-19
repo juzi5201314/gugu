@@ -1951,6 +1951,11 @@ impl RingWay {
     pub fn len(&self) -> usize {
         self.slots.len()
     }
+
+    /// 是否为空。
+    pub fn is_empty(&self) -> bool {
+        self.len() == 0
+    }
 }
 
 /// ring 关闭后产生的 batch。
@@ -1973,6 +1978,12 @@ pub struct ReturnSlabCache {
     sets: Vec<[RingWay; 2]>,
     hits: u32,
     misses: u32,
+}
+
+impl Default for ReturnSlabCache {
+    fn default() -> Self {
+        Self::new()
+    }
 }
 
 impl ReturnSlabCache {

@@ -158,10 +158,10 @@ pub(crate) fn run(options: &GlobalArgs, open: bool, no_deps: bool) -> i32 {
 /// 文档只生成公开 API：lib target 优先，没有 lib 时退回默认构建目标。
 fn doc_target<'a>(package: &'a Package, features: &[String]) -> Option<&'a Target> {
     // 无 lib target 时 select_targets_in 返回 Err：不能过早 ok()?，否则纯 bin package 永远走不到回退。
-    if let Ok(libs) = package.select_targets_in(&TargetSelection::Lib, features) {
-        if let Some(target) = libs.first() {
-            return Some(target);
-        }
+    if let Ok(libs) = package.select_targets_in(&TargetSelection::Lib, features)
+        && let Some(target) = libs.first()
+    {
+        return Some(target);
     }
     package
         .select_targets_in(&TargetSelection::DefaultBuild, features)
@@ -171,10 +171,6 @@ fn doc_target<'a>(package: &'a Package, features: &[String]) -> Option<&'a Targe
 }
 
 /// 渲染锁图中非 workspace 成员的依赖 package 文档。
-#[expect(
-    clippy::too_many_arguments,
-    reason = "依赖文档需要锁图、缓存、doc 根与编译上下文"
-)]
 fn render_dependencies(
     lock: &LockGraph,
     workspace_root: &Path,

@@ -135,8 +135,10 @@ impl<'a> Adapter<'a> {
         let mut result = self.evaluate(body, &arguments, &mut memory);
         if body.signature.sret.is_some() {
             result = memory[..16]
-                .chunks_exact(8)
-                .map(|word| u64::from_le_bytes(word.try_into().unwrap()))
+                .as_chunks::<8>()
+                .0
+                .iter()
+                .map(|word| u64::from_le_bytes(*word))
                 .collect();
         }
         assert!(self.replies.is_empty(), "必须完成脚本中的清理调用");

@@ -402,6 +402,10 @@ fn check_sources(
 /// 展开 `comptime source` 宏，返回可重放的展开输入。
 ///
 /// 入口判定必须看到宏生成的项，因此这一步与派生分开：调用方先展开、再定入口、最后派生。
+#[expect(
+    clippy::too_many_arguments,
+    reason = "宏展开需要源码、cfg、query 与 package 上下文"
+)]
 fn expand_modules(
     modules: &mut [ParsedModule],
     source_map: &mut SourceMap,

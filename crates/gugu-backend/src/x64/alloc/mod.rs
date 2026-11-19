@@ -96,10 +96,6 @@ impl RegClass {
 /// 某时刻残留的位。
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 #[repr(u8)]
-#[expect(
-    clippy::enum_variant_names,
-    reason = "三个变体的共同后缀正是它们在 stack map 里表达的含义"
-)]
 pub enum RootClass {
     NonPointer = 0,
     HeapPointer = 1,

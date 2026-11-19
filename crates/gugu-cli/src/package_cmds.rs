@@ -535,14 +535,14 @@ pub(crate) fn run_login(registry: &str, token_stdin: bool, options: &GlobalArgs)
         .as_table_mut()
         .expect("registry 配置必须是 table")
         .insert("token".to_owned(), toml::Value::String(token));
-    if let Some(parent) = path.parent() {
-        if let Err(error) = fs::create_dir_all(parent) {
-            return fail(
-                format,
-                1,
-                format!("创建 `{}` 失败：{error}", parent.display()),
-            );
-        }
+    if let Some(parent) = path.parent()
+        && let Err(error) = fs::create_dir_all(parent)
+    {
+        return fail(
+            format,
+            1,
+            format!("创建 `{}` 失败：{error}", parent.display()),
+        );
     }
     match fs::write(&path, toml::to_string(&root).unwrap_or_default()) {
         Ok(()) => {}

@@ -469,10 +469,10 @@ pub fn boot_verify(world: &GcMetadataWorldV1) -> Result<(), RawModelError> {
                 "deferred release flag 缺少 resource flag",
             ));
         }
-        if let Some((size, align)) = entry.layout {
-            if !align.is_power_of_two() || size % align != 0 {
-                return Err(RawModelError::new("类型 layout 非法"));
-            }
+        if let Some((size, align)) = entry.layout
+            && (!align.is_power_of_two() || size % align != 0)
+        {
+            return Err(RawModelError::new("类型 layout 非法"));
         }
         for key in &entry.children {
             if !world.types.iter().any(|other| &other.type_key == key) {

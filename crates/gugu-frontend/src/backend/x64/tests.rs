@@ -862,7 +862,7 @@ fn encoder_contract_matches_descriptor_table() {
 fn encoder_contract_rejects_tampered_catalog() {
     let contract = EncoderContract::build(CpuBaseline::X86_64V1);
     let mut tampered = contract.clone();
-    tampered.forms[0].mnemonic.push_str("x");
+    tampered.forms[0].mnemonic.push('x');
     assert!(tampered.verify().is_err(), "助记符篡改必须被发现");
     let mut reordered = contract.clone();
     reordered.forms.swap(0, 1);

@@ -71,10 +71,7 @@ pub(super) fn unwind(
             );
         }
     }
-    let mut records: Vec<_> = pdata
-        .chunks_exact(12)
-        .map(|chunk| <[u8; 12]>::try_from(chunk).unwrap())
-        .collect();
+    let mut records: Vec<_> = pdata.as_chunks::<12>().0.to_vec();
     records.sort_unstable_by_key(|record| u32::from_le_bytes(record[..4].try_into().unwrap()));
     *pdata = records.into_iter().flatten().collect();
     Ok(())

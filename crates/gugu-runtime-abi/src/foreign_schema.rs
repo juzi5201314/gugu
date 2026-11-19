@@ -335,23 +335,29 @@ mod image_profile_tests {
                 "{name}"
             );
         }
-        assert!(PRESSURE_BLOCKING_WORKERS > 0 && PRESSURE_BLOCKING_WORKERS <= MAX_BLOCKING_WORKERS);
+        const {
+            assert!(
+                PRESSURE_BLOCKING_WORKERS > 0 && PRESSURE_BLOCKING_WORKERS <= MAX_BLOCKING_WORKERS
+            )
+        };
         let contract = ForeignRuntimeContract::build(ForeignDemand::default()).unwrap();
         let mut changed = contract.clone();
         changed.pressure_blocking_workers += 1;
         assert!(changed.verify().is_err());
         assert_ne!(contract.fingerprint(), changed.fingerprint());
         // 每轮扫描两次请求槽，完成和提交合计不能超过 service budget。
-        assert!(2 * (MAX_BLOCKING_WORKERS + MAX_DIRTY_WORKERS) <= BLOCKING_SERVICE_BUDGET);
+        const { assert!(2 * (MAX_BLOCKING_WORKERS + MAX_DIRTY_WORKERS) <= BLOCKING_SERVICE_BUDGET) };
         assert_eq!(
             u64::from(MAX_DIRTY_WORKERS),
             crate::scheduler_schema::dirty_target(1)
         );
         // 两个子池的栈表使用相同偏移，互不重叠且都容纳于控制页。
-        assert!(64 + MAX_BLOCKING_WORKERS * (128 + 8) <= DIRTY_POOL_OFFSET);
-        assert!(
-            DIRTY_POOL_OFFSET + 64 + MAX_BLOCKING_WORKERS * 128 + MAX_DIRTY_WORKERS * 8 <= 4096
-        );
+        const { assert!(64 + MAX_BLOCKING_WORKERS * (128 + 8) <= DIRTY_POOL_OFFSET) };
+        const {
+            assert!(
+                DIRTY_POOL_OFFSET + 64 + MAX_BLOCKING_WORKERS * 128 + MAX_DIRTY_WORKERS * 8 <= 4096
+            )
+        };
     }
 }
 
@@ -456,7 +462,7 @@ impl ForeignRuntimeContract {
                 "外调 worker、waiter 或 retake 宽限与登记 profile 不一致",
             ));
         }
-        if self.queue_cap_bytes % self.waiter_bytes != 0 {
+        if !self.queue_cap_bytes.is_multiple_of(self.waiter_bytes) {
             return Err(RawModelError::new(
                 "BlockingBridge 队列容量不是 waiter 字节的整数倍",
             ));

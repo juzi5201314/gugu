@@ -180,7 +180,7 @@ impl BodyBuilder<'_, '_, '_, '_> {
             } else {
                 StepKind::Index(*index)
             };
-            ty = match (&kind, ty.deref()) {
+            ty = match (&kind, ty.strip_refs()) {
                 (StepKind::Slice(..), Ty::Array(element, _) | Ty::Slice(element)) => {
                     Ty::Ref(Box::new(Ty::Slice(element.clone())))
                 }

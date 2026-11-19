@@ -100,11 +100,11 @@ impl RegistrySession {
         if source_name.contains("://") {
             // 依赖写身份 URL：仍须命中已定义 registry 且其逻辑名过 allowlist。
             for (name, def) in &self.values.registries {
-                if let Some(index) = &def.index {
-                    if normalize_index_url(index).ok().as_deref() == Some(source_name) {
-                        self.check_allowed(name)?;
-                        return Ok(source_name.to_owned());
-                    }
+                if let Some(index) = &def.index
+                    && normalize_index_url(index).ok().as_deref() == Some(source_name)
+                {
+                    self.check_allowed(name)?;
+                    return Ok(source_name.to_owned());
                 }
             }
             return Err(source_not_allowed(format!(
@@ -141,10 +141,10 @@ impl RegistrySession {
     /// 身份 URL → 逻辑名（反查 client / 签名上下文用）。
     fn logical_for_identity(&self, identity: &str) -> Result<String, RegistryError> {
         for (name, def) in &self.values.registries {
-            if let Some(index) = &def.index {
-                if normalize_index_url(index).ok().as_deref() == Some(identity) {
-                    return Ok(name.clone());
-                }
+            if let Some(index) = &def.index
+                && normalize_index_url(index).ok().as_deref() == Some(identity)
+            {
+                return Ok(name.clone());
             }
         }
         Err(source_not_allowed(format!(

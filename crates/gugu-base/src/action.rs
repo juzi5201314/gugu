@@ -163,3 +163,9 @@ impl ActionGraph {
         &self.nodes
     }
 }
+
+impl Default for ActionGraph {
+    fn default() -> Self {
+        Self::new()
+    }
+}

@@ -472,6 +472,12 @@ pub struct ExtentTable {
     trims: Vec<Option<TrimTicket>>,
 }
 
+impl Default for ExtentTable {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
 impl ExtentTable {
     /// 创建空的 extent 表。
     pub fn new() -> Self {
@@ -591,6 +597,11 @@ impl ExtentTable {
     /// 返回描述符数量。
     pub fn len(&self) -> usize {
         self.descriptors.len()
+    }
+
+    /// 是否为空。
+    pub fn is_empty(&self) -> bool {
+        self.len() == 0
     }
 
     /// 按稠密编号取描述符。

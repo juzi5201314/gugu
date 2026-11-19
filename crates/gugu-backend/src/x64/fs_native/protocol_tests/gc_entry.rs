@@ -118,7 +118,7 @@ fn gc_entry_switches_stack_and_restores_mutator_after_root_rewrite() {
         machine.set_reg(R14, MUTATOR_SLOT);
         machine.set_reg(R15, PROCESSOR);
         machine.put(PROCESSOR + processor::PROCESSOR_STATE_OFFSET as u64, STATE);
-        machine.put(STATE + entry::state::COORDINATOR as u64, COORDINATOR);
+        machine.put(STATE + entry::state::COORDINATOR, COORDINATOR);
         machine.put(
             COORDINATOR + layout::COORDINATOR_SYSTEM_TOP_OFFSET as u64,
             SYSTEM_TOP,

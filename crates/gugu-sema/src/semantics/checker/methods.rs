@@ -194,7 +194,7 @@ impl Checker<'_, '_> {
         args: &[ExprId],
         receiver: bool,
     ) -> Option<Ty> {
-        if name != "len" || !matches!(self_ty.deref(), Ty::Array(_, _) | Ty::Slice(_)) {
+        if name != "len" || !matches!(self_ty.strip_refs(), Ty::Array(_, _) | Ty::Slice(_)) {
             return None;
         }
         let span = &self.arena().exprs[callee.0 as usize].span;

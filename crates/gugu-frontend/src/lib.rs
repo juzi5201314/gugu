@@ -1441,6 +1441,10 @@ fn loaded_single(
     })
 }
 
+#[expect(
+    clippy::too_many_arguments,
+    reason = "源码加载需要 package 布局、cfg 与外部 package 上下文"
+)]
 fn load_project_sources(
     package_root: &Path,
     source_root: &Path,

@@ -143,6 +143,11 @@ impl GuardedBuffer {
         self.bytes.len() as u64
     }
 
+    /// 缓冲区是否为空。
+    pub const fn is_empty(&self) -> bool {
+        self.bytes.is_empty()
+    }
+
     /// 返回缓冲区内容快照。
     pub fn bytes(&self) -> &[u8] {
         &self.bytes
@@ -269,7 +274,7 @@ impl ProvenancePlane {
         if self.mode != SafetyProfile::Security {
             return 0;
         }
-        let depth = u32::try_from(self.rng.next() % u64::from(REUSE_DEPTH_LIMIT))
+        let depth = u32::try_from(self.rng.next_u64() % u64::from(REUSE_DEPTH_LIMIT))
             .expect("深度上界适配 u32");
         if depth > 0 {
             self.note_randomized_pop();

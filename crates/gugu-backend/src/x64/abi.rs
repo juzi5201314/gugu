@@ -311,42 +311,42 @@ fn classify(
     let mut stack_group_end = 0;
     for (index, ty) in parameters.iter().enumerate() {
         let index = u32::try_from(index).expect("参数下标适配 u32");
-        if let Some(group) = groups.get(group_index) {
-            if group.first == index {
-                let end = index
-                    .checked_add(group.lanes)
-                    .ok_or(LoweringError::InvalidOperands)?;
-                let lanes = parameters
-                    .get(index as usize..end as usize)
-                    .ok_or(LoweringError::InvalidOperands)?;
-                if convention == Convention::SysV {
-                    let floats = lanes.iter().filter(|ty| is_float(**ty)).count();
-                    let integers = lanes.len() - floats;
-                    if group.memory
-                        || integers + slots.integer > SYSV_INTEGER.len()
-                        || floats + slots.float > INTERNAL_FLOAT.len()
-                    {
-                        slots.stack = slots
-                            .stack
-                            .checked_add(group.align.max(8) - 1)
-                            .ok_or(LoweringError::InvalidOperands)?
-                            & !(group.align.max(8) - 1);
-                        stack_until = end;
-                        stack_group_end = slots
-                            .stack
-                            .checked_add(
-                                group
-                                    .bytes
-                                    .max(8)
-                                    .checked_add(7)
-                                    .ok_or(LoweringError::InvalidOperands)?
-                                    & !7,
-                            )
-                            .ok_or(LoweringError::InvalidOperands)?;
-                    }
+        if let Some(group) = groups.get(group_index)
+            && group.first == index
+        {
+            let end = index
+                .checked_add(group.lanes)
+                .ok_or(LoweringError::InvalidOperands)?;
+            let lanes = parameters
+                .get(index as usize..end as usize)
+                .ok_or(LoweringError::InvalidOperands)?;
+            if convention == Convention::SysV {
+                let floats = lanes.iter().filter(|ty| is_float(**ty)).count();
+                let integers = lanes.len() - floats;
+                if group.memory
+                    || integers + slots.integer > SYSV_INTEGER.len()
+                    || floats + slots.float > INTERNAL_FLOAT.len()
+                {
+                    slots.stack = slots
+                        .stack
+                        .checked_add(group.align.max(8) - 1)
+                        .ok_or(LoweringError::InvalidOperands)?
+                        & !(group.align.max(8) - 1);
+                    stack_until = end;
+                    stack_group_end = slots
+                        .stack
+                        .checked_add(
+                            group
+                                .bytes
+                                .max(8)
+                                .checked_add(7)
+                                .ok_or(LoweringError::InvalidOperands)?
+                                & !7,
+                        )
+                        .ok_or(LoweringError::InvalidOperands)?;
                 }
-                group_index += 1;
             }
+            group_index += 1;
         }
         let by_address = by_value.iter().any(|(parameter, _, _)| *parameter == index);
         let value = if index < stack_until {

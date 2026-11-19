@@ -4,6 +4,10 @@ use crate::query::{DependencyFingerprint, QueryEngine, QueryKey, QueryKind};
 /// `LowerHir` 的记录 schema；键内容变化时递增。
 pub const LOWER_SCHEMA: u32 = 10;
 
+#[expect(
+    clippy::too_many_arguments,
+    reason = "HIR lowering 需要语义结果、依赖指纹与 query 上下文"
+)]
 pub(super) fn lower(
     model: &Model<'_>,
     names: &NameResolution,

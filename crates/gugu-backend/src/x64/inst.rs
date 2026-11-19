@@ -131,6 +131,12 @@ pub struct Sequence {
     pub labels: Vec<LabelDefinition>,
 }
 
+impl Default for Sequence {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
 impl Sequence {
     /// 空序列。
     pub fn new() -> Self {

@@ -42,9 +42,8 @@ impl DecodeReferenceFixture {
         let descriptor = plane
             .cage_descriptor()
             .ok_or_else(|| RawInvariant::new("预留后缺少 cage 描述"))?;
-        let shift_id = u32::try_from(contract.cage_id_shift()).expect("偏移适配 u32");
-        let shift_generation =
-            u32::try_from(contract.cage_generation_shift()).expect("偏移适配 u32");
+        let shift_id = contract.cage_id_shift();
+        let shift_generation = contract.cage_generation_shift();
         let pack = |id: u64, generation: u64, offset: u64| {
             (id << shift_id) | (generation << shift_generation) | offset
         };

@@ -172,23 +172,6 @@ fn copy_propagate(editor: &mut Editor) -> Result<bool, Diagnostic> {
     Ok(changed)
 }
 
-#[cfg(test)]
-mod ownership_tests {
-    use super::*;
-
-    #[test]
-    fn copy_propagation_preserves_consumed_slot_identity() {
-        let original = LocalId(1);
-        let temporary = LocalId(2);
-        let mut borrowed = Operand::Copy(Place::local(temporary));
-        let mut consumed = Operand::MoveInternal(Place::local(temporary));
-        assert!(rewrite_operand(&mut borrowed, temporary, original));
-        assert_eq!(borrowed, Operand::Copy(Place::local(original)));
-        assert!(!rewrite_operand(&mut consumed, temporary, original));
-        assert_eq!(consumed, Operand::MoveInternal(Place::local(temporary)));
-    }
-}
-
 fn rewrite_operand(operand: &mut Operand, from: LocalId, to: LocalId) -> bool {
     match operand {
         Operand::Copy(place) if place.local == from => {
@@ -460,4 +443,21 @@ fn pure_rvalue(rvalue: &Rvalue) -> bool {
             | Rvalue::Intrinsic { .. }
             | Rvalue::CheckedOp { .. }
     )
+}
+
+#[cfg(test)]
+mod ownership_tests {
+    use super::*;
+
+    #[test]
+    fn copy_propagation_preserves_consumed_slot_identity() {
+        let original = LocalId(1);
+        let temporary = LocalId(2);
+        let mut borrowed = Operand::Copy(Place::local(temporary));
+        let mut consumed = Operand::MoveInternal(Place::local(temporary));
+        assert!(rewrite_operand(&mut borrowed, temporary, original));
+        assert_eq!(borrowed, Operand::Copy(Place::local(original)));
+        assert!(!rewrite_operand(&mut consumed, temporary, original));
+        assert_eq!(consumed, Operand::MoveInternal(Place::local(temporary)));
+    }
 }

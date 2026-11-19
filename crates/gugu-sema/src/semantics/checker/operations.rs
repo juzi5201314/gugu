@@ -118,7 +118,8 @@ impl Checker<'_, '_> {
     }
     pub(super) fn user_index(&mut self, id: ExprId, ty: &Ty, write: bool, span: &Span) -> Ty {
         let name = if write { "index_set" } else { "index" };
-        let Some(method) = self.language_method(id, ty.deref(), "Index", Vec::new(), name, span)
+        let Some(method) =
+            self.language_method(id, ty.strip_refs(), "Index", Vec::new(), name, span)
         else {
             return Ty::Error;
         };

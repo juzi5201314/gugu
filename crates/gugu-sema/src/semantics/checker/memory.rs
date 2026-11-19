@@ -174,7 +174,7 @@ impl Checker<'_, '_> {
         if let Some(result) = self.arena_method(callee, receiver, name, types, args, expected) {
             return Some(result);
         }
-        let Ty::MaybeUninit(value) = receiver.deref() else {
+        let Ty::MaybeUninit(value) = receiver.strip_refs() else {
             return None;
         };
         let (kind, parameters, result) = match name {
@@ -222,7 +222,7 @@ impl Checker<'_, '_> {
         args: &[ExprId],
         expected: Option<&Ty>,
     ) -> Option<Ty> {
-        let Ty::Named(index, _) = receiver.deref() else {
+        let Ty::Named(index, _) = receiver.strip_refs() else {
             return None;
         };
         let nominal = &self.model.nominal[*index];
@@ -272,6 +272,10 @@ impl Checker<'_, '_> {
     }
 
     /// `alloc`/`write`/`as_ptr`/`assume_init` 共用的调用构造与操作登记。
+    #[expect(
+        clippy::too_many_arguments,
+        reason = "调用构造需要内建签名、实参与期望类型"
+    )]
     fn memory_method_tail(
         &mut self,
         callee: ExprId,

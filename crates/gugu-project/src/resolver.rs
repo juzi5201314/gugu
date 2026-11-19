@@ -284,19 +284,19 @@ fn select_roots<'packages>(
     Ok(roots)
 }
 
+/// 按 package 根索引的元数据，以及 package id 到根目录的反查表。
+pub(crate) type PathMetadataMaps = (
+    BTreeMap<PathBuf, PackageMetadata>,
+    BTreeMap<PackageId, PathBuf>,
+);
+
 /// workspace 成员 + 传递外部 path package 的依赖元数据闭包；
 /// `resolve_project` 与 `dependency_specs` 共用同一份收集逻辑。
 pub(crate) fn path_metadata_maps(
     workspace_root: &Path,
     packages: &[Package],
     workspace_dependencies: &BTreeMap<String, toml::Value>,
-) -> Result<
-    (
-        BTreeMap<PathBuf, PackageMetadata>,
-        BTreeMap<PackageId, PathBuf>,
-    ),
-    ProjectError,
-> {
+) -> Result<PathMetadataMaps, ProjectError> {
     let mut path_packages = BTreeMap::new();
     let mut path_roots = BTreeMap::new();
     for package in packages {

@@ -72,6 +72,11 @@ impl DomainRangeCache {
         self.entries.len()
     }
 
+    /// 是否为空。
+    pub fn is_empty(&self) -> bool {
+        self.len() == 0
+    }
+
     /// 返回累计从平台补充的字节数。
     pub const fn committed_bytes(&self) -> u64 {
         self.committed_bytes

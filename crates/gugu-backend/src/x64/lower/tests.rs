@@ -841,10 +841,7 @@ fn atomic_rmw_shape_and_missing_sequences() {
         ["mov", "xchg"],
         "SeqCst 存储用 xchg 取得顺序"
     );
-    assert!(
-        store.sequence.instructions[1].lock == false,
-        "xchg 隐式锁定"
-    );
+    assert!(!store.sequence.instructions[1].lock, "xchg 隐式锁定");
     assert!(
         store.clobbers.contains_gpr(Gpr::R11),
         "值先搬到 r11 再 xchg，r11 必须登记为 clobber"
@@ -870,11 +867,7 @@ fn poll_cost_is_positive_for_every_domain_op() {
         Op::Vector(VectorOp::Splat),
     ];
     for op in ops {
-        assert_eq!(
-            lowering::domain(&op).is_empty(),
-            false,
-            "{op:?} 属于 lowering 域"
-        );
+        assert!(!lowering::domain(&op).is_empty(), "{op:?} 属于 lowering 域");
         assert!(lowering::poll_cost(&op) >= 1, "{op:?} 的成本至少 1");
     }
     assert_eq!(

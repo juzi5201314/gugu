@@ -119,7 +119,7 @@ fn section_name(pool: &[u8], off: usize) -> String {
         .unwrap_or_default()
         .split(|b| *b == 0)
         .next()
-        .map(|raw| String::from_utf8_lossy(raw).to_owned().to_string())
+        .map(|raw| String::from_utf8_lossy(raw).into_owned())
         .unwrap_or_default()
 }
 

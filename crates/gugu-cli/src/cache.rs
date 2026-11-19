@@ -25,11 +25,11 @@ pub(crate) fn run_clean(
     if !cache && !registry || all {
         match workspace_root() {
             Ok(root) => {
-                if let Some(target_dir) = clean_target_dir(&root, options, format, &mut removed) {
-                    if let Err(error) = remove_dir(&target_dir) {
-                        emit_cli_error(format, &format!("删除 `target/` 失败：{error}"));
-                        return 2;
-                    }
+                if let Some(target_dir) = clean_target_dir(&root, options, format, &mut removed)
+                    && let Err(error) = remove_dir(&target_dir)
+                {
+                    emit_cli_error(format, &format!("删除 `target/` 失败：{error}"));
+                    return 2;
                 }
             }
             Err(error) => {

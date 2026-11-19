@@ -576,9 +576,11 @@ mod tests {
         let dir = std::env::temp_dir().join(format!("gugu-scaffold-{}", std::process::id()));
         let _ = fs::remove_dir_all(&dir);
         fs::create_dir_all(&dir).unwrap();
-        let mut options = GlobalArgs::default();
-        options.lib = false;
-        options.workspace = false;
+        let options = GlobalArgs {
+            lib: false,
+            workspace: false,
+            ..GlobalArgs::default()
+        };
         let written = scaffold(&dir, &options).unwrap();
         let manifest = fs::read_to_string(dir.join("gugu.toml")).unwrap();
         assert!(manifest.contains("[package]"));

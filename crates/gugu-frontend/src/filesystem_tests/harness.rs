@@ -30,6 +30,12 @@ pub(super) fn runtime_bodies_for(
     (hir, bodies)
 }
 
+type ParkHook = fn(&mut Harness<'_>, &mut Vec<u8>);
+type NativeHook = fn(&mut Harness<'_>, u64, u64, &mut Vec<u8>);
+type BridgeHook = fn(&mut Harness<'_>, &[u64], &mut Vec<u8>) -> Vec<u64>;
+type MachineHook =
+    fn(&mut Harness<'_>, crate::runtime::RuntimeMachineOp, &[u64], &mut Vec<u8>) -> Vec<u64>;
+
 pub(super) struct Harness<'a> {
     pub(super) bodies: HashMap<[u8; 32], &'a Body>,
     pub(super) heap: usize,
@@ -40,16 +46,14 @@ pub(super) struct Harness<'a> {
     pub(super) calls: Vec<(u64, Vec<u64>)>,
     pub(super) woken: Vec<u64>,
     pub(super) close_requests: Vec<Vec<u64>>,
-    pub(super) park_hook: Option<fn(&mut Harness<'_>, &mut Vec<u8>)>,
+    pub(super) park_hook: Option<ParkHook>,
     pub(super) current: u64,
     pub(super) now: u64,
-    pub(super) native_hook: Option<fn(&mut Harness<'_>, u64, u64, &mut Vec<u8>)>,
-    pub(super) bridge_hook: Option<fn(&mut Harness<'_>, &[u64], &mut Vec<u8>) -> Vec<u64>>,
+    pub(super) native_hook: Option<NativeHook>,
+    pub(super) bridge_hook: Option<BridgeHook>,
     pub(super) allocations: HashMap<u64, u64>,
     pub(super) freed: Vec<(u64, u64)>,
-    pub(super) machine_hook: Option<
-        fn(&mut Harness<'_>, crate::runtime::RuntimeMachineOp, &[u64], &mut Vec<u8>) -> Vec<u64>,
-    >,
+    pub(super) machine_hook: Option<MachineHook>,
     functions: Vec<([u8; 32], bool)>,
     pub(super) metadata: Option<crate::frontend::gc::GcMetadataBundle>,
     type_section: u64,
@@ -192,7 +196,7 @@ impl<'a> Harness<'a> {
             assert!(self.run(body, &arguments, memory).is_empty());
             (0..bytes)
                 .step_by(8)
-                .map(|offset| word(memory, at + u64::from(offset)))
+                .map(|offset| word(memory, at + offset))
                 .collect()
         } else {
             self.run(body, &args, memory)

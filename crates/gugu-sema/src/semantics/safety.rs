@@ -23,7 +23,7 @@ impl Model<'_> {
     }
 
     pub fn is_union(&self, ty: &Ty) -> bool {
-        let Ty::Named(index, _) = ty.deref() else {
+        let Ty::Named(index, _) = ty.strip_refs() else {
             return false;
         };
         let definition = self.nominal[*index].definition;
@@ -102,7 +102,7 @@ impl Model<'_> {
                 else {
                     return false;
                 };
-                let Some(Ty::Array(_, len)) = ty(base).map(Ty::deref) else {
+                let Some(Ty::Array(_, len)) = ty(base).map(Ty::strip_refs) else {
                     return false;
                 };
                 self.constant_int(module, index)

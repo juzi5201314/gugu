@@ -598,7 +598,7 @@ impl<'a, 'de> VariantAccess<'de> for VariantAccessImpl<'a, 'de> {
     }
 }
 
-impl<'de, 'a> Deserializer<'de> for &'a mut Decoder<'de> {
+impl<'de> Deserializer<'de> for &mut Decoder<'de> {
     type Error = Error;
     fn deserialize_any<V: Visitor<'de>>(self, _visitor: V) -> Result<V::Value, Error> {
         Err(Error::message("规范编码不支持 deserialize_any"))

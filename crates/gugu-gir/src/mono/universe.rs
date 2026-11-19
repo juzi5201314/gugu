@@ -275,7 +275,7 @@ impl Collector<'_, '_> {
                 for t in arguments {
                     add(t)?;
                 }
-                let variants = context.model.variants(&ty).expect("已形成名义类型");
+                let variants = context.model.variants(ty).expect("已形成名义类型");
                 let mut fields = Vec::new();
                 for variant in &variants {
                     for field in &variant.fields {
@@ -330,13 +330,13 @@ impl Collector<'_, '_> {
         if matches!(ty, Ty::Never | Ty::MaybeUninit(_)) {
             return Ok(None);
         }
-        let layout = self.layouts.layout(&ty)?.map(|l| (l.size, l.align));
-        let metadata = self.metadata(&ty)?;
-        let passing = self.passing(&ty)?;
+        let layout = self.layouts.layout(ty)?.map(|l| (l.size, l.align));
+        let metadata = self.metadata(ty)?;
+        let passing = self.passing(ty)?;
         let record = TypeRecord {
             key,
             canonical,
-            name: self.context.model.describe(&ty),
+            name: self.context.model.describe(ty),
             layout,
             children: children.into_iter().collect(),
             shape,
