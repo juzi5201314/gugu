@@ -381,6 +381,16 @@ fragment relocation 封闭为：
 
 `staticlib` 写确定性 SysV ar archive，member timestamp/uid/gid 为 0、mode固定，成员按 symbol key排序；`cdylib` 写 ET_DYN、只导出显式 C symbol并包含自有闭世界 runtime/metadata。
 
+### 内部 AArch64 Linux ELF64
+
+`a64::elf` 是不依赖目标注册的纯库 static-PIE writer。`ElfRequest` 给出节、入口、指令重定位和绝对指针槽；复用 `macho` 的 `Section`、`SectionContent`、`Segment` 与 `Location` 容器，但 `DataConst` 在这里从装载开始就只读，RELATIVE 槽只能位于有文件内容的 `Data`。`layout` 按节大小和请求形状计算链接期虚址（同时是文件偏移），`link` 写出确定性的 `ET_DYN`、`EM_AARCH64 = 183` 镜像与 BLAKE3 指纹。此层不接入 target registry、CLI 或闭世界 image planner。
+
+程序头依次为 `PT_PHDR`、RX/R/RW 三个 `PT_LOAD` 与不可执行的 `PT_GNU_STACK`；不写 `PT_INTERP`。三个装载段按 64 KiB 对齐，RX 包含 ELF 和程序头，R 包含 `.rela.dyn` 与节表，RW 的零填充节排在有文件内容的节之后且不增加文件大小。`.rela.dyn` 每项为标准 ELF64 RELA（24 字节）：槽虚址、符号索引为零的 `R_AARCH64_RELATIVE = 1027`、目标链接期地址加 addend；没有重定位时仍保留零长度的表。重复槽、非可写或未对齐的指针槽、越界位置、布局溢出和不支持的指令重定位在写出前报错。
+
+`a64::relocation` 与 Darwin 启动路径共享 decode/encode 修补器；支持 `Call26`/`Branch26`、`AdrpPage21`、`AddLo12` 与 `LdStLo12`，按指令自身的 4 KiB 页计算 ADRP 和页内偏移，与 ELF 段的 64 KiB 对齐无关。修补时检查指令形式、访存缩放、位移范围和对齐，不用掩码截断无效值。
+
+`a64::elf::link_entry` 接收 `LinuxEntry`（`rt0_start`、可写载荷、初始槽与 processor），追加只读参数块、Linux `_start` 和共享 `a64::fragments::rt0`。参数块保存链接期值，入口由参数块运行时地址减去 `bias_baseline` 得到加载偏移，遍历 RELA 表把 `bias + addend` 写入 `bias + slot`。零条目跳过循环；内核不负责这批自重定位。入口从原始 sp 读取 argc，以 `sp + 8` 为 argv、`argv + 8 * (argc + 1)` 为 envp，保留它们直到以 x0–x4 = params、bias、envp、argc、argv 调用 rt0。rt0 初始化 x27/x28，写入载荷启动参数并调用 `rt0_start`，返回的 x0 直接交给 `exit_group`（x8 = 94，`svc #0`）。入口写入载荷 revision，并为载荷的 `initial_slot` 字段自动登记一项 RELATIVE；其他载荷指针由调用方提供。`examples/a64_linux_image.rs` 在默认测试之外生成读取已重定位指针槽、经 Linux write 输出消息并返回 42 的验证镜像；单元测试只在进程内检查结构与指令。
+
 ### Windows PE32+
 
 PE writer消费[平台 ABI](../spec/platform-abi.md#executable-image-forms)给出的 PE32+、ASLR/NX、入口、逻辑节和导入导出要求。当前私有 writer profile使用 image base `0x0000000140000000`、section alignment 4096、file alignment 512、COFF timestamp/checksum 0和 `WINDOWS_CUI` subsystem；这些字段不扩大平台稳定面。`DllCharacteristics` 固定带 dynamic base、high-entropy VA 和 NX。逻辑节按登记名各写一节，名字长于 8 字节则写出失败。用户片段仍与 `registered_fragments` 登记的机器片段一起按符号名排序、16 字节对齐接在 rt0 之后（栈图 `code_rva` 与 `.pdata` 都取自这次排序，两者必须与放置同源）；栈图 `code_rva` 相对该片段区，`.pdata` 里的 `RUNTIME_FUNCTION` 再加上片段区 RVA。`.xdata` 保留完整 `GUGUUN01` 容器，其平台尾里的 `UNWIND_INFO` 偏移改写成镜像 RVA。
