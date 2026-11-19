@@ -179,6 +179,67 @@ fn foreign_bridge_uses_all_eight_integer_lanes_stack_and_dirty_maps() {
 }
 
 #[test]
+fn padding_only_argument_eightbytes_are_zero_not_the_following_argument() {
+    for darwin in [false, true] {
+        let mut f = fixture(&[], &[], darwin);
+        let value = f.op(Op::FConst(1.5_f64.to_bits()), &[], &[Type::F64])[0];
+        let following = f.constant(Type::I64, 0x12345678);
+        let mut call = call(
+            vec![ValueType::scalar(Type::F64), ValueType::scalar(Type::I64)],
+            vec![],
+        );
+        call.foreign_signature.as_mut().unwrap().arguments[0] = CType {
+            bytes: 16,
+            align: 16,
+            kind: Kind::Aggregate { hfa: None },
+        };
+        call.foreign_arguments[0].bytes = 16;
+        call.foreign_arguments[0].align = 16;
+        invoke(&mut f, call, &[value, following]);
+        f.ret(&[]);
+        let fragment = compile(&f);
+        let mut harness = Harness {
+            foreign: Some(Foreign::default()),
+            ..Default::default()
+        };
+        run(&fragment, &[], darwin, &mut harness);
+        let packet = &harness.foreign.unwrap().packets[0];
+        let lane = |at| u64::from_le_bytes(packet[at..at + 8].try_into().unwrap());
+        assert_eq!(lane(16), 1.5_f64.to_bits());
+        assert_eq!(lane(24), 0);
+        assert_eq!(lane(32), 0x12345678);
+    }
+}
+
+#[test]
+fn padding_only_result_eightbytes_do_not_require_lir_lanes() {
+    for darwin in [false, true] {
+        let mut f = fixture(&[], &[Type::I64], darwin);
+        let mut call = call(vec![], vec![ValueType::scalar(Type::F64)]);
+        call.foreign_signature.as_mut().unwrap().result = CType {
+            bytes: 16,
+            align: 16,
+            kind: Kind::Aggregate { hfa: None },
+        };
+        let result = invoke(&mut f, call, &[]);
+        let bits = f.op(Op::Convert(Conversion::Bitcast), &result, &[Type::I64]);
+        f.ret(&bits);
+        let fragment = compile(&f);
+        let mut harness = Harness {
+            foreign: Some(Foreign {
+                common_results: [2.5_f64.to_bits(), 0xdeadbeef, 0, 0, 0],
+                ..Default::default()
+            }),
+            ..Default::default()
+        };
+        assert_eq!(
+            run(&fragment, &[], darwin, &mut harness)[0],
+            2.5_f64.to_bits()
+        );
+    }
+}
+
+#[test]
 fn hfa_arguments_and_four_results_repack_legacy_integer_lanes() {
     let mut f = fixture(&[Type::I64; 2], &[Type::I64; 2], false);
     let hfa = CType {

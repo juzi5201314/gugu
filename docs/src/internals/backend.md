@@ -725,6 +725,8 @@ HFA 结果使用原有 fixup；sret 的协程栈目标保存为 stack-high 相�
 dispatcher 接收同 x64 一样的四个深度/长度/记录参数，普通与 dirty 符号必须显式绑定。
 调用后的 PC 使用 kind=3、对应 dirty bit 的权威 ForeignBridge 图；参数根来自原始 spill，
 不是仅在进入 dispatcher 前短暂存活的 packet scratch 副本。
+SysV LIR 可省略只含尾 padding 的 eightbyte；staging 只复制实际输入车道，缺少的尾部
+保持预清零，不得越过分组读取下一实参。返回也只恢复存在的 LIR 车道，不要求 padding 有结果值。
 bridge 的调度协议由 CallKind 决定；C callee 的 `may_suspend=false` 不豁免 admission
 或权威挂起图，也不能作为拒绝生产 LIR 外调的条件。
 

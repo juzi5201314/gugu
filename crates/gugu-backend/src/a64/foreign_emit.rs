@@ -233,7 +233,7 @@ impl Emitter<'_, '_> {
                 )?;
             }
             adjust(self.out, Reg::x(10), SP, group.data, false)?;
-            self.copy(group.bytes)?;
+            self.copy(group.source_bytes)?;
         }
         if let Some((index, _, _)) = self.call.sret {
             self.memory(true, 8, 16, SP, self.plan.bank + index * 8)?;

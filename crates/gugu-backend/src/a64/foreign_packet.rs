@@ -12,6 +12,7 @@ use crate::{
 pub(crate) struct Group {
     pub first: u32,
     pub bytes: u32,
+    pub source_bytes: u32,
     pub data: u32,
     pub by_reference: bool,
 }
@@ -146,7 +147,7 @@ pub(crate) fn plan(call: &Call, platform: Platform) -> Result<Plan, Error> {
             .filter(|end| *end as usize <= call.parameters.len())
             .ok_or_else(|| error("invalid foreign argument lane range"))?;
         if group.lanes == 0
-            || (!by_reference && u64::from(group.lanes) * 8 < u64::from(group.bytes))
+            || (!by_reference && group.lanes > group.bytes.div_ceil(8))
             || (by_reference
                 && (group.lanes != 1
                     || call.parameters[group.first as usize].provenance != Some(Provenance::Stack)))
@@ -158,6 +159,11 @@ pub(crate) fn plan(call: &Call, platform: Platform) -> Result<Plan, Error> {
         groups.push(Group {
             first: group.first,
             bytes: group.bytes,
+            source_bytes: if by_reference {
+                group.bytes
+            } else {
+                (u64::from(group.lanes) * 8).min(u64::from(group.bytes)) as u32
+            },
             data,
             by_reference,
         });
@@ -165,18 +171,6 @@ pub(crate) fn plan(call: &Call, platform: Platform) -> Result<Plan, Error> {
     let extra = reserve(&mut cursor, 16)?;
     let result = reserve(&mut cursor, signature.result.bytes)?;
     let sret_depth = reserve(&mut cursor, 8)?;
-    if call.sret.is_none()
-        && call
-            .results
-            .iter()
-            .map(|p| p.ty.bytes().unwrap_or(0))
-            .sum::<u64>()
-            < signature.result.bytes
-    {
-        return Err(error(
-            "A64 foreign result lanes do not cover canonical result",
-        ));
-    }
     Ok(Plan {
         platform,
         abi,
