@@ -94,6 +94,7 @@ impl Vm {
                 "b.cond" => {}
                 "svc" => syscall(self),
                 "adr" => self.set(&args[0], jump(pc, &args[1]) as u64),
+                "adrp" => self.set(&args[0], jump(pc & !4095, &args[1]) as u64),
                 "cbnz.X" if self.get(&args[0]) != 0 => next = jump(pc, &args[1]),
                 "cbnz.X" => {}
                 "brk" => panic!("native protocol trap"),

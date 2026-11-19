@@ -3,6 +3,7 @@
 //! Section containers are shared with the Mach-O writer; `DataConst` is read-only
 //! here, so self-relocated pointer slots must live in `Data`.
 
+mod dynamic;
 mod entry;
 mod headers;
 mod layout;
@@ -13,12 +14,14 @@ use std::collections::BTreeSet;
 
 use super::{fragments::Fragment, inst::RelocKind, relocation};
 pub use crate::macho::{Location, Section, SectionContent, Segment};
-pub use entry::{LinuxEntry, link_entry};
+pub use dynamic::{DynamicLink, Import, link_dynamic};
+pub use entry::{LinuxEntry, link_entry, link_entry_dynamic};
 pub use layout::{Layout, PlacedSection};
 
 pub const SEGMENT_ALIGN: u64 = 0x10000;
 pub const R_AARCH64_RELATIVE: u64 = 1027;
 const PHNUM: u16 = 5;
+#[cfg(test)]
 const HEADER_BYTES: u64 = 64 + PHNUM as u64 * 56;
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
@@ -52,11 +55,30 @@ pub struct ElfImage {
 
 pub fn layout(request: &ElfRequest) -> Result<Layout, String> {
     validate(request)?;
-    Layout::compute(request)
+    Layout::compute(request, 0, false)
 }
 
 pub fn link(request: &ElfRequest) -> Result<ElfImage, String> {
-    let layout = layout(request)?;
+    link_prepared(request, None)
+}
+
+fn prepared_layout(
+    request: &ElfRequest,
+    tables: Option<&dynamic::Tables>,
+) -> Result<Layout, String> {
+    validate(request)?;
+    Layout::compute(
+        request,
+        tables.map_or(0, |t| t.imports.len()),
+        tables.is_some(),
+    )
+}
+
+fn link_prepared(
+    request: &ElfRequest,
+    tables: Option<&dynamic::Tables>,
+) -> Result<ElfImage, String> {
+    let layout = prepared_layout(request, tables)?;
     let size = usize::try_from(layout.file_size).map_err(|_| "ELF image too large")?;
     let mut bytes = Vec::new();
     bytes
@@ -71,6 +93,9 @@ pub fn link(request: &ElfRequest) -> Result<ElfImage, String> {
         }
     }
     write_relocations(&mut bytes, request, &layout)?;
+    if let Some(tables) = tables {
+        tables.write(&mut bytes, request, &layout)?;
+    }
     let fingerprint = *blake3::hash(&bytes).as_bytes();
     Ok(ElfImage { bytes, fingerprint })
 }
