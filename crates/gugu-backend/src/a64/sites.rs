@@ -342,33 +342,31 @@ pub(crate) fn validate(body: &Body) -> Result<(), Error> {
                 inst.op,
                 Op::StackCheck | Op::SafepointPoll { .. } | Op::Call(_) | Op::ForeignCall(_)
             )
+            && !super::lower::runtime::handles(&inst.op)
         {
             return Err(fail("safepoint requires stack maps (4c.2)"));
         }
         if let Some(id) = inst.safepoint {
-            let expected = if matches!(inst.op, Op::StackCheck) {
-                crate::lir::body::SafepointKind::StackCheck
-            } else if matches!(inst.op, Op::SafepointPoll { .. }) {
-                crate::lir::body::SafepointKind::Poll
-            } else if matches!(&inst.op, Op::Call(call) | Op::ForeignCall(call) if call.kind==crate::gir::body::CallKind::ForeignBridge)
-            {
-                crate::lir::body::SafepointKind::ForeignBridge
-            } else if matches!(&inst.op, Op::Call(call) | Op::ForeignCall(call) if call.kind==crate::gir::body::CallKind::ForeignBridgeDirtyCpu)
-            {
-                crate::lir::body::SafepointKind::DirtyCpuBridge
-            } else if matches!(&inst.op, Op::Call(call) | Op::ForeignCall(call) if call.may_suspend)
-            {
-                crate::lir::body::SafepointKind::Suspend
-            } else {
-                crate::lir::body::SafepointKind::CallReturn
-            };
+            let expected = inst
+                .op
+                .safepoint_kind()
+                .ok_or_else(|| fail("operation has no canonical safepoint kind"))?;
             if body.safepoints.get(id.index()).is_none_or(|point| {
-                point.kind != expected
+                let call_return=point.kind==crate::lir::body::SafepointKind::CallReturn && expected==crate::lir::body::SafepointKind::Allocation && matches!(&inst.op,Op::Call(call) if matches!(call.target,crate::lir::body::CallTarget::Instance(_)));
+                (point.kind != expected && !call_return)
                     || Some(point.block.index()) != block
                     || point.instruction.is_none_or(|site| site.index() != index)
             }) {
                 return Err(fail("invalid runtime safepoint table reference"));
             }
+        }
+        if super::runtime::operation_name(&inst.op).is_some()
+            && inst.op.safepoint_kind().is_some()
+            && inst.safepoint.is_none()
+        {
+            return Err(fail(
+                "runtime operation requires an authoritative safepoint",
+            ));
         }
     }
     if body.blocks.iter().any(|b| {
@@ -388,6 +386,9 @@ pub(crate) fn validate(body: &Body) -> Result<(), Error> {
                 | crate::lir::body::SafepointKind::Suspend
                 | crate::lir::body::SafepointKind::ForeignBridge
                 | crate::lir::body::SafepointKind::DirtyCpuBridge
+                | crate::lir::body::SafepointKind::Allocation
+                | crate::lir::body::SafepointKind::Barrier
+                | crate::lir::body::SafepointKind::Select
         ) {
             return Err(super::error("safepoint table requires stack maps (4c.2)"));
         }

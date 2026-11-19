@@ -6,6 +6,8 @@
 //! compiler 前端：源码快照、词法及 AST、名称/类型/控制流检查、版本化查询与冻结 HIR。
 //! 后端只消费已验证 LIR 形成内存 image plan；机器代码生成由后续后端阶段实现。
 
+#[cfg(test)]
+mod a64_runtime_binding_tests;
 mod backend;
 #[cfg(test)]
 mod diagnostics_tests;

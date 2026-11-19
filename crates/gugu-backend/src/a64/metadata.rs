@@ -38,7 +38,7 @@ pub(crate) fn logical(body: &Body) -> Result<Vec<LogicalSafepoint>, Error> {
         || body
             .instructions
             .iter()
-            .any(|inst| matches!(&inst.op, Op::Call(call) | Op::ForeignCall(call) if !call.poll_free_leaf));
+                .any(|inst| inst.safepoint.is_some() || matches!(&inst.op, Op::Call(call) | Op::ForeignCall(call) if !call.poll_free_leaf));
     if !needed {
         return Ok(vec![]);
     }
