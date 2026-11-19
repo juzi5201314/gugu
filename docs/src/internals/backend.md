@@ -401,6 +401,8 @@ load command 依次为各段、`LC_DYLD_CHAINED_FIXUPS`、`LC_DYLD_EXPORTS_TRIE`
 
 内部 x86_64 链接器根据闭世界片段的重定位登记 libSystem 调用，布局确定后修补代码位移和元数据地址。LC_MAIN 启动片段保存启动参数，由参数块地址推导加载偏移并调用 `rt0_start`，正常返回交给 libSystem 的 `exit`。Darwin 文件和进程 worker 通过 pthread 及 C ABI 运行，套接字等待使用 kqueue。该路径不提供 Mach-O C 导出、strip 或 arm64 机器入口。
 
+`a64::macho::append_import_stubs` 为每个 Function 导入在 `__TEXT,__stubs` 追加一条 `adrp x16` / `ldr x16, [x16, #pageoff]` / `br x16` 序列。page 和 pageoff 在镜像布局后按指令的 4 KiB 页解析，不使用 Mach-O 段的 16 KiB 页。调用方须先固定其余布局输入，然后使用返回的符号位置修补调用指令，不能再改变节的大小或对齐。内部符号名为 `__gugu_darwin_c_<C 声明名>`（例如 `__gugu_darwin_c_exit`、`__gugu_darwin_c_write`），不加 dyld 导入使用的前导下划线；`a64::macho::import_stub_symbol` 生成该名字。调用桩只占用 x16，不改变返回地址；调用方仍负责 AAPCS64 参数和系统栈切换，arm64 foreign/extern lowering 尚未接入。
+
 ## 直接编码与验证
 
 encoder 对每个 `X64Inst` 先计算 exact 长度，再写 prefix、REX、opcode、ModRM、SIB、displacement和 immediate；两次计算必须一致。每条 instruction记录起止 offset，stack map、branch、relocation和 source table只引用该边界。
