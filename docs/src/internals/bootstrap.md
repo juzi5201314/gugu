@@ -218,10 +218,14 @@ crates/
 
 ### 编译器测试构建
 
-`cargo nextest run --workspace` 使用当前 workspace 的测试构建配置：`opt-level = 0`、
+`cargo nextest run --workspace` 使用当前 workspace 的测试构建配置：`opt-level = 3`、
 `debug = 1`，保留 `debug-assertions` 与 `overflow-checks`；不为验收切换新的 Cargo 构建 profile。
-构建时间与测试执行时间分别记录。`.config/nextest.toml` 固定两条测试线程、零重试与失败即停：
-每个测试和整轮测试执行均为 60 秒硬超时，宽限期为零，超时终止测试进程组并判失败，不仅打印 `SLOW`。
+构建时间与测试执行时间分别记录。`.config/nextest.toml` 使用 `test-threads = "num-cpus"`，
+调度槽数随可用 CPU 数伸缩，保持零重试与失败即停。重编译与协议用例按既有的 2/3/4/6 槽权重限制并发，
+不在多核机器上固定独占；六槽用例在 12 槽时最多两个并发，在六槽及以下独占。
+默认每个测试限时 3 秒，终止宽限期为 1 秒；整轮测试执行限时 120 秒。
+超时终止测试进程组并判失败，不仅打印 `SLOW`。
+CI 通过 `ci/nextest.toml` 的 `profile.ci` 继承调度槽数与权重，单项与整轮时限分别为 10 秒与 300 秒。
 该时限同样适用于显式运行 `slow-tests`；不得用连续分片、提高超时、黑名单或削弱 fixture 掩盖不合格的耗时。
 发现超时后停止本轮，修复对应的编译或测试路径，再做定向验证；不继续串行堆积全量验收。
 
