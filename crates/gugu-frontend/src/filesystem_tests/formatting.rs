@@ -253,6 +253,27 @@ fn heterogeneous_pack_closure_element_captures() {
 }
 
 #[test]
+fn heterogeneous_pack_wildcard_pattern() {
+    assert_eq!(
+        render(
+            r#"
+        fn count[Ts: Print...](...args: Ts) int {
+            let count = 0
+            for _ in args { count = count + 1 }
+            count
+        }
+        fn render() string {
+            let mixed = count(1, true, "x")
+            let empty = count()
+            f"{mixed}:{empty}"
+        }
+    "#
+        ),
+        "3:0"
+    );
+}
+
+#[test]
 fn runtime_format_specs_and_dynamic_counts() {
     let expected = [
         oracle("*>6", |f| fmt::format_int(f, 42)),

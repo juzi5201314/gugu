@@ -86,7 +86,11 @@ impl Builder<'_, '_> {
                     .iter()
                     .find(|body| body.definition == definition)
             {
-                for ty in &body.slots {
+                for ty in body
+                    .slots
+                    .iter()
+                    .chain(body.patterns.iter().map(|plan| &plan.ty))
+                {
                     if let Ty::Param(name) = ty
                         && name.starts_with("$pack:")
                         && !parameters.iter().any(|parameter| parameter.name == *name)
