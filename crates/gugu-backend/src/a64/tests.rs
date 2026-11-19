@@ -49,6 +49,7 @@ fn relocation_fields_are_zero() {
         ("cbnz.W", 1, RelocKind::CondBr19),
         ("tbnz.X", 2, RelocKind::TestBr14),
         ("adrp", 1, RelocKind::AdrpPage21),
+        ("add.W.imm", 2, RelocKind::AddLo12),
         ("add.X.imm", 2, RelocKind::AddLo12),
         ("ldr.X.literal", 1, RelocKind::Literal19),
     ];
@@ -73,6 +74,26 @@ fn relocation_fields_are_zero() {
             },
         });
         check_relocation(&inst, 1, RelocKind::LdStLo12(size));
+    }
+}
+
+#[test]
+fn rejects_add_lo12_on_non_add_forms() {
+    for key in [
+        "sub.W.imm",
+        "sub.X.imm",
+        "subs.W.imm",
+        "subs.X.imm",
+        "adds.W.imm",
+        "adds.X.imm",
+    ] {
+        let mut inst = sample::sample(find(key).unwrap());
+        inst.operands[2] = Operand::Target(Target::Symbol {
+            name: "callee".to_owned(),
+            addend: 8,
+        });
+        assert!(verify::verify(&inst).is_err(), "{key}");
+        assert!(encode::encode(&inst).is_err(), "{key}");
     }
 }
 

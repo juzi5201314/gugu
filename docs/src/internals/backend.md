@@ -438,6 +438,8 @@ TBZ/TBNZ 的规范形式对位号 0–31 使用 W 视图，对 32–63 使用 X 
 `CondBr19`、`TestBr14`、`AdrpPage21`、`AddLo12`、按访问大小缩放的 `LdStLo12`
 或 `Literal19` 重定位记录。地址基址不因重定位而清零。库不应用重定位、不布局标签，
 分支立即数是相对当前指令的字节位移，ADRP 的立即数是页差乘 4096。
+`AddLo12` 符号操作数仅适用于非置标志的 `add.W.imm` 与 `add.X.imm`；共享 verifier
+拒绝 `sub`、`subs`、`adds` 立即数形式上的符号目标，不生成重定位。
 
 `ENCODER_SCHEMA = 1`、`ENCODER_REVISION = 1` 冻结此契约。`contract::verify()` 校验
 目录键唯一、固定值只占固定字段、字段不重叠且不越界，以及任意两行的 mask/match 不会

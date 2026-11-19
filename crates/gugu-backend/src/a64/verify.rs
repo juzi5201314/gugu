@@ -128,6 +128,14 @@ fn address(a: &Address, mode: AddrMode, size: u8) -> Result<u32, Error> {
 }
 
 fn constraints(form: &Form, operands: &[Operand]) -> Result<(), Error> {
+    if !matches!(form.key, "add.W.imm" | "add.X.imm")
+        && form.operands.iter().zip(operands).any(|(slot, operand)| {
+            matches!(slot.kind, Kind::AddImm)
+                && matches!(operand, Operand::Target(Target::Symbol { .. }))
+        })
+    {
+        return Err(error("AddLo12 符号重定位仅适用于非置标志 ADD"));
+    }
     if let Some(index) = form
         .operands
         .iter()
