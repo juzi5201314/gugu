@@ -118,7 +118,7 @@ fn symbolic_array_init_loop_uses_declared_const_identity() {
         .find_map(|expression| match &expression.kind {
             hir::ExprKind::For {
                 initializations, ..
-            } => initializations.first().map(|plan| plan.length.clone()),
+            } => initializations.first().map(|plan| plan.length),
             _ => None,
         })
         .unwrap();

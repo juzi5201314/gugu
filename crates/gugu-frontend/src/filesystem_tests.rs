@@ -280,13 +280,15 @@ fn interpret_traced(
         {
             if let Some(trace) = &mut trace {
                 trace.at(
-                    body,
                     block,
                     position as u32,
-                    &slots,
-                    &values,
-                    memory,
-                    &root_bases,
+                    &mut root_trace::Context {
+                        body,
+                        slots: &slots,
+                        values: &values,
+                        memory,
+                        root_bases: &root_bases,
+                    },
                 );
             }
             let operands = body.args(&instruction.arguments);
@@ -479,13 +481,15 @@ fn interpret_traced(
         }
         if let Some(trace) = &mut trace {
             trace.at(
-                body,
                 block,
                 body.blocks[block.index()].instructions.len() as u32,
-                &slots,
-                &values,
-                memory,
-                &root_bases,
+                &mut root_trace::Context {
+                    body,
+                    slots: &slots,
+                    values: &values,
+                    memory,
+                    root_bases: &root_bases,
+                },
             );
         }
         let edge = match &body.blocks[block.index()].terminator {

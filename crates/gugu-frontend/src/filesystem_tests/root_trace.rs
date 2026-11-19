@@ -8,6 +8,14 @@ pub(super) type Frames = Rc<RefCell<BTreeMap<usize, Vec<u64>>>>;
 #[derive(Debug)]
 pub(super) struct InterpretedPanic;
 
+pub(super) struct Context<'a> {
+    pub(super) body: &'a Body,
+    pub(super) slots: &'a [u64],
+    pub(super) values: &'a [u64],
+    pub(super) memory: &'a mut [u8],
+    pub(super) root_bases: &'a [Option<u64>],
+}
+
 pub(super) struct RootTrace {
     frames: Frames,
     base: usize,
@@ -34,16 +42,14 @@ impl RootTrace {
         }
     }
 
-    pub(super) fn at(
-        &mut self,
-        body: &Body,
-        block: BlockId,
-        position: u32,
-        slots: &[u64],
-        values: &[u64],
-        memory: &mut [u8],
-        root_bases: &[Option<u64>],
-    ) {
+    pub(super) fn at(&mut self, block: BlockId, position: u32, context: &mut Context<'_>) {
+        let Context {
+            body,
+            slots,
+            values,
+            memory,
+            root_bases,
+        } = context;
         for event in &body.root_inits {
             if event.block == block && event.position == position {
                 self.bits[event.slot.index()][event.bit as usize] = event.initialized;
