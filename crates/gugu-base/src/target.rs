@@ -134,6 +134,8 @@ impl CpuFeature {
 pub enum CpuBaseline {
     /// x86-64-v1：接受 `x86_64` 与 `sse2`，拒绝 SSSE3/SSE4.1/AVX。
     X86_64V1,
+    /// Armv8.0-A；不接受 x86 指令集特性。
+    Armv8A,
 }
 
 impl CpuBaseline {
@@ -141,6 +143,7 @@ impl CpuBaseline {
     pub fn name(self) -> &'static str {
         match self {
             Self::X86_64V1 => "x86_64-v1",
+            Self::Armv8A => "armv8.0-a",
         }
     }
 
@@ -148,6 +151,7 @@ impl CpuBaseline {
     pub fn allows(self, feature: CpuFeature) -> bool {
         match self {
             Self::X86_64V1 => matches!(feature, CpuFeature::X86_64 | CpuFeature::Sse2),
+            Self::Armv8A => false,
         }
     }
 }
@@ -261,6 +265,8 @@ impl std::error::Error for TargetParseError {}
 pub enum Architecture {
     /// x86-64 指令集架构。
     X86_64,
+    /// AArch64 指令集架构。
+    Aarch64,
 }
 
 /// 已登记目标的操作系统。
@@ -270,6 +276,8 @@ pub enum OperatingSystem {
     Linux,
     /// Windows。
     Windows,
+    /// macOS。
+    Macos,
 }
 
 /// 目标镜像格式。
@@ -279,6 +287,8 @@ pub enum ObjectFormat {
     Elf64,
     /// PE32+。
     Pe32Plus,
+    /// 64 位 Mach-O。
+    MachO64,
 }
 
 /// 平台 rt0 的边界类型。
@@ -288,6 +298,8 @@ pub enum Rt0Kind {
     LinuxSyscall,
     /// 通过 ntdll/kernel32 薄导入启动。
     WindowsThinImport,
+    /// 通过 libSystem 与 dyld 启动。
+    MacosLibSystem,
 }
 
 impl Rt0Kind {
@@ -296,6 +308,7 @@ impl Rt0Kind {
         match self {
             Self::LinuxSyscall => "linux-syscall",
             Self::WindowsThinImport => "windows-thin-import",
+            Self::MacosLibSystem => "macos-libsystem",
         }
     }
 }
@@ -336,6 +349,16 @@ impl PointerCompression {
 
     /// x86_64 双目标共用能力：≤4 GiB cage、2 MiB 粒度、48 位 canonical。
     pub const fn x86_64() -> Self {
+        Self {
+            supported: true,
+            max_cage_bytes: 1 << 32,
+            min_alignment: 2 * 1024 * 1024,
+            canonical_bits: 48,
+        }
+    }
+
+    /// AArch64 能力：≤4 GiB cage、2 MiB 粒度、48 位虚拟地址。
+    pub const fn aarch64() -> Self {
         Self {
             supported: true,
             max_cage_bytes: 1 << 32,
@@ -395,9 +418,9 @@ impl TargetDescriptor {
     pub fn digest(&self) -> [u8; 32] {
         let mut hasher = blake3::Hasher::new_derive_key("gugu-target-descriptor-v1");
         encode_field(&mut hasher, self.name.name().as_bytes());
-        encode_field(&mut hasher, arch_name(self.arch).as_bytes());
-        encode_field(&mut hasher, os_name(self.os).as_bytes());
-        encode_field(&mut hasher, format_name(self.object_format).as_bytes());
+        encode_field(&mut hasher, self.arch.name().as_bytes());
+        encode_field(&mut hasher, self.os.name().as_bytes());
+        encode_field(&mut hasher, self.object_format.name().as_bytes());
         hasher.update(&[self.pointer_width]);
         encode_field(&mut hasher, self.rt0.name().as_bytes());
         hasher.update(&self.page_size.to_le_bytes());
@@ -423,23 +446,35 @@ impl TargetDescriptor {
     }
 }
 
-fn arch_name(arch: Architecture) -> &'static str {
-    match arch {
-        Architecture::X86_64 => "x86_64",
+impl Architecture {
+    /// 返回规范架构名。
+    pub fn name(self) -> &'static str {
+        match self {
+            Self::X86_64 => "x86_64",
+            Self::Aarch64 => "aarch64",
+        }
     }
 }
 
-fn os_name(os: OperatingSystem) -> &'static str {
-    match os {
-        OperatingSystem::Linux => "linux",
-        OperatingSystem::Windows => "windows",
+impl OperatingSystem {
+    /// 返回规范操作系统名。
+    pub fn name(self) -> &'static str {
+        match self {
+            Self::Linux => "linux",
+            Self::Windows => "windows",
+            Self::Macos => "macos",
+        }
     }
 }
 
-fn format_name(format: ObjectFormat) -> &'static str {
-    match format {
-        ObjectFormat::Elf64 => "elf64",
-        ObjectFormat::Pe32Plus => "pe32+",
+impl ObjectFormat {
+    /// 返回规范镜像格式名。
+    pub fn name(self) -> &'static str {
+        match self {
+            Self::Elf64 => "elf64",
+            Self::Pe32Plus => "pe32+",
+            Self::MachO64 => "macho64",
+        }
     }
 }
 

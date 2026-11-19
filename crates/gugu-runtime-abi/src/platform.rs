@@ -17,7 +17,7 @@ use super::provider::{
     ProviderStats, RangeDescriptor, RangeId, RangeProvider, RangeState, WaitOutcome, WaitWordId,
 };
 use super::slab::{MemoryDomainId, RuntimeSeed};
-use crate::target::{OperatingSystem, TargetName};
+use crate::target::TargetName;
 
 /// 首批 adapter 的两个目标 profile。
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
@@ -86,9 +86,9 @@ impl std::fmt::Display for PlatformProfile {
 
 impl From<TargetName> for PlatformProfile {
     fn from(value: TargetName) -> Self {
-        match value.descriptor().os {
-            OperatingSystem::Linux => Self::Linux,
-            OperatingSystem::Windows => Self::Windows,
+        match value {
+            TargetName::X86_64Linux => Self::Linux,
+            TargetName::X86_64Windows => Self::Windows,
         }
     }
 }

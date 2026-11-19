@@ -10,6 +10,8 @@
 
 ## 目标描述符与数值 lowering
 
+`TargetDescriptor` 分别保存 `arch`、`os`、`object_format`、`pointer_width`、`rt0`、`cpu_baseline` 与 `pointer_compression`；架构、操作系统与格式的规范 `name()` 同时用于 descriptor 身份编码与 cfg 比较（cfg 只比较架构和操作系统）。这些维度可表示 AArch64、macOS、Mach-O64 与 libSystem/dyld 边界，但 `TargetName` 仍只有两个已登记的 x86_64 目标。平台 profile 从已登记目标映射，不为未登记组合提供替代实现。image planner 按 `object_format` 选择 ELF64 或 PE32+ writer；Mach-O64 明确返回缺少 writer 的错误，不回退到其它格式。维度扩展不改变目标注册表或宿主目标选择。
+
 当前后端只实现平台注册表中的`x86_64-linux`和`x86_64-windows`。每个toolchain安装携带不可变`TargetDescriptor { name, object_format, page_size, cpu_baseline, linux_interpreter, sysroot_digest, import_policy_revision, runtime_tuning_profile_digest, backend_cost_profile_digest }`；目标运行时路径与宿主sysroot分离，descriptor整体进入compiler identity和action key，backend不探测宿主PATH。runtime tuning profile至少固定`LocalDequeMode`、remote/injection shard数和queue padding；backend cost profile固定寄存器保留、inline code-size与spill上限。release镜像只编入该profile选中的一种deque，不生成运行时mode分支。`runtime_tuning_profile_digest`取`RUNTIME_TUNING_PROFILE.digest()`（域`gugu-runtime-tuning-profile-v1`），`RuntimeRawContractV1::verify`交叉校验调度段与profile的容量、分片、batch、service节奏与填充字段。
 
 CPU可接受面只读取[平台 CPU 基线](../spec/platform-abi.md#cpu-baseline)，后端 instruction verifier拒绝任何超出 descriptor的机器指令。数值 lowering只实现[类型系统](../spec/types.md)给定的整数/浮点结果；SSE2、NaN、overflow、shift和conversion选择是这些结果的机器实现，不在本章创建另一套数值规则。`I8` 与 `I16` 在寄存器中保持零扩展到 64 位。内存 `Load` 用 `movzx` 写入 32 位目的寄存器来建立这个规范形；只覆盖低 8 位或低 16 位的 `mov` 不能作为载入。

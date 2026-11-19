@@ -3,7 +3,7 @@ use std::collections::{BTreeMap, BTreeSet};
 use crate::{
     diagnostics::{Diagnostic, DiagnosticCode},
     source::{ExpansionId, SourceMap, SourceSnapshot, Span},
-    target::{Architecture, OperatingSystem, TargetName},
+    target::TargetName,
 };
 
 use super::{
@@ -130,13 +130,8 @@ impl CfgContext {
 
     fn key_value(&self, name: &str, value: &str) -> Option<bool> {
         match name {
-            "os" => Some(match self.target.descriptor().os {
-                OperatingSystem::Linux => value == "linux",
-                OperatingSystem::Windows => value == "windows",
-            }),
-            "arch" => Some(match self.target.descriptor().arch {
-                Architecture::X86_64 => value == "x86_64",
-            }),
+            "os" => Some(value == self.target.descriptor().os.name()),
+            "arch" => Some(value == self.target.descriptor().arch.name()),
             "feature" if self.declared_features.contains(value) => {
                 Some(self.enabled_features.contains(value))
             }
