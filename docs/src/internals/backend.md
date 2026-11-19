@@ -683,6 +683,21 @@ CAS 比较不等则 CLREX 后返回 actual/false，不写内存；只对排他�
 字节 VM 用显式 monitor、确定性的失败注入和并发写入替身检查重新读取、窄宽度、
 旧值返回、邻字节保护、顺序指令与有 spill 的寄存器别名情形；不执行 native 线程。
 
+### A64 外调参数包（4d.3a）
+
+runtime-ABI 的 `A64ForeignCallPacket` 保留完整的 176-byte `ForeignCallPacket`
+前缀：x0–x5 位于 16–56，v0–v7 的低 64 位仍在 64–120，x0/x1 与 d0/d1
+结果仍在 128–152，errno 在 160。扩展的 x6/x7 在 176/184，x8/sret 在 192；
+200 保存额外 HFA d2/d3 的 16-byte `FIXUP_OUTPUT` 目标指针。此指针与 sret
+都由既有 raw-copy/fixup 事务形成，不指向 coroutine stack。native 栈参数从完整
+208-byte header 后开始，长度向上取整到 16 字节，然后是 32-byte fixup 记录。
+`A64Layout` checked 计算全部边界，拒绝溢出。
+
+`runtime/foreign.gg` 的 `[128,168)` 回写窗口和错误状态位置不变；HFA 的额外结果
+通过普通 output fixup 回写，不另造 admission、credit、pin、cleanup 或 copy-back
+协议。shared prefix 的 reserved 字保持零。此阶段只定义布局和原始 C 签名，尚未把
+A64 worker、栈切换或 LIR 外调 lowering 接入；外调仍显式拒绝，不登记新目标。
+
 ### A64 生产源与镜像数据绑定
 
 `runtime/a64.gg` 随已有 runtime source table 提供，用现有 `#![cfg(arch = "aarch64")]`

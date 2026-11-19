@@ -135,6 +135,120 @@ pub(crate) fn classify(types: &[TypeLayout], ty: u32, windows: bool) -> CLayout 
     }
 }
 
+pub(crate) fn describe(types: &[TypeLayout], ty: u32) -> crate::foreign::Type {
+    use crate::foreign::{Hfa, Kind};
+    let value = &types[ty as usize];
+    let layout = value.layout.expect("C 类型有具体布局");
+    if value.transparent {
+        let TypeKind::Aggregate { variants, .. } = &value.kind else {
+            unreachable!()
+        };
+        let field = variants
+            .iter()
+            .flatten()
+            .find(|field| {
+                types[field.ty as usize]
+                    .layout
+                    .is_some_and(|layout| layout.size != 0)
+            })
+            .expect("透明 C 类型有唯一非零字段");
+        return describe(types, field.ty);
+    }
+    let kind = if let Some(crate::gir::concrete::CRepresentation::Integer { signed, .. }) =
+        value.c_repr
+    {
+        Kind::Integer { signed }
+    } else {
+        match value.kind {
+            TypeKind::Unit | TypeKind::Never => Kind::Unit,
+            TypeKind::Int { signed, .. } => Kind::Integer { signed },
+            TypeKind::Bool | TypeKind::Char => Kind::Integer { signed: false },
+            TypeKind::Float(bits) => Kind::Float { bits },
+            TypeKind::Pointer(_) => Kind::Pointer,
+            _ => {
+                let mut hfa = Hfa {
+                    bits: 0,
+                    offsets: Vec::new(),
+                };
+                let homogeneous = homogeneous(types, ty, 0, &mut hfa) && !hfa.offsets.is_empty();
+                Kind::Aggregate {
+                    hfa: homogeneous.then_some(hfa),
+                }
+            }
+        }
+    };
+    crate::foreign::Type {
+        bytes: layout.size,
+        align: layout.align as u32,
+        kind,
+    }
+}
+
+fn homogeneous(types: &[TypeLayout], ty: u32, base: u64, hfa: &mut crate::foreign::Hfa) -> bool {
+    let value = &types[ty as usize];
+    if value.layout.is_some_and(|layout| layout.size == 0) {
+        return true;
+    }
+    match &value.kind {
+        TypeKind::Float(bits) if matches!(bits, 32 | 64) => {
+            if hfa.offsets.len() == 4 || hfa.bits != 0 && hfa.bits != *bits {
+                return false;
+            }
+            hfa.bits = *bits;
+            hfa.offsets.push(base);
+            true
+        }
+        TypeKind::Array { element, count } => {
+            let stride = types[*element as usize].layout.expect("C 元素布局").size;
+            (0..*count).all(|index| homogeneous(types, *element, base + index * stride, hfa))
+        }
+        TypeKind::Aggregate {
+            tag_bytes: 0,
+            variants,
+        } if value.c_repr == Some(crate::gir::concrete::CRepresentation::Union) => {
+            homogeneous_union(types, variants.iter().flatten(), base, hfa)
+        }
+        TypeKind::Aggregate {
+            tag_bytes: 0,
+            variants,
+        } if variants.len() == 1 => variants[0]
+            .iter()
+            .all(|field| homogeneous(types, field.ty, base + field.offset, hfa)),
+        _ => false,
+    }
+}
+
+fn homogeneous_union<'a>(
+    types: &[TypeLayout],
+    fields: impl Iterator<Item = &'a crate::gir::concrete::Field>,
+    base: u64,
+    hfa: &mut crate::foreign::Hfa,
+) -> bool {
+    let mut largest = crate::foreign::Hfa {
+        bits: hfa.bits,
+        offsets: vec![],
+    };
+    for field in fields {
+        let mut member = crate::foreign::Hfa {
+            bits: largest.bits,
+            offsets: vec![],
+        };
+        if !homogeneous(types, field.ty, base + field.offset, &mut member) {
+            return false;
+        }
+        largest.bits = member.bits;
+        if member.offsets.len() > largest.offsets.len() {
+            largest.offsets = member.offsets;
+        }
+    }
+    if hfa.offsets.len() + largest.offsets.len() > 4 {
+        return false;
+    }
+    hfa.bits = largest.bits;
+    hfa.offsets.extend(largest.offsets);
+    true
+}
+
 impl Builder<'_> {
     pub(super) fn c_layout(&self, ty: u32) -> CLayout {
         classify(

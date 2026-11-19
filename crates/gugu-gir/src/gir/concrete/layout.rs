@@ -102,6 +102,16 @@ impl<'a, 'm> Builder<'a, 'm> {
             kind,
             passing,
             transparent: matches!(ty, Ty::Named(index, _) if self.context.model.nominal[*index].repr.transparent()),
+            c_repr: match ty {
+                Ty::Named(index, _) if self.context.model.nominal[*index].is_enum => {
+                    self.context.model.nominal[*index]
+                        .repr
+                        .tag
+                        .map(|(signed, bits)| super::CRepresentation::Integer { signed, bits })
+                }
+                _ if self.context.model.is_union(ty) => Some(super::CRepresentation::Union),
+                _ => None,
+            },
         });
         Ok(())
     }

@@ -57,6 +57,7 @@ fn poll_linear_leaf_matches_generic_and_rejects_calls_and_loops() {
         captures_arguments: false,
         by_value: Vec::new(),
         sret: None,
+        foreign_signature: None,
         foreign_arguments: Vec::new(),
         poll_free_leaf: false,
     });

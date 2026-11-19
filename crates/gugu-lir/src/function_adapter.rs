@@ -164,6 +164,7 @@ pub(crate) fn build(target: &Body, has_environment: bool) -> Body {
                     .signature
                     .sret
                     .map(|(bytes, _, descriptor)| (0, bytes, descriptor)),
+                foreign_signature: None,
                 foreign_arguments: Vec::new(),
                 poll_free_leaf: false,
             },
