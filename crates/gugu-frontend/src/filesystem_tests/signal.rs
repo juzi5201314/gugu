@@ -9,6 +9,43 @@ const USER1: u64 = 1 << 29;
 const USER2: u64 = 1 << 30;
 const HANDLER: u64 = 0x1234;
 
+#[expect(clippy::ptr_arg, reason = "签名需与 bridge_hook 一致")]
+fn linux_bridge(h: &mut Harness<'_>, args: &[u64], memory: &mut Vec<u8>) -> Vec<u64> {
+    let (operation, value, error) = h.script.pop_front().unwrap();
+    assert_eq!(args[0], operation);
+    if operation == 14 {
+        assert_eq!((args[1], args[3], args[4]), (0, 0, 8));
+    } else {
+        assert_eq!(operation, 289);
+        assert_eq!((args[1], args[3], args[4]), (u64::MAX, 8, 524288));
+    }
+    assert_eq!(word(memory, args[2]), 1 << 9);
+    vec![value, error]
+}
+
+#[test]
+fn linux_signal_arm_passes_kernel_sigset_size_before_signalfd_flags() {
+    let output = Compiler::shared().compile(CompileRequest::single_file(
+        "main.gg",
+        include_str!("../../../gugu-compiler/tests/fixtures/linux_signal.gg"),
+        TargetName::X86_64Linux,
+    ));
+    assert!(output.is_success(), "{:?}", output.diagnostics().items());
+    for (script, expected) in [
+        (vec![(14, 0, 0), (289, 7, 0)], 0),
+        (vec![(14, 0, 0), (289, 0, 22)], 22),
+        (vec![(14, 0, 13)], 13),
+    ] {
+        let mut h = Harness::new(&output);
+        let mut memory = vec![0; 262144];
+        h.bridge_hook = Some(linux_bridge);
+        assert_eq!(h.invoke(SIGNAL, "arm", &[0], &mut memory), [0]);
+        h.script.extend(script);
+        assert_eq!(h.invoke(SIGNAL, "arm", &[1 << 9], &mut memory), [expected]);
+        assert!(h.script.is_empty());
+    }
+}
+
 #[expect(clippy::ptr_arg, reason = "签名需与 native_hook 一致")]
 fn native(h: &mut Harness<'_>, op: u64, request: u64, memory: &mut Vec<u8>) {
     let args = &mut h.calls.last_mut().unwrap().1;

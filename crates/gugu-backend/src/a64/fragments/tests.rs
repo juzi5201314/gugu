@@ -23,6 +23,9 @@ mod linux_process;
 #[path = "linux_fd_vm_tests.rs"]
 mod linux_vm;
 
+#[path = "linux_net_tests.rs"]
+mod linux_net;
+
 fn instructions(fragment: &Fragment) -> Vec<Inst> {
     let (words, remainder) = fragment.bytes.as_chunks::<4>();
     assert!(remainder.is_empty());

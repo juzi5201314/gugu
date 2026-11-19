@@ -47,7 +47,7 @@ fn file_syscalls_use_linux_request_ids_and_asm_generic_arguments() {
 
 #[test]
 fn unsupported_operations_do_not_make_a_syscall() {
-    for operation in [7, 14, 73, 218, 289, 4096, u64::MAX] {
+    for operation in [7, 73, 218, 290, 4096, u64::MAX] {
         let mut vm = Vm::new(operation, [0; 6]);
         vm.run(&code(), |_| panic!("unsupported operation reached kernel"));
         assert_eq!(vm.read(REQUEST + 64, 8), 0);
