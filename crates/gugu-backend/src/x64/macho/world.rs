@@ -4,6 +4,7 @@ use std::mem::offset_of;
 use crate::macho::{
     self, Arch, Location, MachImage, MachORequest, Section, SectionContent, Segment,
 };
+use crate::runtime::cage_control::CageControlRecord;
 use crate::runtime::entry::{self, Rt0Payload, rt0_params};
 use crate::{NativeImport, NativeLink};
 
@@ -257,10 +258,10 @@ impl WorldImage {
             data.extend_from_slice(bytes);
         }
         self.request.sections[const_at.section].content = SectionContent::Data(data);
-        self.runtime_data(world)
+        self.runtime_data(world.cage_bytes, &world.globals)
     }
 
-    fn runtime_data(&mut self, world: &X64World) -> Result<(), String> {
+    fn runtime_data(&mut self, cage_bytes: u64, globals: &[(String, u64)]) -> Result<(), String> {
         let mut processor = vec![0xff; 4096];
         processor[..64].fill(0);
         let at = self.section(
@@ -284,10 +285,16 @@ impl WorldImage {
             SectionContent::Data(vec![0; Rt0Payload::bytes() as usize]),
         );
         self.define(PAYLOAD.into(), payload)?;
+        let cage = self.section(
+            "__cage_control",
+            Segment::Data,
+            16,
+            SectionContent::Data(CageControlRecord::boot_bytes(cage_bytes)),
+        );
+        self.define("__gugu_cage_control".into(), cage)?;
         let reserved = self.request.sections.len();
         let state = entry::INITIAL_SLOT_BYTES.next_multiple_of(64);
-        let cage = (state + entry::RUNTIME_STATE_BYTES).next_multiple_of(16);
-        let mailbox = cage + u64::from(crate::runtime::cage_control::CageControlRecord::byte_len());
+        let mailbox = (state + entry::RUNTIME_STATE_BYTES).next_multiple_of(16);
         for (name, offset) in [
             (SLOT.into(), 0),
             (STATE.into(), state),
@@ -296,7 +303,6 @@ impl WorldImage {
                 "__gugu_callback_control".into(),
                 state + entry::state::CALLBACK,
             ),
-            ("__gugu_cage_control".into(), cage),
             ("__gugu_signal_mailbox".into(), mailbox),
         ] {
             self.define(
@@ -308,7 +314,7 @@ impl WorldImage {
             )?;
         }
         let mut bytes = mailbox + 16;
-        for (name, size) in &world.globals {
+        for (name, size) in globals {
             bytes = bytes.next_multiple_of(16);
             self.define(
                 name.clone(),
@@ -483,4 +489,26 @@ fn rt0() -> (Vec<u8>, Vec<ObjectReloc>) {
     rip(&mut code, &[0xe8], "exit");
     code.extend_from_slice(&[0x0f, 0x0b]);
     (code, sites)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn cage_control_is_file_backed_with_the_configured_capacity() {
+        for bytes in [0_u64, 32 << 20] {
+            let mut world = WorldImage::new();
+            world.request.entry =
+                world.section("__text", Segment::Text, 1, SectionContent::Code(vec![0xc3]));
+            world.runtime_data(bytes, &[]).unwrap();
+            let at = world.addr("__gugu_cage_control").unwrap();
+            assert_eq!(world.request.sections[at.section].segment, Segment::Data);
+            let image = macho::link(&world.request).unwrap();
+            let field = image.layout.sections[at.section].fileoff
+                + at.offset
+                + offset_of!(CageControlRecord, configured_bytes) as u64;
+            assert_eq!(&image.bytes[field as usize..][..8], &bytes.to_le_bytes());
+        }
+    }
 }
