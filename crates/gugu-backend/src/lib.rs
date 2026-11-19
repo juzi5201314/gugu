@@ -314,6 +314,8 @@ pub struct BackendPlan {
     pub windows_import_dlls: u32,
     /// PE 镜像字节指纹。
     pub windows_image_fingerprint: [u8; 32],
+    /// 内部 macOS 目标的 Mach-O 镜像。
+    pub macos_image: Vec<u8>,
 }
 
 #[expect(
@@ -339,7 +341,7 @@ pub fn plan(
     let Some(entry) = module.entry else {
         return Ok(None);
     };
-    let (linux, windows) = match descriptor.object_format {
+    let (linux, windows, macos_image) = match descriptor.object_format {
         target::ObjectFormat::Elf64 => (
             x64::elf::link_world(
                 x64,
@@ -348,6 +350,7 @@ pub fn plan(
                 native_link,
             )?,
             x64::pe::PeImage::absent(),
+            Vec::new(),
         ),
         target::ObjectFormat::Pe32Plus => (
             x64::elf::LinuxImage::absent(),
@@ -357,10 +360,19 @@ pub fn plan(
                 &raw.gc_metadata().metadata_section,
                 native_link,
             )?,
+            Vec::new(),
         ),
-        target::ObjectFormat::MachO64 => {
-            return Err("macho64 format has no image writer yet".to_owned());
-        }
+        target::ObjectFormat::MachO64 => (
+            x64::elf::LinuxImage::absent(),
+            x64::pe::PeImage::absent(),
+            x64::macho::link_world(
+                x64,
+                &raw.gc_metadata().type_section,
+                &raw.gc_metadata().metadata_section,
+                native_link,
+            )?
+            .bytes,
+        ),
     };
     let placement = gir.placement.counts();
     let (runtime_glue_bound, runtime_glue_stubbed) = x64.runtime_glue_counts();
@@ -605,5 +617,6 @@ pub fn plan(
         windows_reloc_count: windows.reloc_count,
         windows_import_dlls: windows.import_dlls,
         windows_image_fingerprint: windows.fingerprint,
+        macos_image,
     }))
 }

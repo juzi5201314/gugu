@@ -127,6 +127,7 @@ pub fn build(
 pub fn required_names(target: TargetName) -> &'static [&'static str] {
     match target {
         TargetName::X86_64Linux => &[".gugu.stackmap", ".eh_frame", ".gugu.src"],
+        TargetName::X86_64Macos => &["__gugu_stackmap", "__gugu_unwind", "__gugu_source"],
         TargetName::X86_64Windows => &[".gugustk", ".xdata", ".gugusrc"],
     }
 }
@@ -134,6 +135,7 @@ pub fn required_names(target: TargetName) -> &'static [&'static str] {
 fn source_section_name(target: TargetName) -> &'static str {
     match target {
         TargetName::X86_64Linux => ".gugu.src",
+        TargetName::X86_64Macos => "__gugu_source",
         TargetName::X86_64Windows => ".gugusrc",
     }
 }
@@ -161,6 +163,7 @@ fn consume_landings(prepared: &[Prepared<'_>]) -> Result<u32, Vec<Diagnostic>> {
 fn stackmap_name(target: TargetName) -> &'static str {
     match target {
         TargetName::X86_64Linux => ".gugu.stackmap",
+        TargetName::X86_64Macos => "__gugu_stackmap",
         TargetName::X86_64Windows => ".gugustk",
     }
 }
@@ -168,6 +171,7 @@ fn stackmap_name(target: TargetName) -> &'static str {
 fn unwind_name(target: TargetName) -> &'static str {
     match target {
         TargetName::X86_64Linux => ".eh_frame",
+        TargetName::X86_64Macos => "__gugu_unwind",
         TargetName::X86_64Windows => ".xdata",
     }
 }

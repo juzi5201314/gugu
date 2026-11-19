@@ -40,10 +40,14 @@ fn aarch64_pointer_compression_uses_48_bit_addresses() {
 
 #[test]
 fn dimension_values_do_not_register_targets() {
-    for name in ["", "aarch64-linux", "aarch64-macos"] {
+    for name in ["", "aarch64-linux", "aarch64-macos", "x86_64-macos"] {
         let error = TargetName::parse(name).expect_err("unregistered target");
         assert_eq!(error.requested(), name);
     }
+    let internal = TargetName::X86_64Macos.descriptor();
+    assert_eq!(internal.os, OperatingSystem::Macos);
+    assert_eq!(internal.object_format, ObjectFormat::MachO64);
+    assert_eq!(internal.rt0, Rt0Kind::MacosLibSystem);
 }
 
 #[test]

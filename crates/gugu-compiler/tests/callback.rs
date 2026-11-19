@@ -148,6 +148,7 @@ fn c_exports_materialize_managed_callback_adapters() {
         match target {
             TargetName::X86_64Linux => verify_elf_exports(plan.linux_image()),
             TargetName::X86_64Windows => verify_pe_exports(plan.windows_image()),
+            TargetName::X86_64Macos => unreachable!(),
         }
         let lir = output.dump_lir().unwrap();
         for name in ["callback_add", "callback_mixed", "callback_large"] {

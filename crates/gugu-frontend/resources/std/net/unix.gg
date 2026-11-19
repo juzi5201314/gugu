@@ -77,13 +77,13 @@ impl Write for UnixWriteHalf {
     fn write(self: &Self, source: Bytes) Result[int, Error] = endpoint.write(&self.cell, source, 0)
     fn write_cancel(self: &Self, source: Bytes, cancel: &CancelToken) Result[int, Error] = endpoint.write(&self.cell, source, unsafe { cancel.raw_control() })
 }
-#[cfg(os = "linux")]
+#[cfg(any(os = "linux", os = "macos"))]
 pub struct UnixDatagram { cell: ResourceCell }
-#[cfg(os = "linux")]
+#[cfg(any(os = "linux", os = "macos"))]
 pub struct UnixDatagramRead { pub len: int, pub source: Option[UnixAddr], pub truncated: bool }
-#[cfg(os = "linux")]
+#[cfg(any(os = "linux", os = "macos"))]
 pub struct UnixDatagramPacket { pub data: Bytes, pub source: Option[UnixAddr] }
-#[cfg(os = "linux")]
+#[cfg(any(os = "linux", os = "macos"))]
 impl UnixDatagram {
     pub fn bind(address: UnixAddr) Result[Self, Error] = Ok(Self { cell: unix.bind(address, false)? })
     pub fn local_addr(self: &Self) Result[Option[UnixAddr], Error] = unix.address(&self.cell, false)

@@ -21,6 +21,7 @@ use crate::sema_prefix::table_fingerprint;
 use crate::source::SourceMap;
 use crate::{TargetName, canonical};
 use crate::{cfg::CfgContext, derive_builtin, gir, semantics};
+use gugu_sema::{lex, token::TokenKind};
 
 /// 物化失败：构建期必须直接失败，不做降级。
 #[derive(Debug)]
@@ -266,11 +267,7 @@ fn check_cfg_independence(
             continue;
         }
         for predicate in cfg_predicates(&blob.source) {
-            let key = predicate
-                .split(['(', '=', ',', ')', ' '])
-                .find(|token| !token.is_empty())
-                .unwrap_or_default();
-            if !ALLOWED_CFG_KEYS.contains(&key) {
+            if !target_only_predicate(&predicate) {
                 return Err(MaterializeError::CfgDependentSource {
                     path: blob.logical_path.clone(),
                     predicate: predicate.trim().to_owned(),
@@ -280,6 +277,33 @@ fn check_cfg_independence(
     }
     let _ = source;
     Ok(())
+}
+
+fn target_only_predicate(predicate: &str) -> bool {
+    let snapshot = crate::source::SourceSnapshot::from_str("cfg.gg", predicate)
+        .expect("cfg 谓词是已验证源码的子串");
+    let map = SourceMap::new(vec![snapshot]).expect("单文件源码表合法");
+    let file = map.file_id("cfg.gg").expect("cfg 谓词文件已登记");
+    let tokens = lex::lex(map.snapshot(file).expect("快照已登记"), &map, file)
+        .buffer
+        .tokens;
+    tokens
+        .iter()
+        .enumerate()
+        .all(|(index, token)| match token.kind {
+            TokenKind::Ident => {
+                let next = tokens.get(index + 1).map(|token| token.kind);
+                match next {
+                    Some(TokenKind::Eq) => ALLOWED_CFG_KEYS.contains(&token.text(predicate)),
+                    Some(TokenKind::LParen) => {
+                        matches!(token.text(predicate), "all" | "any" | "not")
+                    }
+                    _ => false,
+                }
+            }
+            TokenKind::KwTrue | TokenKind::KwFalse => false,
+            _ => true,
+        })
 }
 
 /// 返回源文本里 `cfg(...)` 属性的括号内谓词。
@@ -360,6 +384,8 @@ mod tests {
     fn cfg_independence_accepts_only_target_derived_keys() {
         assert!(ALLOWED_CFG_KEYS.contains(&"os"));
         assert!(ALLOWED_CFG_KEYS.contains(&"arch"));
+        assert!(target_only_predicate("any(os = \"linux\", os = \"macos\")"));
+        assert!(!target_only_predicate("any(os = \"linux\", not(test))"));
         for rejected in ["feature", "test", "bench", "target", "unix", "windows"] {
             assert!(!ALLOWED_CFG_KEYS.contains(&rejected), "{rejected} 不得通过");
         }

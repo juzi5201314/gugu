@@ -974,7 +974,7 @@ impl RuntimeRawContractV1 {
         if self.target_semantics.is_empty() {
             return Err(RawModelError::new("runtime raw 契约缺少目标语义"));
         }
-        if TargetName::parse(&self.target_semantics).is_err() {
+        if TargetName::from_compiler_artifact(&self.target_semantics).is_err() {
             return Err(RawModelError::new("runtime raw 契约的目标语义未登记"));
         }
         if self.policy.shards != OWNER_INBOX_SHARDS {

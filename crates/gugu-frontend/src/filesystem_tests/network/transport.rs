@@ -409,6 +409,155 @@ fn transport_deadline_is_captured_and_cancelled_wait_does_not_close() {
 }
 
 #[test]
+fn darwin_datagram_truncation_and_disconnect_follow_native_results() {
+    let output = compile(TargetName::X86_64Macos);
+    let mut h = Harness::new(&output);
+    let mut memory = vec![0; 262144];
+    setup(&mut h, &mut memory);
+    h.native_hook = Some(|_, op, request, memory| {
+        if op == 27 {
+            let message = word(memory, request + 8);
+            let iovec = word(memory, message + 16);
+            assert_eq!(word(memory, iovec + 8), 2);
+            let data = word(memory, iovec) as usize;
+            memory[data..data + 2].copy_from_slice(b"AA");
+            let address = word(memory, message) as usize;
+            memory[address..address + 8].copy_from_slice(&[16, 2, 0, 80, 127, 0, 0, 1]);
+            put(memory, message + 8, 16);
+            put(memory, message + 40, 16 << 32);
+        } else if op == 21 {
+            let address = word(memory, request + 8) as usize;
+            let length = word(memory, request + 16);
+            if length == 2 {
+                assert_eq!(&memory[address..address + 2], &[2, 0]);
+            } else {
+                assert_eq!(&memory[address..address + 2], &[16, 2]);
+            }
+        } else if op == 28 {
+            assert_eq!(word(memory, request), 42);
+            assert_eq!(word(memory, request + 8), 0);
+            assert_eq!(word(memory, request + 16), 0);
+        }
+    });
+    h.script.push_back((27, 2, 0));
+    let result = h.invoke(
+        "std/runtime/net_datagram.gg",
+        "receive",
+        &[CELL, BUFFER, 2, 0, 0],
+        &mut memory,
+    );
+    assert_eq!(result[0] & 255, 0);
+    assert_eq!(result[1], 2);
+    assert_ne!(result.last().unwrap() & 255, 0);
+    assert_eq!(&memory[BUFFER as usize..BUFFER as usize + 2], b"AA");
+
+    check_darwin_ip_disconnect(&mut h, &mut memory);
+    check_darwin_peer_after_failure(&mut h, &mut memory);
+    put(&mut memory, CONTROL + 240, 1);
+    for (peer_error, connected) in [(0, 1), (57, 0)] {
+        put(&mut memory, CONTROL + 1248, 1);
+        let disconnect = node(&mut h, &mut memory, 8, 0, 0);
+        put(&mut memory, disconnect + 96, 2);
+        h.script.extend([(21, 0, 22), (6, 0, peer_error)]);
+        submit(&mut h, &mut memory, disconnect);
+        assert_eq!(word(&memory, CONTROL + 1248), connected);
+        assert_eq!(word(&memory, disconnect + 72), connected * 22);
+    }
+    assert!(h.script.is_empty());
+}
+
+fn check_darwin_peer_after_failure(h: &mut Harness<'_>, memory: &mut Vec<u8>) {
+    put(memory, CONTROL + 240, 2);
+    put(memory, CONTROL + 1304, 1);
+    for (peer_error, connected) in [(0, 1), (57, 0), (4, 1)] {
+        put(memory, CONTROL + 1248, 1);
+        let reconnect = node(h, memory, 7, 0, 0);
+        put(memory, reconnect + 96, 16);
+        put(memory, reconnect + 128, 0x0210);
+        h.script.extend([(21, 0, 49), (6, 0, peer_error)]);
+        submit(h, memory, reconnect);
+        assert_eq!(word(memory, reconnect + 72), 49);
+        assert_eq!(word(memory, CONTROL + 1248), connected);
+        let unconnected = h.invoke(
+            "std/runtime/net_endpoint.gg",
+            "connected",
+            &[CELL, 0],
+            memory,
+        );
+        assert_eq!(unconnected[0] & 255, connected);
+        if connected == 0 {
+            let disconnect = node(h, memory, 8, 0, 0);
+            submit(h, memory, disconnect);
+            assert_eq!(word(memory, disconnect + 72), 0);
+        }
+    }
+    put(memory, CONTROL + 1304, 0);
+    let disconnect = node(h, memory, 8, 0, 0);
+    h.script.extend([(28, 0, 22), (6, 0, 57)]);
+    submit(h, memory, disconnect);
+    assert_eq!(word(memory, disconnect + 72), 22);
+    assert_eq!(word(memory, CONTROL + 1248), 0);
+}
+
+fn check_darwin_ip_disconnect(h: &mut Harness<'_>, memory: &mut Vec<u8>) {
+    let transport_hook = h.native_hook;
+    let bound_address = |_: &mut Harness<'_>, op, request, memory: &mut Vec<u8>| {
+        if op != 5 {
+            return;
+        }
+        let address = word(memory, request + 8) as usize;
+        let length = word(memory, request + 16);
+        assert_eq!(word(memory, length) & 0xffff_ffff, 32);
+        let family = word(memory, BUFFER);
+        let specific = word(memory, BUFFER + 8) != 0;
+        let size = if family == 2 { 16 } else { 28 };
+        memory[address..address + size as usize].fill(0);
+        memory[address..address + 4].copy_from_slice(&[size, family as u8, 0, 80]);
+        if family == 2 && specific {
+            memory[address + 4..address + 8].copy_from_slice(&[127, 0, 0, 1]);
+        }
+        if family == 30 && specific {
+            memory[address + 23] = 1;
+        }
+        put(memory, length, u64::from(size));
+    };
+    h.native_hook = Some(bound_address);
+    for family in [2, 30] {
+        put(memory, BUFFER, family);
+        put(memory, CONTROL + 240, family);
+        for (explicit, initial, status, connected) in [(0, 1, 0, 0), (1, 1, 45, 1), (1, 0, 0, 0)] {
+            put(memory, CONTROL + 1304, 0);
+            put(memory, BUFFER + 8, explicit);
+            h.script.push_back((5, 0, 0));
+            let bound = h.invoke(TRANSPORT, "specific_datagram_binding", &[42, 0], memory);
+            assert_eq!(bound[0] & 255, 0);
+            h.invoke(
+                TRANSPORT,
+                "record_datagram_binding",
+                &[CONTROL, bound[1] & 255],
+                memory,
+            );
+            put(memory, CONTROL + 1248, initial);
+            let disconnect = node(h, memory, 8, 0, 0);
+            if explicit == 0 {
+                h.script.push_back((28, 0, 0));
+            }
+            h.native_hook = transport_hook;
+            submit(h, memory, disconnect);
+            assert_eq!(word(memory, CONTROL + 1248), connected);
+            assert_eq!(word(memory, disconnect + 72), status);
+            assert!(h.script.is_empty());
+            h.native_hook = Some(bound_address);
+        }
+    }
+    h.script.push_back((5, 0, 9));
+    let failed = h.invoke(TRANSPORT, "specific_datagram_binding", &[42, 0], memory);
+    assert_eq!(failed[0] & 255, 1);
+    assert!(h.script.is_empty());
+    h.native_hook = transport_hook;
+}
+
+#[test]
 fn linux_datagram_consumes_once_and_rejects_short_sends_and_wrong_mode() {
     let output = compile(TargetName::X86_64Linux);
     let mut h = Harness::new(&output);

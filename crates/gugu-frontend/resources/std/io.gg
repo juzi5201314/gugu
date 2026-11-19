@@ -291,6 +291,23 @@ pub fn from_native_error(code: uint) Error {
         _ => Error::Other { code: int(code), source: None },
     }
 }
+#[cfg(os = "macos")]
+pub fn from_native_error(code: uint) Error {
+    if code == ~uint(0) { return Error::Cancelled }
+    match code {
+        2 => Error::NotFound, 1 | 13 => Error::PermissionDenied, 17 => Error::AlreadyExists,
+        22 | 62 | 63 => Error::InvalidInput, 4 => Error::Interrupted, 9 => Error::Closed,
+        32 => Error::BrokenPipe, 20 => Error::NotADirectory, 21 => Error::IsADirectory,
+        66 => Error::DirectoryNotEmpty, 18 => Error::CrossesDevices, 29 => Error::NotSeekable,
+        42 | 43 | 45 | 47 | 78 | 102 => Error::Unsupported,
+        28 => Error::StorageFull, 30 => Error::ReadOnlyFilesystem,
+        40 => Error::MessageTooLarge, 48 => Error::AddrInUse, 49 => Error::AddrNotAvailable,
+        53 => Error::ConnectionAborted, 54 => Error::ConnectionReset, 57 => Error::NotConnected,
+        60 => Error::TimedOut, 61 => Error::ConnectionRefused,
+        27 => Error::FileTooLarge, 69 => Error::QuotaExceeded,
+        _ => Error::Other { code: int(code), source: None },
+    }
+}
 #[cfg(os = "windows")]
 pub fn from_native_error(code: uint) Error {
     if code == ~uint(0) { return Error::Cancelled }

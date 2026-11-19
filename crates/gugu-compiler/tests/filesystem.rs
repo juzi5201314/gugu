@@ -12,6 +12,11 @@ fn filesystem_api_links_windows() {
 }
 
 #[test]
+fn filesystem_api_links_macos() {
+    check(TargetName::X86_64Macos);
+}
+
+#[test]
 fn borrowed_array_slice_preserves_referent() {
     let output =
         Compiler::with_artifacts(&EMBEDDED_ARTIFACTS).compile(CompileRequest::single_file(
@@ -61,6 +66,7 @@ fn check(target: TargetName) {
     let bytes = match target {
         TargetName::X86_64Linux => plan.linux_image(),
         TargetName::X86_64Windows => plan.windows_image(),
+        TargetName::X86_64Macos => plan.macos_image(),
     };
     assert!(!bytes.is_empty());
     let lir = output.dump_lir().expect("LIR");
