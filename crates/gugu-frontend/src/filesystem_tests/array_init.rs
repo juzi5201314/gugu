@@ -39,14 +39,17 @@ fn concrete_generic_and_empty_arrays_execute() {
 
 #[test]
 fn init_loop_instruction_count_does_not_scale_with_array_length() {
+    let artifact = crate::testing::provider()
+        .artifact(TargetName::X86_64Linux)
+        .unwrap();
     for (element, rhs, read, lengths) in [
         ("int", "i", "a[0]", [4, 1_000_000]),
         ("&Cell", "p", "a[0].x", [4, 128]),
     ] {
         let counts: Vec<_> = lengths.into_iter().map(|n| {
             let source = format!("struct Cell {{ x: int }}\nfn fill(p: &Cell) int {{ let a: [{element}; {n}]\n for i in 0..{n} {{ a[i] = {rhs} }}\n {read} }}\nfn main() {{ let cell = Cell {{ x: 7 }}\n _ = fill(&cell) }}");
-            let output = compile(&source, TargetName::X86_64Linux);
-            let body = output.lir.as_ref().unwrap().bodies().iter().find(|body| body.name == "fill").unwrap();
+            let (_, lir) = protocol(&source, false, crate::runtime::RuntimeResources::new(artifact));
+            let body = lir.bodies().iter().find(|body| body.name == "fill").unwrap();
             (body.blocks.len(), body.instructions.len())
         }).collect();
         assert_eq!(
