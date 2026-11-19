@@ -14,6 +14,7 @@ pub mod inst;
 pub mod layout;
 mod lower;
 pub mod machine;
+pub mod metadata;
 mod print;
 pub mod reg;
 pub mod rewrite;

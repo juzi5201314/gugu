@@ -17,6 +17,7 @@ pub(super) struct Harness {
     pub candidates: Vec<u64>,
     pub guard_loads: usize,
     pub polls: usize,
+    pub gc_direct_delta: u64,
     pub(super) processor: u64,
     pub(super) arguments: [u64; 9],
 }
@@ -31,6 +32,7 @@ impl Default for Harness {
             candidates: vec![],
             guard_loads: 0,
             polls: 0,
+            gc_direct_delta: 0,
             processor: 0x2000,
             arguments: [0; 9],
         }
@@ -80,7 +82,7 @@ impl Harness {
             );
             let candidate = self
                 .expected_sp
-                .wrapping_sub(u64::from(fragment.frame.size));
+                .wrapping_sub(u64::from(fragment.frame.required_frame));
             assert_eq!(registers[11], candidate);
             assert!(
                 !memory
@@ -125,7 +127,7 @@ impl Harness {
             }
             registers[31] = self.expected_sp;
             let watermark = if self.growth.is_empty() {
-                self.expected_sp - u64::from(fragment.frame.size)
+                self.expected_sp - u64::from(fragment.frame.required_frame)
             } else {
                 crate::runtime::coroutine::POLL_SENTINEL as u64
             };
@@ -143,6 +145,24 @@ impl Harness {
         } else if fixup.relocation.target == binding.safepoint_slow {
             assert_eq!(site.kind, sites::SiteKind::PollResume);
             self.polls += 1;
+            if self.gc_direct_delta != 0 {
+                let metadata = fragment.metadata.as_ref().unwrap();
+                let maps = crate::runtime::decode_tables(&metadata.stackmaps).unwrap();
+                let point = maps
+                    .safepoints
+                    .iter()
+                    .find(|p| p.pc_offset == site.pc_offset)
+                    .unwrap();
+                for offset in &maps.maps[point.map_index as usize].slots[0] {
+                    let at = registers[31] + u64::from(*offset) * 8;
+                    let pointer = (0..8).fold(0, |value, byte| {
+                        value | (u64::from(*memory.get(&(at + byte)).unwrap_or(&0)) << (byte * 8))
+                    });
+                    if pointer != 0 {
+                        word(memory, at, pointer + self.gc_direct_delta, 8);
+                    }
+                }
+            }
             for (id, reg) in registers.iter_mut().enumerate().take(27) {
                 *reg = 0xdead0000 + id as u64;
             }
@@ -167,9 +187,20 @@ pub(super) fn run(
     args: &[u64],
     harness: &mut Harness,
 ) -> [u64; 2] {
+    run_linked(fragment, &[], args, harness)
+}
+
+pub(super) fn run_linked(
+    fragment: &codegen::LeafFragment,
+    callees: &[&codegen::LeafFragment],
+    args: &[u64],
+    harness: &mut Harness,
+) -> [u64; 2] {
     let mut morestack = Fixture::new(&[], &[]).compile();
     let mut poll = morestack.clone();
     morestack.symbol = bindings().morestack_or_poll;
     poll.symbol = bindings().safepoint_slow;
-    vm::execute_inner(fragment, &[&morestack, &poll], args, Some(harness)).0
+    let mut linked = callees.to_vec();
+    linked.extend([&morestack, &poll]);
+    vm::execute_inner(fragment, &linked, args, Some(harness)).0
 }

@@ -6,6 +6,7 @@
 //! 集合都已变化），全部对齐、padding、表不重叠与位图互斥检查都在解码时执行。
 
 use super::model::RawModelError;
+pub mod a64_unwind;
 use super::stackmap_schema::{
     STACKMAP_ENDIAN, STACKMAP_MAGIC, STACKMAP_POINTER_SIZE, StackMapArchitecture,
 };
