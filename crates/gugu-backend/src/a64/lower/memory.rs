@@ -15,6 +15,43 @@ pub fn lower(
     b: &mut Builder<'_>,
 ) -> Result<(), Error> {
     match op {
+        Op::CoverageCounter(index) => {
+            signature(body, args, results, &[], &[])?;
+            if b.symbols.is_none() {
+                return Err(crate::a64::error("A64 coverage requires image storage"));
+            }
+            let address = b.temp()?;
+            let value = b.temp()?;
+            b.push(Item::SymbolAddr {
+                dest: address,
+                symbol: crate::a64::world::coverage_symbol(*index),
+            });
+            b.emit(
+                "ldr.W.Unsigned",
+                vec![
+                    reg(value, Width::W, Access::Write),
+                    machine::MOperand::Address(MReg::Virtual(address)),
+                ],
+            )?;
+            b.emit(
+                "add.W.imm",
+                vec![
+                    reg(value, Width::W, Access::Write),
+                    reg(value, Width::W, Access::Read),
+                    machine::fixed(Operand::AddImm {
+                        imm12: 1,
+                        shift12: false,
+                    }),
+                ],
+            )?;
+            b.emit(
+                "str.W.Unsigned",
+                vec![
+                    reg(value, Width::W, Access::Read),
+                    machine::MOperand::Address(MReg::Virtual(address)),
+                ],
+            )
+        }
         Op::Memcpy { bytes } | Op::Memmove { bytes } | Op::Memset { bytes } => {
             signature(
                 body,
@@ -52,9 +89,16 @@ pub fn lower(
         }
         Op::SymbolAddr(symbol) => {
             signature(body, args, results, &[], &[Type::Ptr])?;
-            let symbol = match symbol {
-                crate::lir::body::Symbol::Instance(key) => crate::a64::abi::symbol(key),
-                crate::lir::body::Symbol::External { name, .. } => {
+            let bound = b.symbols.and_then(|symbols| {
+                symbols
+                    .iter()
+                    .find(|(key, _)| key == symbol)
+                    .map(|(_, name)| name.clone())
+            });
+            let symbol = match (bound, symbol) {
+                (Some(name), _) => name,
+                (_, crate::lir::body::Symbol::Instance(key)) => crate::a64::abi::symbol(key),
+                (_, crate::lir::body::Symbol::External { name, .. }) => {
                     if body.values[results[0].index()].kind.provenance
                         == Some(crate::lir::body::Provenance::Code)
                     {
@@ -73,6 +117,24 @@ pub fn lower(
                 dest: results[0].0,
                 symbol,
             });
+            if b.symbols.is_some()
+                && matches!(
+                    op,
+                    Op::SymbolAddr(crate::lir::body::Symbol::External { .. })
+                )
+                && body.values[results[0].index()].kind.provenance
+                    != Some(crate::lir::body::Provenance::Code)
+                && crate::a64::foreign_packet::platform(body)?
+                    == crate::a64::foreign::Platform::Darwin
+            {
+                b.emit(
+                    "ldr.X.Unsigned",
+                    vec![
+                        machine::write(results[0].0),
+                        machine::MOperand::Address(MReg::Virtual(results[0].0)),
+                    ],
+                )?;
+            }
             Ok(())
         }
         Op::StackAddr(slot) => {
