@@ -1,0 +1,66 @@
+//! UAX #15 normalization conformance on the generated executable.
+use std.env.{args}
+use std.fs as fs
+use std.io.{println}
+use std.path.{Path}
+use std.text.{Bytes, NormalizationForm}
+
+// Five length-prefixed UTF-8 columns per row, in the order from
+// Unicode 17.0.0 NormalizationTest.txt (see ci/generate_unicode_normalization.py).
+fn read_column(data: Bytes, offset: &int) string {
+    let length = match data.get(*offset) {
+        Some(length) => int(length),
+        None => panic("truncated normalization vectors"),
+    }
+    let start = *offset + 1
+    *offset = start + length
+    let (_, tail) = data.split_at(start)
+    let (field, _) = tail.split_at(length)
+    match field.to_string() {
+        Ok(text) => text,
+        Err(_) => panic("invalid UTF-8 in normalization vectors"),
+    }
+}
+
+fn check_forms(input: string, nfc: string, nfd: string, nfkc: string, nfkd: string) bool {
+    input.normalize(NormalizationForm::NFC) == nfc &&
+        input.normalize(NormalizationForm::NFD) == nfd &&
+        input.normalize(NormalizationForm::NFKC) == nfkc &&
+        input.normalize(NormalizationForm::NFKD) == nfkd
+}
+
+fn check_vectors(data: Bytes) int {
+    let offset = 0
+    let row = 0
+    while offset < data.len() {
+        let source = read_column(data, &offset)
+        let nfc = read_column(data, &offset)
+        let nfd = read_column(data, &offset)
+        let nfkc = read_column(data, &offset)
+        let nfkd = read_column(data, &offset)
+        row = row + 1
+        if !check_forms(source, nfc, nfd, nfkc, nfkd) ||
+            !check_forms(nfc, nfc, nfd, nfkc, nfkd) ||
+            !check_forms(nfd, nfc, nfd, nfkc, nfkd) ||
+            !check_forms(nfkc, nfkc, nfkd, nfkc, nfkd) ||
+            !check_forms(nfkd, nfkc, nfkd, nfkc, nfkd) {
+            println(f"normalization mismatch at row {row}")
+            return -1
+        }
+    }
+    row
+}
+
+fn main() {
+    let path = match args().get(1) {
+        Some(value) => Path::from_os(value),
+        None => panic("expected path to normalization vectors"),
+    }
+    let data = match fs.read(path) {
+        Ok(data) => data,
+        Err(_) => panic("cannot read normalization vectors"),
+    }
+    let rows = check_vectors(data)
+    if rows <= 0 { panic("invalid normalization vectors") }
+    println(f"Validated {rows} Unicode normalization rows")
+}

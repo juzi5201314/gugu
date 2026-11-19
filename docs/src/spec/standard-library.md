@@ -187,7 +187,9 @@ fn normalize(self: &Self, form: NormalizationForm) string
 
 string 不支持单整数 `s[i]`，避免把 byte、Unicode scalar 和用户可见 grapheme 混成同一种索引。`s[a..b]`、`s[a..]`、`s[..b]`、`s[..]` 返回 O(1) COW string 快照；创建快照会 seal backing。
 
-`==`、`Eq`、`Ord` 与 `Hash` 按原始 UTF-8 byte 序列工作，不做隐式 Unicode normalization。规范等价文本必须先显式 `normalize`。Normalization 的形式为 `NFC`、`NFD`、`NFKC`、`NFKD`。
+`==`、`Eq`、`Ord` 与 `Hash` 按原始 UTF-8 byte 序列工作，不做隐式 Unicode normalization。比较规范等价文本时，先显式调用 `normalize`。
+
+`normalize` 按 [UAX #15](https://www.unicode.org/reports/tr15/) 返回指定形式的 string，不修改接收者。形式来自 `std.text.NormalizationForm`：`NFD` 做规范分解和规范排序，`NFC` 在此基础上重组；`NFKD` 和 `NFKC` 改用兼容分解，后者同样重组。兼容分解可能抹去原有的格式区分。当前随附的规范化数据为 Unicode 17.0.0。
 
 `+` 返回新 string；`+=` 修改左侧 string，并可以复用其 unique backing。string 字面量可以直接引用 sealed 只读镜像数据；第一次修改时分离。
 

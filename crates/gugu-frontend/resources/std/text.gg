@@ -1,3 +1,5 @@
+use std.text.normalization_tables as tables
+
 // 只读快照持有受管切片；切片的 interior root 保持整个 backing 可达。
 pub struct Bytes {
     data: &[byte],
@@ -239,6 +241,8 @@ pub fn utf8_decode_lossy(source: Bytes) string {
     unsafe { std.runtime.string_from_utf8_unchecked(data) }
 }
 
+pub enum NormalizationForm { NFC, NFD, NFKC, NFKD }
+
 // string 的固有方法。修改方法把新值写回接收者；COW 分离由 `+` 与切片负责。
 impl string {
     pub fn new() string = ""
@@ -308,6 +312,7 @@ impl string {
 
     pub fn chars(self: &Self) Chars = Chars { data: string_data(*self), offset: 0 }
     pub fn bytes_view(self: &Self) Bytes = Bytes::from_string(*self)
+    pub fn normalize(self: &Self, form: NormalizationForm) string = normalize_text(*self, form)
 }
 
 // 迭代创建时的 string 快照，逐个产生 Unicode scalar。
@@ -345,20 +350,284 @@ fn decode_char(data: &[byte], start: int, width: int) char {
 
 pub fn encode_char(value: char) string {
     let code = uint(value)
-    let length = if code < 128 { 1 } else if code < 2048 { 2 } else if code < 65536 { 3 } else { 4 }
+    let length = utf8_scalar_width(code)
     let data = unsafe { alloc_bytes(length) }
+    write_utf8_scalar(data, 0, code, length)
+    unsafe { std.runtime.string_from_utf8_unchecked(data) }
+}
+
+fn utf8_scalar_width(code: uint) int =
+    if code < 128 { 1 } else if code < 2048 { 2 } else if code < 65536 { 3 } else { 4 }
+
+fn write_utf8_scalar(data: &[byte], start: int, code: uint, length: int) {
     if length == 1 {
-        data[0] = byte(code)
+        data[start] = byte(code)
     } else {
         let remaining = code
         let index = length - 1
         while index > 0 {
-            data[index] = byte((remaining & 63) | 128)
+            data[start + index] = byte((remaining & 63) | 128)
             remaining = remaining >> 6
             index = index - 1
         }
         let prefix = if length == 2 { uint(192) } else if length == 3 { uint(224) } else { uint(240) }
-        data[0] = byte(remaining | prefix)
+        data[start] = byte(remaining | prefix)
+    }
+}
+
+const HANGUL_BASE: uint = 0xAC00
+const L_BASE: uint = 0x1100
+const V_BASE: uint = 0x1161
+const T_BASE: uint = 0x11A7
+const L_COUNT: uint = 19
+const V_COUNT: uint = 21
+const T_COUNT: uint = 28
+const LV_STRIDE: uint = V_COUNT * T_COUNT
+const HANGUL_COUNT: uint = L_COUNT * LV_STRIDE
+
+fn normalize_text(text: string, form: NormalizationForm) string {
+    if is_ascii(text) { return text }
+
+    let (compatible, compose) = match form {
+        NormalizationForm::NFC => (false, true),
+        NormalizationForm::NFD => (false, false),
+        NormalizationForm::NFKC => (true, true),
+        NormalizationForm::NFKD => (true, false),
+    }
+    let capacity = if text.len() < 16 { 16 } else { text.len() }
+    let buffer = ScalarBuffer { data: unsafe { alloc_bytes(capacity) }, length: 0 }
+    decompose_text(&buffer, text, compatible)
+    reorder(&buffer)
+    if compose { recompose(&buffer) }
+    encode(&buffer)
+}
+
+fn is_ascii(text: string) bool {
+    let bytes = string_data(text)
+    for index in 0..bytes.len() {
+        if bytes[index] >= 128 { return false }
+    }
+    true
+}
+
+// 托管 scratch：每个槽保存 24-bit scalar 和一个 combining class。
+struct ScalarBuffer { data: &[byte], length: int }
+
+impl ScalarBuffer {
+    fn scalar(self: &Self, index: int) uint = read24(self.data, index * 4)
+    fn class(self: &Self, index: int) byte = self.data[index * 4 + 3]
+    fn put(self: &Self, index: int, scalar: uint, class: byte) {
+        let at = index * 4
+        self.data[at] = byte(scalar & 255)
+        self.data[at + 1] = byte((scalar >> 8) & 255)
+        self.data[at + 2] = byte(scalar >> 16)
+        self.data[at + 3] = class
+    }
+    fn reserve(self: &Self, additional: int) {
+        let capacity = self.data.len()
+        if additional > capacity / 4 - self.length {
+            if self.data.len() > 9223372036854775807 / 2 { panic("normalization size overflow") }
+            let needed = (self.length + additional) * 4
+            let size = if needed > capacity * 2 { needed } else { capacity * 2 }
+            let next = unsafe { alloc_bytes(size) }
+            for index in 0..(self.length * 4) { next[index] = self.data[index] }
+            self.data = next
+        }
+    }
+    fn push(self: &Self, scalar: uint, class: byte) {
+        self.put(self.length, scalar, class)
+        self.length = self.length + 1
+    }
+}
+
+fn read24(data: &[byte], at: int) uint =
+    uint(data[at]) | (uint(data[at + 1]) << 8) | (uint(data[at + 2]) << 16)
+
+fn read_table_scalar(data: &[byte], at: int) uint =
+    uint(data[at]) | (uint(data[at + 1]) << 7) | (uint(data[at + 2]) << 14)
+
+fn find_scalar(table: &[byte], width: int, scalar: uint) int {
+    let lo = 0
+    let hi = table.len() / width
+    while lo < hi {
+        let mid = lo + (hi - lo) / 2
+        let at = mid * width
+        let key = read_table_scalar(table, at)
+        if key == scalar { return at }
+        if key < scalar { lo = mid + 1 } else { hi = mid };
+    }
+    -1
+}
+
+fn combining_class(classes: &[byte], scalar: uint) byte {
+    if scalar < 128 { return 0 }
+    let at = find_scalar(classes, 5, scalar)
+    if at < 0 { 0 } else { classes[at + 3] | (classes[at + 4] << 7) }
+}
+
+fn decompose_text(buffer: &ScalarBuffer, text: string, compatible: bool) {
+    let chars = Chars { data: string_data(text), offset: 0 }
+    while let Some(scalar) = chars.next() { decompose(buffer, uint(scalar), compatible) }
+}
+
+fn decompose(buffer: &ScalarBuffer, scalar: uint, compatible: bool) {
+    if scalar < 128 {
+        buffer.reserve(1)
+        buffer.push(scalar, 0)
+        return
+    }
+    if scalar >= HANGUL_BASE && scalar < HANGUL_BASE + HANGUL_COUNT {
+        let s = scalar - HANGUL_BASE
+        let t = s % T_COUNT
+        buffer.reserve(if t == 0 { 2 } else { 3 })
+        buffer.push(L_BASE + s / LV_STRIDE, 0)
+        buffer.push(V_BASE + (s % LV_STRIDE) / T_COUNT, 0)
+        if t != 0 { buffer.push(T_BASE + t, 0) }
+        return
+    }
+    let (start, count) = decomposition(scalar, compatible)
+    buffer.reserve(count)
+    let classes = string_data(tables.combining_classes())
+    if start < 0 {
+        buffer.push(scalar, combining_class(classes, scalar))
+        return
+    }
+    let payload = string_data(tables.decomposed_scalars())
+    for part in start..(start + count) {
+        let value = read_table_scalar(payload, part * 3)
+        buffer.push(value, combining_class(classes, value))
+    }
+}
+
+fn decomposition(scalar: uint, compatible: bool) (int, int) {
+    let index = string_data(
+        if compatible { tables.compatibility_index() } else { tables.canonical_index() }
+    )
+    let at = find_scalar(index, 7, scalar)
+    if at < 0 { (-1, 1) } else {
+        (int(read_table_scalar(index, at + 3)), int(index[at + 6]))
+    }
+}
+
+fn reorder(buffer: &ScalarBuffer) {
+    let start = 0
+    while start < buffer.length {
+        if buffer.class(start) == 0 {
+            start = start + 1
+        } else {
+            let end = start + 1
+            let ordered = true
+            while end < buffer.length && buffer.class(end) != 0 {
+                if buffer.class(end - 1) > buffer.class(end) { ordered = false }
+                end = end + 1
+            }
+            if !ordered { reorder_marks(buffer, start, end) }
+            start = end
+        };
+    }
+}
+
+// 稳定归并排序：同类标量保留顺序，长 combining run 也不会退化成平方复杂度。
+fn reorder_marks(buffer: &ScalarBuffer, start: int, end: int) {
+    let count = end - start
+    let original = buffer.data[(start * 4)..(end * 4)]
+    let source = original
+    let destination = unsafe { alloc_bytes(count * 4) }
+    let in_place = true
+    let width = 1
+    while width < count {
+        let first = 0
+        while first < count {
+            let mid = min_index(first + width, count)
+            let last = min_index(mid + width, count)
+            merge_marks(source, destination, first, mid, last)
+            first = last
+        }
+        let previous = source
+        source = destination
+        destination = previous
+        in_place = !in_place
+        width = width * 2
+    }
+    if !in_place {
+        for i in 0..source.len() { original[i] = source[i] }
+    }
+}
+
+fn min_index(left: int, right: int) int = if left < right { left } else { right }
+
+fn merge_marks(source: &[byte], destination: &[byte], first: int, mid: int, last: int) {
+    let left = first
+    let right = mid
+    for i in first..last {
+        let at = if right == last || (left < mid && source[left * 4 + 3] <= source[right * 4 + 3]) {
+            let at = left
+            left = left + 1
+            at
+        } else {
+            let at = right
+            right = right + 1
+            at
+        }
+        for lane in 0..4 { destination[i * 4 + lane] = source[at * 4 + lane] }
+    }
+}
+
+fn compose_pair(pairs: &[byte], left: uint, right: uint) uint {
+    if left >= L_BASE && left < L_BASE + L_COUNT && right >= V_BASE && right < V_BASE + V_COUNT {
+        return HANGUL_BASE + (left - L_BASE) * LV_STRIDE + (right - V_BASE) * T_COUNT
+    }
+    if left >= HANGUL_BASE && left < HANGUL_BASE + HANGUL_COUNT &&
+        (left - HANGUL_BASE) % T_COUNT == 0 && right > T_BASE && right < T_BASE + T_COUNT {
+        return left + right - T_BASE
+    }
+    if right < 128 { return 0 }
+    let lo = 0
+    let hi = pairs.len() / 9
+    let key = (left << 21) | right
+    while lo < hi {
+        let mid = lo + (hi - lo) / 2
+        let at = mid * 9
+        let found = (read_table_scalar(pairs, at) << 21) | read_table_scalar(pairs, at + 3)
+        if found == key { return read_table_scalar(pairs, at + 6) }
+        if found < key { lo = mid + 1 } else { hi = mid };
+    }
+    0
+}
+
+fn recompose(buffer: &ScalarBuffer) {
+    let pairs = string_data(tables.composition_pairs())
+    let count = 0
+    let starter = -1
+    let previous: byte = 0
+    for index in 0..buffer.length {
+        let scalar = buffer.scalar(index)
+        let class = buffer.class(index)
+        let combined = if starter >= 0 && (previous == 0 || previous < class) {
+            compose_pair(pairs, buffer.scalar(starter), scalar)
+        } else { uint(0) }
+        if combined != 0 {
+            buffer.put(starter, combined, 0)
+        } else {
+            if class == 0 { starter = count }
+            buffer.put(count, scalar, class)
+            count = count + 1
+            previous = class
+        };
+    }
+    buffer.length = count
+}
+
+fn encode(buffer: &ScalarBuffer) string {
+    let length = 0
+    for i in 0..buffer.length { length = length + utf8_scalar_width(buffer.scalar(i)) }
+    let data = unsafe { alloc_bytes(length) }
+    let at = 0
+    for i in 0..buffer.length {
+        let code = buffer.scalar(i)
+        let width = utf8_scalar_width(code)
+        write_utf8_scalar(data, at, code, width)
+        at = at + width
     }
     unsafe { std.runtime.string_from_utf8_unchecked(data) }
 }
