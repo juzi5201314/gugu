@@ -504,8 +504,9 @@ mod tests {
             world.runtime_data(bytes, &[]).unwrap();
             let at = world.addr("__gugu_cage_control").unwrap();
             assert_eq!(world.request.sections[at.section].segment, Segment::Data);
+            let layout = macho::layout(&world.request).unwrap();
             let image = macho::link(&world.request).unwrap();
-            let field = image.layout.sections[at.section].fileoff
+            let field = layout.sections[at.section].fileoff
                 + at.offset
                 + offset_of!(CageControlRecord, configured_bytes) as u64;
             assert_eq!(&image.bytes[field as usize..][..8], &bytes.to_le_bytes());

@@ -285,20 +285,28 @@ fn reserve(b: &mut Builder) {
     for r in [R12, R13, Rbp] {
         push(b, r);
     }
+    adjust(b, "sub", Rsp, 16);
+    let failed = b.label();
+    let release = b.label();
+    let done = b.label();
     rr(b, R12, Rax);
+    adjust(b, "add", R12, 4095);
+    jump(b, "jb", failed);
+    adjust(b, "and", R12, -4096);
     rr(b, R13, Rbx);
     number(b, Rdi, 0);
-    rr(b, Rsi, Rax);
+    rr(b, Rsi, R12);
     binary(b, "add", Rsi, R13);
+    jump(b, "jb", failed);
+    store(b, Rsp, 8, Rsi);
     number(b, Rdx, 0);
     number(b, Rcx, 0x1002); // MAP_ANON | MAP_PRIVATE
     number(b, R8, -1);
     number(b, R9, 0);
     c_call(b, "mmap");
-    let failed = b.label();
-    let done = b.label();
     compare(b, Rax, -1);
     jump(b, "je", failed);
+    store(b, Rsp, 0, Rax);
     rr(b, Rdi, Rax);
     rr(b, Rbp, Rax);
     binary(b, "add", Rbp, R13);
@@ -313,16 +321,25 @@ fn reserve(b: &mut Builder) {
     compare(b, Rsi, 0);
     jump(b, "je", trim_tail);
     c_call(b, "munmap");
+    compare(b, Rax, 0);
+    jump(b, "jne", release);
     b.define(trim_tail);
     rr(b, Rdi, Rbp);
     binary(b, "add", Rdi, R12);
     rr(b, Rsi, R13);
     c_call(b, "munmap");
+    compare(b, Rax, 0);
+    jump(b, "jne", release);
     rr(b, Rax, Rbp);
     jump(b, "jmp", done);
+    b.define(release);
+    load(b, Rdi, Rsp, 0);
+    load(b, Rsi, Rsp, 8);
+    c_call(b, "munmap");
     b.define(failed);
     number(b, Rax, 0);
     b.define(done);
+    adjust(b, "add", Rsp, 16);
     for r in [Rbp, R13, R12] {
         pop(b, r);
     }
