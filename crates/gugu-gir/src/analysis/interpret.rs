@@ -27,11 +27,11 @@ pub fn analyze_owner(
     passing: &PassingTable,
 ) -> BodyResult {
     if policy.max_block_iterations != 0
-        && let Some(result) = analyze_linear_leaf(module, owner, body, &passing, callees)
+        && let Some(result) = analyze_linear_leaf(module, owner, body, passing, callees)
     {
         return result;
     }
-    analyze_generic(module, owner, body, owner_index, policy, callees, &passing)
+    analyze_generic(module, owner, body, owner_index, policy, callees, passing)
 }
 
 pub(super) fn analyze_generic(
@@ -61,7 +61,7 @@ pub(super) fn analyze_generic(
         body,
         &mut inbound,
         policy.max_block_iterations,
-        &passing,
+        passing,
         callees,
     ) {
         budget_exhausted = true;
@@ -73,23 +73,15 @@ pub(super) fn analyze_generic(
             body,
             &mut inbound,
             policy.max_block_iterations,
-            &passing,
+            passing,
             callees,
         );
     }
-    let proofs = collect_proofs(
-        module,
-        owner,
-        owner_index,
-        body,
-        &inbound,
-        &passing,
-        callees,
-    );
+    let proofs = collect_proofs(module, owner, owner_index, body, &inbound, passing, callees);
     let mut summary = if budget_exhausted {
         FunctionSummary::conservative()
     } else {
-        summarize(module, owner, body, &inbound, &passing, callees)
+        summarize(module, owner, body, &inbound, passing, callees)
     };
     if !budget_exhausted && proofs.iter().any(|fact| fact.status != ProofStatus::Proved) {
         summary.may_panic = true;

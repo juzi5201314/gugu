@@ -238,7 +238,7 @@ impl ActionStore {
                 metas.push(meta);
             }
         }
-        metas.sort_by(|a, b| a.last_used_at.cmp(&b.last_used_at));
+        metas.sort_by_key(|a| a.last_used_at);
         Ok(metas)
     }
 
@@ -277,7 +277,7 @@ impl ActionStore {
         fs::create_dir_all(&quarantine).map_err(|e| io_error(&quarantine, e))?;
         let name = dir
             .file_name()
-            .map(|n| n.to_string_lossy().to_owned().to_string())
+            .map(|n| n.to_string_lossy().into_owned())
             .unwrap_or_else(|| "unknown".to_owned());
         fs::rename(dir, quarantine.join(format!("{name}-{:x}", unix_now())))
             .map_err(|e| io_error(dir, e))?;

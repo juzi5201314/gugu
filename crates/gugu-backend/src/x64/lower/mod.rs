@@ -581,6 +581,12 @@ impl Builder {
     }
 }
 
+impl Default for Builder {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
 /// 形式查找索引：键为（助记符、操作数形状、首操作数访问语义），值是表中首个
 /// 命中形式的下标，与线性 `position` 的取最小下标语义一致。无操作数形式
 /// （`cqo` 等）没有访问语义可比，键的第三段为 `None`。`FORMS` 是编译期常量，
@@ -612,7 +618,7 @@ fn form_index() -> &'static FormIndex {
 
 fn find_form(mnemonic: &'static str, kinds: &'static [OperandKind], first: Access) -> FormId {
     // 无操作数形式（`cqo` 等）没有访问表可比；其余用首操作数区分同形不同方向。
-    let lookup_first = (kinds.len() != 0).then_some(first);
+    let lookup_first = (!kinds.is_empty()).then_some(first);
     match form_index().get(&(mnemonic, kinds, lookup_first)) {
         Some(form) => *form,
         None => panic!("表内缺少 {mnemonic} 的 {kinds:?} 形式（首操作数 {first:?}）"),

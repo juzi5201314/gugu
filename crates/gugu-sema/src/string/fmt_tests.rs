@@ -39,7 +39,7 @@ fn floats_follow_precision_exponent_and_non_finite_rules() {
     assert_eq!(render("", |out| format_float(out, 1.5)), "1.5");
     assert_eq!(render("", |out| format_float(out, 1.0)), "1");
     assert_eq!(render("?", |out| format_float(out, 1.0)), "1.0");
-    assert_eq!(render(".2", |out| format_float(out, 3.14159)), "3.14");
+    assert_eq!(render(".2", |out| format_float(out, 1.23456)), "1.23");
     assert_eq!(render("+.1", |out| format_float(out, 2.0)), "+2.0");
     assert_eq!(render("e", |out| format_float(out, 1234.5)), "1.2345e3");
     assert_eq!(render(".2E", |out| format_float(out, 1234.5)), "1.23E3");

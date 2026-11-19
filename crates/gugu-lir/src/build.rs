@@ -592,7 +592,8 @@ impl Builder<'_> {
                     };
                     layout.align <= 256
                         && crate::runtime::local_heap::OBJECT_HEADER_BYTES
-                            + u64::from(layout.align)
+                            + layout
+                                .align
                                 .max(crate::runtime::local_heap_schema::HEAP_GRANULE_BYTES.into())
                             - 1
                             + layout.size

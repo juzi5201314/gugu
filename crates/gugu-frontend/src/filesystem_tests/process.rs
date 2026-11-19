@@ -93,6 +93,7 @@ fn child(harness: &mut Harness<'_>, memory: &mut Vec<u8>) -> u64 {
     word(memory, 512)
 }
 
+#[expect(clippy::ptr_arg, reason = "签名需与 native_hook 一致")]
 fn exit_code(_: &mut Harness<'_>, op: u64, request: u64, memory: &mut Vec<u8>) {
     if op == 0 {
         put(memory, request + 16, 7);

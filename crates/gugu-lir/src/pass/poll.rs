@@ -887,15 +887,15 @@ fn entry_cost(editor: &Editor, natural: &LoopInfo, info: &CalleeInfo) -> u32 {
         .get(preheader.from.index())
         .copied()
         .unwrap_or(0);
-    let cost = block_flow(
+
+    block_flow(
         (0..editor.instruction_count(preheader.from))
             .filter(|index| !editor.instruction((preheader.from, *index)).removed)
             .map(|index| &editor.instruction((preheader.from, index)).op),
         &editor.assembly,
         info,
         incoming,
-    );
-    cost
+    )
 }
 
 /// 进入循环前的成本 + 全部迭代成本的保守上界。

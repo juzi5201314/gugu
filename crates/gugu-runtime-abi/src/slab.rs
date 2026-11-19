@@ -84,7 +84,7 @@ impl RuntimeSeed {
     }
 
     /// 抽取下一个确定性 64-bit 值。
-    pub fn next(&mut self) -> u64 {
+    pub fn next_u64(&mut self) -> u64 {
         self.state = self
             .state
             .wrapping_mul(6364136223846793005)
@@ -97,7 +97,7 @@ impl RuntimeSeed {
     pub fn secret(&mut self) -> [u8; 32] {
         let mut secret = [0_u8; 32];
         for chunk in secret.chunks_mut(8) {
-            chunk.copy_from_slice(&self.next().to_le_bytes());
+            chunk.copy_from_slice(&self.next_u64().to_le_bytes());
         }
         secret
     }
@@ -499,6 +499,11 @@ impl OwnerDirectory {
         self.owners.len()
     }
 
+    /// 是否为空。
+    pub fn is_empty(&self) -> bool {
+        self.len() == 0
+    }
+
     /// 登记一个新 owner；编号单调、generation 从 1 开始、route key 由种子派生。
     pub fn register(
         &mut self,
@@ -511,7 +516,7 @@ impl OwnerDirectory {
             domain,
             owner_id,
             generation: OwnerGeneration(1),
-            route_key: RouteKey(seed.next()),
+            route_key: RouteKey(seed.next_u64()),
             state: OwnerState::Active,
             forward_target: None,
             topology_epoch,
@@ -787,6 +792,11 @@ impl SlabTable {
     /// 返回描述符数量。
     pub fn len(&self) -> usize {
         self.descriptors.len()
+    }
+
+    /// 是否为空。
+    pub fn is_empty(&self) -> bool {
+        self.len() == 0
     }
 
     /// 按稠密编号取描述符。

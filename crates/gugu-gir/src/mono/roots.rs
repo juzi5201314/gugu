@@ -127,7 +127,7 @@ fn compute_roots(
         for glue in crate::contract::demand::IMAGE_ENTRIES {
             let definition =
                 crate::contract::demand::definition(context, glue).ok_or_else(|| {
-                    restore_error(&format!("镜像必需的 runtime 入口 `{glue}` 缺少执行定义"))
+                    restore_error(format!("镜像必需的 runtime 入口 `{glue}` 缺少执行定义"))
                 })?;
             push(
                 context,

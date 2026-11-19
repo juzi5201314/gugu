@@ -414,6 +414,10 @@ fn verify_live_pointers_are_rooted(
     Ok(())
 }
 
+#[expect(
+    clippy::too_many_arguments,
+    reason = "stack map 放置同时写入槽位、寄存器与类型化根"
+)]
 fn place_roots(
     body: &Body,
     fragment: &FragmentPayload,
@@ -443,6 +447,10 @@ fn place_roots(
     Ok(())
 }
 
+#[expect(
+    clippy::too_many_arguments,
+    reason = "stack map 放置同时写入槽位、寄存器与类型化根"
+)]
 fn place_root(
     body: &Body,
     fragment: &FragmentPayload,
@@ -472,6 +480,10 @@ fn place_root(
     }
 }
 
+#[expect(
+    clippy::too_many_arguments,
+    reason = "stack map 放置同时写入槽位、寄存器与类型化根"
+)]
 fn place_argument(
     body: &Body,
     target: TargetName,
@@ -536,6 +548,10 @@ fn place_by_value(
     set_slot(slots, class, byte / 8, slot_count)
 }
 
+#[expect(
+    clippy::too_many_arguments,
+    reason = "stack map 放置同时写入槽位、寄存器与类型化根"
+)]
 fn place_slot(
     body: &Body,
     fragment: &FragmentPayload,
@@ -737,9 +753,7 @@ fn block_start(fragment: &FragmentPayload, block: u32) -> Option<u32> {
         .map(|site| site.bytes.0)
 }
 
-fn unwind_tables(
-    prepared: &[Prepared<'_>],
-) -> Result<(Vec<UnwindFunction>, Vec<Landing>, Vec<Vec<(u8, u32)>>), Vec<Diagnostic>> {
+fn unwind_tables(prepared: &[Prepared<'_>]) -> Result<UnwindTables, Vec<Diagnostic>> {
     let mut functions = Vec::new();
     let mut landings = Vec::new();
     let mut saves = Vec::new();
@@ -764,13 +778,17 @@ fn unwind_tables(
     Ok((functions, landings, saves))
 }
 
-fn stackmap_inputs(
-    prepared: &[Prepared<'_>],
-) -> (
+/// 每个函数的 unwind 记录、landing 与 callee-saved 保存偏移。
+type UnwindTables = (Vec<UnwindFunction>, Vec<Landing>, Vec<Vec<(u8, u32)>>);
+
+/// code layout、带 layout 下标的 safepoint 与每个函数的 layout 下标。
+type StackmapInputs = (
     Vec<CodeLayout>,
     Vec<(u32, SafepointLayout)>,
     Vec<Option<u32>>,
-) {
+);
+
+fn stackmap_inputs(prepared: &[Prepared<'_>]) -> StackmapInputs {
     let mut layouts = Vec::new();
     let mut points = Vec::new();
     let mut stack_index = vec![None; prepared.len()];

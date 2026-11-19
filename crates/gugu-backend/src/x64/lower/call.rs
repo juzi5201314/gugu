@@ -354,6 +354,16 @@ fn emit_symbol_call(builder: &mut Builder, symbol: Symbol) -> Result<(), Lowerin
     Ok(())
 }
 
+fn emit_symbol_jump(builder: &mut Builder, symbol: Symbol) -> Result<(), LoweringError> {
+    builder.emit(
+        "jmp",
+        REL32,
+        Access::Read,
+        vec![Operand::Reloc(RelocTarget::Lir(symbol), RelocKind::PcRel32)],
+    );
+    Ok(())
+}
+
 #[cfg(test)]
 mod argument_tests {
     use super::*;
@@ -402,14 +412,4 @@ mod argument_tests {
             "第十实参必须在 rax 被第一个实参覆盖前写入 outgoing 区"
         );
     }
-}
-
-fn emit_symbol_jump(builder: &mut Builder, symbol: Symbol) -> Result<(), LoweringError> {
-    builder.emit(
-        "jmp",
-        REL32,
-        Access::Read,
-        vec![Operand::Reloc(RelocTarget::Lir(symbol), RelocKind::PcRel32)],
-    );
-    Ok(())
 }

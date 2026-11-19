@@ -49,6 +49,10 @@ struct Builder<'m, 'a> {
     type_cache: Vec<BTreeMap<Ty, hir::TypeId>>,
 }
 
+#[expect(
+    clippy::too_many_arguments,
+    reason = "HIR lowering 需要语义结果、依赖指纹与 query 上下文"
+)]
 pub(super) fn lower(
     model: &Model<'_>,
     names: &NameResolution,

@@ -316,6 +316,9 @@ pub fn link_with_layout(request: &PeRequest) -> Result<(PeImage, BTreeMap<String
 
 type Imports<'a> = Vec<(&'a str, Vec<&'a str>)>;
 
+/// `.text` 字节、已定义符号偏移与待修补的 RIP 相对站点。
+type TextSection = (Vec<u8>, BTreeMap<String, u64>, Vec<RipSite>);
+
 fn imports_for(request: &PeRequest) -> Result<Imports<'_>, String> {
     let mut imports: Imports<'_> = IMPORTS
         .iter()
@@ -527,9 +530,7 @@ fn section(name: &str, bytes: Vec<u8>, characteristics: u32) -> Section {
     }
 }
 
-fn assemble_prefix(
-    runtime_entry: bool,
-) -> Result<(Vec<u8>, BTreeMap<String, u64>, Vec<RipSite>), String> {
+fn assemble_prefix(runtime_entry: bool) -> Result<TextSection, String> {
     let mut text = Vec::new();
     let mut defined = BTreeMap::new();
     let mut sites = Vec::new();
@@ -956,6 +957,10 @@ fn rva_of(sections: &[Section], name: &str) -> Result<u64, String> {
         .ok_or_else(|| format!("节 {name} 缺失"))
 }
 
+#[expect(
+    clippy::too_many_arguments,
+    reason = "RIP 修补需要各节 RVA、符号表与导入表"
+)]
 fn patch_rip(
     sections: &mut [Section],
     text_rva: u64,
@@ -1293,7 +1298,7 @@ fn write_image(
     let populated = || sections.iter().filter(|section| !section.bytes.is_empty());
     let section_count = populated().count();
     let header = usize::try_from(header_size(section_count)?).map_err(|_| "PE header 越界")?;
-    let last = populated().last().ok_or_else(|| "没有节".to_owned())?;
+    let last = populated().next_back().ok_or_else(|| "没有节".to_owned())?;
     let last_bytes = u64::try_from(last.bytes.len()).map_err(|_| "PE 节大小越界")?;
     let file_len = usize::try_from(align_up(last.raw + last_bytes, FILE_ALIGN)?)
         .map_err(|_| "PE 文件大小越界")?;

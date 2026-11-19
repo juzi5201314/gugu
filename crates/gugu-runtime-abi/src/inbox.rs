@@ -524,6 +524,12 @@ pub struct PublishTicket {
     pub epoch: Epoch,
 }
 
+impl Default for EpochGate {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
 impl EpochGate {
     /// 创建开放 gate。
     pub fn new() -> Self {

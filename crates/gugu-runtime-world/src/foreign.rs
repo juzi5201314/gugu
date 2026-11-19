@@ -694,7 +694,7 @@ impl ForeignWorld {
     }
 
     pub fn lifecycle(&self, handle: CoroutineHandle) -> Result<CoroutineState, RawInvariant> {
-        Ok(self.table.get(handle)?.0.hot.lifecycle()?)
+        self.table.get(handle)?.0.hot.lifecycle()
     }
 
     pub fn detached(&self, handle: CoroutineHandle) -> Result<bool, RawInvariant> {

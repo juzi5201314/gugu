@@ -24,6 +24,9 @@ fn put(memory: &mut [u8], at: u64, value: u64) {
 #[derive(Debug)]
 struct RuntimeExit(u64);
 
+type CallbackHook = fn(&[u64], &mut Vec<u8>) -> u64;
+type ResourceHook = fn(&mut ResourceHarness<'_>, &mut Vec<u8>);
+
 pub(super) struct ResourceHarness<'a> {
     instances: std::collections::HashMap<[u8; 32], &'a Body>,
     runtime_bodies: std::collections::HashMap<(&'a str, &'a str), &'a Body>,
@@ -49,9 +52,9 @@ pub(super) struct ResourceHarness<'a> {
     gc_config: u64,
     clock: std::collections::VecDeque<u64>,
     block_budget: usize,
-    on_callback: Option<fn(&[u64], &mut Vec<u8>) -> u64>,
-    on_park: Option<fn(&mut ResourceHarness<'_>, &mut Vec<u8>)>,
-    on_close_wait: Option<fn(&mut ResourceHarness<'_>, &mut Vec<u8>)>,
+    on_callback: Option<CallbackHook>,
+    on_park: Option<ResourceHook>,
+    on_close_wait: Option<ResourceHook>,
     depth: usize,
 }
 
@@ -111,8 +114,7 @@ impl<'a> ResourceHarness<'a> {
     }
 
     fn body(&self, module: &str, name: &str) -> &'a Body {
-        *self
-            .runtime_bodies
+        self.runtime_bodies
             .get(&(module, name))
             .unwrap_or_else(|| panic!("未找到 runtime 入口 {module}.{name}"))
     }
@@ -182,7 +184,7 @@ impl<'a> ResourceHarness<'a> {
                     std::collections::hash_map::Entry::Occupied(entry) => *entry.get(),
                     std::collections::hash_map::Entry::Vacant(entry) => {
                         let address = self.next_global;
-                        self.next_global += (bytes + 7) / 8 * 8;
+                        self.next_global += bytes.div_ceil(8) * 8;
                         entry.insert(address);
                         address
                     }

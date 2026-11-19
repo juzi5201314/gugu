@@ -74,9 +74,9 @@ impl Ty {
             bits: 64,
         }
     }
-    pub fn deref(&self) -> &Self {
+    pub fn strip_refs(&self) -> &Self {
         match self {
-            Self::Ref(t) => t.deref(),
+            Self::Ref(t) => t.strip_refs(),
             _ => self,
         }
     }
@@ -884,7 +884,7 @@ impl<'a> Model<'a> {
             ty: t,
             public: true,
         };
-        match ty.deref() {
+        match ty.strip_refs() {
             Ty::Named(i, args) => {
                 let n = &self.nominal[*i];
                 let bindings = n.params.iter().cloned().zip(args.iter().cloned()).collect();
@@ -974,7 +974,7 @@ impl<'a> Model<'a> {
         }
     }
     pub fn find_field(&self, ty: &Ty, name: &str) -> Option<(usize, Ty, bool)> {
-        let Ty::Named(index, arguments) = ty.deref() else {
+        let Ty::Named(index, arguments) = ty.strip_refs() else {
             return None;
         };
         let nominal = &self.nominal[*index];
@@ -995,7 +995,7 @@ impl<'a> Model<'a> {
         Some((index, substitute(&field.ty, &bindings), field.public))
     }
     pub fn def_module(&self, ty: &Ty) -> Option<usize> {
-        match ty.deref() {
+        match ty.strip_refs() {
             Ty::Named(i, _) => Some(self.nominal[*i].definition.module),
             _ => None,
         }
@@ -1017,7 +1017,7 @@ impl<'a> Model<'a> {
         let whole = self.resolve(module, path).ok();
         let mut candidates = Vec::new();
         if let Some(ty) = expected {
-            let visible = match ty.deref() {
+            let visible = match ty.strip_refs() {
                 Ty::Named(index, _) => {
                     let nominal = &self.nominal[*index];
                     if nominal.is_enum {
@@ -1042,7 +1042,7 @@ impl<'a> Model<'a> {
                     .variants(ty)
                     .and_then(|vs| vs.into_iter().find(|v| v.name == *name))
             {
-                return Ok(Some((ty.deref().clone(), variant)));
+                return Ok(Some((ty.strip_refs().clone(), variant)));
             }
         }
         if expected.is_none() {

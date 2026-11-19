@@ -829,17 +829,15 @@ impl Builder<'_> {
             Origin::None,
         );
         self.store(address, tag, 1, false);
-        if !send {
-            if let (Some(payload), Some(payload_ty)) = (payload, payload_ty) {
-                let offset = self
-                    .fields(ty, 0, 1)
-                    .ok()
-                    .and_then(|fields| fields.first().copied())
-                    .map(|(offset, _)| offset)
-                    .unwrap_or(0);
-                let destination = self.offset(address, offset);
-                self.copy_memory(destination, payload, payload_ty)?;
-            }
+        if !send && let (Some(payload), Some(payload_ty)) = (payload, payload_ty) {
+            let offset = self
+                .fields(ty, 0, 1)
+                .ok()
+                .and_then(|fields| fields.first().copied())
+                .map(|(offset, _)| offset)
+                .unwrap_or(0);
+            let destination = self.offset(address, offset);
+            self.copy_memory(destination, payload, payload_ty)?;
         }
         let err_at = self
             .fields(ty, 1, 1)

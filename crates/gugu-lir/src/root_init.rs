@@ -42,7 +42,7 @@ impl InitSlots {
             for &block in &graph.order {
                 // must 语义：汇合点取前驱交集；无前驱（入口）视为尚未写入任何根字。
                 let incoming = predecessors(body, block);
-                let mut state = incoming.first().map_or_else(&empty, |edge| {
+                let mut state = incoming.first().map_or_else(empty, |edge| {
                     output[body.edges[edge.index()].from.index()].clone()
                 });
                 for edge in incoming.iter().skip(1) {

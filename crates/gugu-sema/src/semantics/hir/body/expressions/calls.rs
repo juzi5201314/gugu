@@ -468,7 +468,7 @@ impl BodyBuilder<'_, '_, '_, '_> {
         let target_id = self.type_id(target)?;
         if *source == Ty::Never {
             self.adjustments[value.index()].push(hir::Adjustment::NeverTo(target_id));
-        } else if matches!((source.deref(), target), (Ty::Array(_, _), Ty::Ref(inner)) if matches!(&**inner, Ty::Slice(_)))
+        } else if matches!((source.strip_refs(), target), (Ty::Array(_, _), Ty::Ref(inner)) if matches!(&**inner, Ty::Slice(_)))
         {
             self.adjustments[value.index()].push(hir::Adjustment::ArrayToSlice(target_id));
             self.expressions[value.index()]
@@ -642,7 +642,7 @@ impl BodyBuilder<'_, '_, '_, '_> {
     }
 
     fn is_len_self(ty: &Ty) -> bool {
-        matches!(ty.deref(), Ty::Array(_, _) | Ty::Slice(_))
+        matches!(ty.strip_refs(), Ty::Array(_, _) | Ty::Slice(_))
     }
 
     /// `std.src.caller()`：track_caller owner 读隐藏形参，普通 owner 折叠为

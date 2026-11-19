@@ -728,6 +728,10 @@ fn plt_name(index: usize) -> String {
     format!("__gugu_plt_{index}")
 }
 
+#[expect(
+    clippy::too_many_arguments,
+    reason = "ELF 组装需要符号表、重定位与各段边界"
+)]
 fn assemble(
     request: &LinkRequest,
     defined: &BTreeMap<String, u64>,
@@ -849,6 +853,7 @@ fn write_ehdr(file: &mut [u8], entry: u64, phnum: u16) -> Result<(), String> {
     Ok(())
 }
 
+#[expect(clippy::too_many_arguments, reason = "程序头表由各段边界逐项决定")]
 fn write_phdrs(
     file: &mut [u8],
     phnum: u16,
@@ -927,6 +932,7 @@ fn write_phdrs(
     Ok(())
 }
 
+#[expect(clippy::too_many_arguments, reason = "参数与 ELF 程序头字段一一对应")]
 fn write_phdr(
     file: &mut [u8],
     index: u16,

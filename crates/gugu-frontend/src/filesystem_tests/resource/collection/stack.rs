@@ -137,7 +137,7 @@ pub(super) fn verify_compiled_spills(output: &Compilation) {
     let mut rooted_points = 0;
     let mut call_points = 0;
     for point in &section.safepoints {
-        if !matches!(point.kind, 0 | 1 | 2) {
+        if !matches!(point.kind, 0..=2) {
             continue;
         }
         if point.kind == 0 {

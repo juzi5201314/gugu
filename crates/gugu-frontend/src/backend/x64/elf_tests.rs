@@ -466,7 +466,9 @@ fn dynamic_symbols_bind_got_and_survive_rt0_relocation() {
         })
         .unwrap();
     let tags: std::collections::BTreeMap<_, _> = image.bytes[dynamic.0..dynamic.0 + dynamic.1]
-        .chunks_exact(16)
+        .as_chunks::<16>()
+        .0
+        .iter()
         .map(|entry| (word(entry, 0), word(entry, 8) as usize))
         .collect();
     assert_eq!((tags[&9], tags[&11], tags[&8]), (24, 24, 48));

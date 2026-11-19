@@ -78,6 +78,12 @@ pub struct EmergencyBuffer {
     truncated: bool,
 }
 
+impl Default for EmergencyBuffer {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
 impl EmergencyBuffer {
     /// 创建空缓冲区。
     pub fn new() -> Self {

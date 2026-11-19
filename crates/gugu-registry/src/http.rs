@@ -75,7 +75,7 @@ impl Transport for UreqTransport {
             };
             let status = response.status().as_u16();
             if !matches!(status, 301 | 302 | 303 | 307 | 308) {
-                return Ok(read_response(response, request.max_body)?);
+                return read_response(response, request.max_body);
             }
             let location = response
                 .headers()
@@ -86,7 +86,7 @@ impl Transport for UreqTransport {
                 return Err(protocol(format!("重定向响应缺少 Location：`{url}`")));
             };
             let next = join_redirect(&url, &location)?;
-            if method == Method::Post && matches!(status, 301 | 302 | 303) {
+            if method == Method::Post && matches!(status, 301..=303) {
                 return Err(protocol("POST 不能跟随会改变方法的重定向"));
             }
             if origin(&next) != origin(&url) {
@@ -124,7 +124,7 @@ fn validate_url(url: &str) -> Result<(), RegistryError> {
 fn join_redirect(base: &str, location: &str) -> Result<String, RegistryError> {
     if location.contains("://") {
         return normalize_index_url_like(location)
-            .or_else(|_| Err(protocol(format!("重定向目标 `{location}` 非法"))));
+            .map_err(|_| protocol(format!("重定向目标 `{location}` 非法")));
     }
     if let Some(path) = location.strip_prefix('/') {
         return Ok(format!("{}/{path}", origin(base)));

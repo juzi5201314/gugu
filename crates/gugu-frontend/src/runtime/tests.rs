@@ -593,8 +593,8 @@ fn owner_retire_waits_for_queue_page_grace() {
     );
     let replacement = {
         let mut seed = RuntimeSeed::new(7);
-        seed.next();
-        seed.next()
+        seed.next_u64();
+        seed.next_u64()
     };
     let _ = replacement;
     assert!(
@@ -2435,10 +2435,12 @@ fn coroutine_pack_lane_map_matches_the_scheduler_mirror() {
         0,
         "整数段从包起始处开始"
     );
-    assert!(
-        pack::COROUTINE_PACK_LANES * pack::COROUTINE_PACK_TRACE_BITS <= 64,
-        "lane map 必须落在一个机器字内"
-    );
+    const {
+        assert!(
+            pack::COROUTINE_PACK_LANES * pack::COROUTINE_PACK_TRACE_BITS <= 64,
+            "lane map 必须落在一个机器字内"
+        )
+    };
     // 编码：最后一个车道的最高位不能越过字宽，且非根车道不占用任何位。
     assert_eq!(pack::coroutine_pack_trace_shift(0), 0);
     assert_eq!(

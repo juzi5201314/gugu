@@ -143,6 +143,10 @@ impl FrameLayout {
 /// 校验 frame 各区域互不重叠且都落在 `payload_bytes` 内：outgoing、局部槽、逐根初始化字节、
 /// spill slot、copy scratch 与 save slot。布局按顺序累加这些区域，这条不变量是「每个消费者
 /// 都必须读布局给出的偏移，而不是自己再算一遍」的守卫。
+#[expect(
+    clippy::too_many_arguments,
+    reason = "守卫逐一核对帧布局给出的各个区域"
+)]
 fn frame_regions_are_disjoint(
     body: &Body,
     locals: &[LocalSlot],
@@ -210,20 +214,6 @@ fn assign_init_bytes(roots: &[usize], offset: &mut u32) -> Result<Vec<Option<u32
             .ok_or_else(|| AllocError::new("frame 负载溢出"))?;
     }
     Ok(bases)
-}
-
-#[cfg(test)]
-mod tests {
-    use super::assign_init_bytes;
-
-    /// 逐根初始化字节按根字数分配，紧邻局部槽之后；没有根字的槽不占 frame。
-    #[test]
-    fn init_bytes_are_allocated_per_root_word() {
-        let mut offset = 32_u32;
-        let bases = assign_init_bytes(&[0, 2, 0, 1], &mut offset).expect("布局");
-        assert_eq!(bases, [None, Some(32), None, Some(34)]);
-        assert_eq!(offset, 35, "字节数等于根字总数");
-    }
 }
 
 /// 计算 frame 布局并回填 spill slot 偏移。
@@ -718,5 +708,19 @@ pub const fn loc_of(location: Location) -> Loc {
         Location::Gpr(gpr) => Loc::Gpr(gpr),
         Location::Xmm(xmm) => Loc::Xmm(xmm),
         Location::Slot(slot) => Loc::Slot(slot),
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::assign_init_bytes;
+
+    /// 逐根初始化字节按根字数分配，紧邻局部槽之后；没有根字的槽不占 frame。
+    #[test]
+    fn init_bytes_are_allocated_per_root_word() {
+        let mut offset = 32_u32;
+        let bases = assign_init_bytes(&[0, 2, 0, 1], &mut offset).expect("布局");
+        assert_eq!(bases, [None, Some(32), None, Some(34)]);
+        assert_eq!(offset, 35, "字节数等于根字总数");
     }
 }

@@ -56,7 +56,7 @@ fn pinned_old_field_survives_minor_after_young_store() {
     );
     let moved = word(&memory, OLD + 16);
     assert!(
-        moved >= OLD && moved < OLD + 2097152,
+        (OLD..OLD + 2097152).contains(&moved),
         "年轻引用必须在清空 nursery 前被更新：{moved}"
     );
     assert_eq!(word(&memory, moved), 73);

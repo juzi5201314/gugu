@@ -101,6 +101,10 @@ impl<K: Clone + Eq, V: Clone> Map<K, V> {
         self.state.borrow().backing.len()
     }
 
+    pub fn is_empty(&self) -> bool {
+        self.len() == 0
+    }
+
     /// 普通读取：返回 value 的语义副本。
     pub fn get(&self, key: &K) -> Option<V> {
         let state = self.state.borrow();
@@ -316,6 +320,10 @@ impl<T: StableOrdKey> Set<T> {
 impl<T: Clone + Eq> Set<T> {
     pub fn len(&self) -> usize {
         self.map.len()
+    }
+
+    pub fn is_empty(&self) -> bool {
+        self.len() == 0
     }
 
     pub fn contains(&self, value: &T) -> bool {

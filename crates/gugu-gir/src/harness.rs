@@ -245,8 +245,7 @@ fn collect_module(
             .map(|symbol| module.tokens.intern.get_str(symbol).to_owned())
             .unwrap_or_default();
         let identity = format!("{}.{}", module.path, name);
-        if let Some(previous) = identities.insert(identity.clone(), ()) {
-            let _ = previous;
+        if identities.insert(identity.clone(), ()).is_some() {
             diagnostics.push(Diagnostic::error(
                 DiagnosticCode::InvalidDeclaration,
                 format!("重复的测试/benchmark 身份 `{identity}`"),
@@ -258,19 +257,18 @@ fn collect_module(
             diagnostics.push(invalid("#[test] 与 #[bench] 不能同标一项", &item.span));
             continue;
         }
-        if marks.test.is_some() {
-            if let Some((flags, expect, returns_result)) =
+        if marks.test.is_some()
+            && let Some((flags, expect, returns_result)) =
                 validate_test(module, declaration, &marks, source, &name, diagnostics)
-            {
-                cases.push(Case {
-                    module: module.path.clone(),
-                    name: name.clone(),
-                    identity: identity.clone(),
-                    flags,
-                    expect,
-                    returns_result,
-                });
-            }
+        {
+            cases.push(Case {
+                module: module.path.clone(),
+                name: name.clone(),
+                identity: identity.clone(),
+                flags,
+                expect,
+                returns_result,
+            });
         }
         if marks.bench.is_some()
             && validate_bench(module, declaration, &marks, source, diagnostics).is_some()
@@ -603,7 +601,7 @@ fn doctest_source(module: &ParsedModule, doctest: &Doctest) -> String {
             (item.visibility == Visibility::Pub)
                 .then_some(())
                 .and(item.name)
-                .and_then(|name| Some(module.tokens.intern.get_str(name).to_owned()))
+                .map(|name| module.tokens.intern.get_str(name).to_owned())
         })
         .collect();
     if !pubs.is_empty() {

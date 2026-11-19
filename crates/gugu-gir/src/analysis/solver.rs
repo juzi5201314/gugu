@@ -138,6 +138,10 @@ fn summary_dependents(members: &[SccMember], component: &[usize]) -> Vec<Vec<usi
     dependents
 }
 
+#[expect(
+    clippy::too_many_arguments,
+    reason = "成员分析需要 SCC、已知摘要、策略与传参表"
+)]
 fn analyze_member(
     module: &Module,
     gir: &GirWorldV1,

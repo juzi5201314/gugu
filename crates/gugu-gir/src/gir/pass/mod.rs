@@ -587,13 +587,13 @@ impl LocalSet {
     pub fn iter(&self) -> impl Iterator<Item = super::body::LocalId> + '_ {
         self.words.iter().enumerate().flat_map(|(index, &word)| {
             let base = index * 64;
-            (0..64).filter_map(move |bit| {
-                (word >> bit & 1 == 1).then(|| {
+            (0..64)
+                .filter(move |bit| word >> bit & 1 == 1)
+                .map(move |bit| {
                     super::body::LocalId(
                         u32::try_from(base + bit).expect("local 下标已由 HIR 验证"),
                     )
                 })
-            })
         })
     }
 }

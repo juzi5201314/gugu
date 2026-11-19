@@ -44,7 +44,9 @@ fn linux_process_image_imports_environment_as_data_not_a_plt_function() {
     };
     let start = usize::try_from(u64::from_le_bytes(dynamic[8..16].try_into().unwrap())).unwrap();
     let entries: Vec<_> = bytes[start..]
-        .chunks_exact(16)
+        .as_chunks::<16>()
+        .0
+        .iter()
         .take_while(|entry| entry[..8] != [0; 8])
         .collect();
     let tag = |key: u64| {
@@ -66,7 +68,9 @@ fn linux_process_image_imports_environment_as_data_not_a_plt_function() {
     let symbols = &bytes[offset(tag(6))..][..symbol_count * 24];
     let strings = &bytes[offset(tag(5))..];
     let index = symbols
-        .chunks_exact(24)
+        .as_chunks::<24>()
+        .0
+        .iter()
         .position(|symbol| {
             let name =
                 usize::try_from(u32::from_le_bytes(symbol[..4].try_into().unwrap())).unwrap();
@@ -75,7 +79,9 @@ fn linux_process_image_imports_environment_as_data_not_a_plt_function() {
         .expect("宿主 environ 数据符号");
     assert_eq!(symbols[index * 24 + 4] & 15, 1, "environ 必须是 STT_OBJECT");
     let relocations: Vec<_> = bytes[offset(tag(7))..][..usize::try_from(tag(8)).unwrap()]
-        .chunks_exact(24)
+        .as_chunks::<24>()
+        .0
+        .iter()
         .map(|entry| u64::from_le_bytes(entry[8..16].try_into().unwrap()))
         .filter(|info| *info >> 32 == u64::try_from(index).unwrap())
         .collect();

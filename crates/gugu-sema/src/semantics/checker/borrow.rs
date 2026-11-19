@@ -17,7 +17,7 @@ impl AddressPath {
     }
     fn unref(&mut self) {
         if matches!(self.ty, Ty::Ref(_)) {
-            self.ty = self.ty.deref().clone();
+            self.ty = self.ty.strip_refs().clone();
             self.base = self.ty.clone();
             self.projection.clear();
         }

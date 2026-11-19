@@ -144,7 +144,7 @@ impl C<'_, '_> {
             return self.pattern(inner, ty);
         }
         let original_ty = ty;
-        let ty = ty.deref();
+        let ty = ty.strip_refs();
         match &pat.kind {
             PatKind::Wildcard => P::Any,
             PatKind::Ident(_) | PatKind::At { .. } => unreachable!("绑定保留原始引用类型"),
@@ -391,7 +391,7 @@ fn covered(model: &Model<'_>, types: &[Ty], rows: &[Vec<P>]) -> bool {
         let remaining: Vec<_> = rows.iter().map(|row| row[1..].to_vec()).collect();
         return covered(model, &types[1..], &remaining);
     }
-    let ty = types[0].deref();
+    let ty = types[0].strip_refs();
     if *ty == Ty::Never {
         return true;
     }

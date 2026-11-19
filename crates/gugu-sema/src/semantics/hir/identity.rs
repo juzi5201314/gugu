@@ -84,11 +84,7 @@ pub(super) fn collect(
                 .iter()
                 .find(|item| item.span == definition.span)
                 .is_some_and(|item| {
-                    model.has_attribute(
-                        definition.module.index(),
-                        item.attributes.clone(),
-                        "track_caller",
-                    )
+                    model.has_attribute(definition.module.index(), item.attributes, "track_caller")
                 }),
             span: Some(definition.span.clone()),
             name: definition.name.clone().unwrap_or_default(),

@@ -106,6 +106,7 @@ fn queue(h: &mut Harness<'_>, memory: &mut Vec<u8>, state: u64, control: u64) {
     put(memory, state + 24, 2);
     h.invoke(WAIT, "append", &[control], memory);
 }
+#[expect(clippy::ptr_arg, reason = "签名需与 native_hook 一致")]
 fn readiness(h: &mut Harness<'_>, op: u64, request: u64, memory: &mut Vec<u8>) {
     if op == 10 {
         let state = request - 2048;

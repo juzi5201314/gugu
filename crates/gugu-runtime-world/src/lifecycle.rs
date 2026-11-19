@@ -12,6 +12,12 @@ pub struct Lifecycle {
     state: LifecycleStateName,
 }
 
+impl Default for Lifecycle {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
 impl Lifecycle {
     /// rt0 开始执行时进程处于 `Booting`。
     pub const fn new() -> Self {

@@ -441,7 +441,7 @@ impl Checker<'_, '_> {
         if let Some((pat, iter)) = iter {
             let ty = self.expression(iter, None);
             natural_exit = Some(self.state.clone());
-            let elem = match ty.deref() {
+            let elem = match ty.strip_refs() {
                 Ty::Array(t, _) | Ty::Slice(t) => (**t).clone(),
                 Ty::Range => Ty::int(),
                 _ => self.user_iterator(iter, &ty),

@@ -58,10 +58,12 @@ fn shared_table_layout_matches_runtime_source() {
         SHARED_PAYLOADS_OFFSET,
         SHARED_ADDRESSES_OFFSET + SHARED_SLOT_COUNT * 8
     );
-    assert!(
-        SHARED_PAYLOADS_OFFSET + SHARED_SLOT_COUNT * SHARED_PAYLOAD_RECORD_BYTES
-            <= SHARED_TABLE_BYTES
-    );
+    const {
+        assert!(
+            SHARED_PAYLOADS_OFFSET + SHARED_SLOT_COUNT * SHARED_PAYLOAD_RECORD_BYTES
+                <= SHARED_TABLE_BYTES
+        )
+    };
 }
 
 /// 内建 SharedHeap profile 名。

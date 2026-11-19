@@ -715,7 +715,7 @@ impl Checker<'_, '_> {
                 let index_ty =
                     self.path_value(expression, path, true, Some(&Ty::int()), AstRange::empty());
                 self.unify(&index_ty, &Ty::int(), span);
-                match ty.deref() {
+                match ty.strip_refs() {
                     Ty::Array(element, _) | Ty::Slice(element) => {
                         if self.unsafe_depth == 0 {
                             self.record_check(
@@ -811,7 +811,7 @@ impl Checker<'_, '_> {
                 span.clone(),
             );
         }
-        if let Ty::Tuple(ts) = ty.deref()
+        if let Ty::Tuple(ts) = ty.strip_refs()
             && let Ok(i) = name.parse::<usize>()
             && let Some(ty) = ts.get(i)
         {
@@ -838,7 +838,7 @@ impl Checker<'_, '_> {
         match index {
             IndexKind::Expr(i) => {
                 self.expression(i, Some(&Ty::int()));
-                match ty.deref() {
+                match ty.strip_refs() {
                     Ty::Array(t, _) | Ty::Slice(t) => {
                         if self.unsafe_depth == 0 {
                             self.record_check(
@@ -855,7 +855,7 @@ impl Checker<'_, '_> {
                 for i in [start, end].into_iter().flatten() {
                     self.expression(i, Some(&Ty::int()));
                 }
-                match ty.deref() {
+                match ty.strip_refs() {
                     Ty::Array(t, _) | Ty::Slice(t) => {
                         if self.unsafe_depth == 0 {
                             self.record_check(

@@ -74,6 +74,10 @@ pub(super) fn lower(
     }
 }
 
+#[expect(
+    clippy::too_many_arguments,
+    reason = "分配 lowering 需要 descriptor、对齐、placement 与站点值"
+)]
 fn gc_alloc(
     descriptor: [u8; 32],
     align: u32,
@@ -189,6 +193,10 @@ fn fast_path_eligible(descriptor: [u8; 32], align: u32, ctx: LowerCtx<'_>) -> bo
     align.is_power_of_two() && align <= 256 && total <= u64::from(GC_BLOCK_BYTES)
 }
 
+#[expect(
+    clippy::too_many_arguments,
+    reason = "分配 lowering 需要 descriptor、对齐、placement 与站点值"
+)]
 fn bump(
     dest: Option<Reg>,
     descriptor: [u8; 32],
@@ -218,7 +226,7 @@ fn bump(
     let (Ok(adjust), Ok(mask), Ok(block_limit)) = (
         i32::try_from(OBJECT_HEADER_BYTES + granular - 1),
         i32::try_from(-(granular as i64)),
-        i32::try_from(u64::from(GC_BLOCK_BYTES) + 1 - u64::from(OBJECT_HEADER_BYTES) - granular),
+        i32::try_from(u64::from(GC_BLOCK_BYTES) + 1 - OBJECT_HEADER_BYTES - granular),
     ) else {
         return slow_alloc(
             dest, descriptor, align, placement, compressed, bytes, ctx, builder, slow,
@@ -514,6 +522,10 @@ fn mark_start(builder: &mut Builder, range_bytes: u64, bitmap_offset: u64, scrat
 /// `rax` = type_id、`rbx` = payload_bytes、`rcx` = align、`rdx` = flags（bit0 压缩、bits1..2
 /// placement 编码），`rax` 返回 payload。bytes 先搬进 `rbx`，避免随后写 `rax`/`rcx`/`rdx` 的
 /// 立即数覆盖仍要读的操作数寄存器。descriptor 未登记或没有 type_id 是编译期诊断，不放行。
+#[expect(
+    clippy::too_many_arguments,
+    reason = "分配 lowering 需要 descriptor、对齐、placement 与站点值"
+)]
 fn slow_alloc(
     dest: Option<Reg>,
     descriptor: [u8; 32],
@@ -566,15 +578,15 @@ fn slow_alloc(
             RelocKind::PcRel32,
         )],
     );
-    if let Some(dest) = dest {
-        if dest != gpr(Gpr::Rax) {
-            builder.emit(
-                "mov",
-                move_kinds(64),
-                Access::Write,
-                vec![reg(dest), reg(gpr(Gpr::Rax))],
-            );
-        }
+    if let Some(dest) = dest
+        && dest != gpr(Gpr::Rax)
+    {
+        builder.emit(
+            "mov",
+            move_kinds(64),
+            Access::Write,
+            vec![reg(dest), reg(gpr(Gpr::Rax))],
+        );
     }
     Ok(())
 }

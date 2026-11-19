@@ -96,7 +96,7 @@ pub struct FragmentBlob {
     pub relocations: Vec<Relocation>,
 }
 
-/// morestack 邮箱字段偏移的唯一来源是 `MorestackMailbox` 结构；片段是这些偏移的机器级消费者。
+// morestack 邮箱字段偏移的唯一来源是 `MorestackMailbox` 结构；片段是这些偏移的机器级消费者。
 
 /// 编码器输出的通用片段：固定字节 + 修补点。
 #[derive(Clone, Debug, Eq, PartialEq)]
@@ -2068,7 +2068,8 @@ mod tests {
             .unwrap()
             .with_code(morestack_entry_code(), main_return_code());
         verify_coroutine_code(&contract).expect("编码器产物自洽");
-        let corruptions: [(&str, fn(&mut CoroutineRuntimeContract)); 7] = [
+        type Corruption = (&'static str, fn(&mut CoroutineRuntimeContract));
+        let corruptions: [Corruption; 7] = [
             ("改片段字节", |c| c.morestack.bytes[0] ^= 1),
             ("截断片段", |c| {
                 let len = c.morestack.bytes.len();
