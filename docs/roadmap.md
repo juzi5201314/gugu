@@ -584,10 +584,11 @@
   - 验收：性能参数只由真实 workload、确定性 model 和 release 镜像数据调整；确认 direct mode、MosaicThroughput、MosaicLowLatency、radix/security profile 的代价；不得用针对单一 benchmark 的特殊路径宣称生产级性能。
   - 接入证据：新增 `cargo bench -p gugu-compiler --bench workload_gate`（`harness = false`，不进默认套件）：以 channel/select、I/O、FFI、repr(C) 聚合混合源对 Linux/Windows 双目标端到端编译并报告编译 µs、镜像字节数与 action key；以 `gugu-runtime-world` 确定性 `RawWorld`（即规范参照模型，非 benchmark 特化路径）运行 3 producer × 4096 项 owner return 工作负载（各 producer 自归还，`pending_return_bytes` 记分配方账本），direct 与 temporal radix 两种 routing profile 各测发布/消费 item/µs、单次发布尾 µs 与 `remote_return_hops`（direct=0、radix=192），发布计时覆盖 radix 逐跳交付，并断言 exactly-once 消费与各 owner 账本 pending 清零；分配-归还循环经 `local_return` 构成完整复用周期并报告 op/µs。`docs/src/internals/performance.md` 登记门禁原则（性能参数只由真实 workload/确定性 model/release 镜像数据调整）、指标单位与全部已登记 workload 矩阵，SUMMARY 导航同步。实测：linux 编译 1.15s/2.50MB、windows 1.13s/2.61MB、direct 2.49 item/us、radix 2.72 item/us、alloc-return 3.10 op/us。百万协程、GC pause、remark/evacuation 与 cache hit 的归口测量由既有 coroutine_context/pipeline_baseline/GC bench 与后续 profile 扩展承载，performance.md 如实登记边界。
 
-- [ ] **阶段 78：完成用户教程与规范参考手册**（复杂度：4）
+- [x] **阶段 78：完成用户教程与规范参考手册**（复杂度：4）
   - 依赖：阶段 59–74 的公开 API 基本稳定。
   - 补齐 `docs/src/guide/`：语言入门、值/句柄/资源、并发/取消、comptime/宏、包构建、FFI/unsafe、测试和部署；补齐 `docs/src/reference/`：语法速查、类型/trait、标准库 API、CLI、诊断码、运行时配置、ABI 与兼容性矩阵。
   - 验收：每个示例可由 test/doc build 编译；教程不把 runtime 内部细节写成语言语义；参考手册链接到唯一规范章节；更新 `docs/src/SUMMARY.md` 后 mdBook 无断链、无未决占位文本。
+  - 接入证据：`docs/src/guide/` 新增 8 章（getting-started、values-handles、concurrency、comptime-macros、package-build、ffi-unsafe、testing、deployment），`docs/src/reference/` 新增 7 章（syntax-cheatsheet、types-traits、stdlib-api、cli、diagnostics、runtime-config、abi-compat），SUMMARY 分节导航接入。新增 `crates/gugu-compiler/tests/docs_examples.rs`：逐文件提取 ```` ```gugu `/```` ```gugu-test ` 围栏块并在进程内编译（无 `fn main` 的片段补空 main；test 围栏在普通域验证同一源码以落入单用例 3 秒上限），20 个用例按文件/块区间拆分全部通过；教程只写语言与公开 API 语义（runtime 内部一律链接 spec/internals 章节），参考手册每页链到唯一规范章节；mdBook 构建与 docs_links 锚点契约全绿。示例与实现同步过程中如实修正：std 尚未实现 `println`（用 panic/_ = 断言风格）、绑定默认可变无 `mut`、`Join.wait()` 返回 `Result[T, Panic]`、select 分支用已实现的 send/recv/`_` 形式、comptime 值块与 `comptime source` 宏块按已实现语法示例。
 
 - [ ] **阶段 79：执行最终生产发布门禁**（复杂度：5）
   - 依赖：阶段 01–78 全部完成。
