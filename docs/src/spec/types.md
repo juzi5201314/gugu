@@ -43,12 +43,14 @@
 
 `[]` 参数表可以混写类型参数与 `comptime` 参数，适用于 `fn`、`struct`、`enum`、`union`、`trait`、`impl`、`type`：
 
+<!-- docs-example: gap 未解析的编译期名称 -->
 ```gugu
 struct Block[T, comptime N: int] {
     data: [T; N]
 }
 ```
 
+<!-- docs-example: gap 未解析的编译期名称 -->
 ```gugu
 impl[T: Clone, comptime N: int] Clone for [T; N] {
     fn clone(self: &Self) [T; N] {
@@ -103,6 +105,8 @@ impl[T: Clone, comptime N: int] Clone for [T; N] {
 一元 `-` 只用于有符号整数与浮点。对无符号类型写 `-x` 是编译错误。按位取反是前缀 `~`，只用于整数。
 
 `==` `!=` `<` `<=` `>` `>=` 对内置标量、`string`、`TypeId`、由它们组成的元组与数组，由编译器直接实现，不走 trait。浮点按 IEEE 754（`NaN != NaN`，涉及 NaN 的序比较为 false）。用户 `struct` / `enum` 没有默认同等；要写 `==` 必须 `#[derive(Eq)]` 或手写 `impl Eq`。内置整数与浮点的算术同样由编译器直接降指令；语言同时给出对应的 `Add` 等 impl，使 `T: Add` 能用在 `int` 上。`string` 的 `+` / `+=` 也由编译器直接降成拼接，并同样提供 `Add` / `AddAssign` impl 供泛型代码使用，见下。
+
+元组与数组的直接相等比较逐元素应用标量相等规则，全部相等才为 true；`!=` 是其逻辑取反。浮点元素中的 NaN 与任何值（包括 NaN）都不相等，正负零相等。直接序比较按元素顺序作词典序比较：仅在当前元素相等时继续；第一个不等元素若因 NaN 无序，`<`、`>`、`<=`、`>=` 均为 false，不再检查后续元素。此前已有元素决定顺序时，后续 NaN 不影响结果。该直接比较不赋予浮点或含浮点聚合 `Eq` / `Ord` trait 资格。
 
 ## 引用 `&T`
 
@@ -164,6 +168,7 @@ impl[T: Clone, comptime N: int] Clone for [T; N] {
 
 除具名字段结构体外，允许**恰好一个字段**的元组结构体（newtype）。多字段禁止位置构造（避免和函数调用、元组变体混淆）。
 
+<!-- docs-example: parse -->
 ```gugu
 struct Point {
     pub x: int
@@ -335,6 +340,13 @@ impl dyn Any {
 恢复接口类型同样只做精确类型匹配：若容器保存的就是 `dyn Print`，可以取回 `dyn Print`；不能把保存的 `Point` 或另一个接口对象临时转换成 `dyn Print`。要接口对象，应在放入容器前显式按 `dyn Print` 擦除。
 
 ```gugu
+use std.any.{Any}
+
+struct Point {
+    pub x: int
+    pub y: int
+}
+
 fn demo(a: dyn Any) {
     if let Some(p) = a.downcast::[Point]() {
         p.x += 1

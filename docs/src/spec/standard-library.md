@@ -193,6 +193,7 @@ string 不支持单整数 `s[i]`，避免把 byte、Unicode scalar 和用户可�
 
 COW 值语义的用法：
 
+<!-- docs-example: gap string 没有适用的方法 `push` -->
 ```gugu
 fn demo() {
     let original = "gugu"
@@ -307,11 +308,30 @@ trait UpperExp  { fn upper_exp(self: &Self, out: &Formatter) }
 - precision 只适用于浮点（小数位数），以及 `Print` 格式下的 string（按 Unicode 标量截断）；
 - `#` 只适用于 `Debug`（逐行缩进的结构化输出）与 `Binary` / `Octal` / `LowerHex` / `UpperHex`（`0b` / `0o` / `0x` 前缀）。
 
-内建实现的输出固定为：整数 `Print` / `Debug` 是十进制并保留负号，进制格式按 64 位补码写出且不带负号；浮点 `Print` 不带 precision 时是最短往返表示，`Debug` 总是带小数部分，`e` / `E` 是尾数 1 位整数的科学计数，`NaN` / `inf` / `-inf` 不做 zero padding；bool 写 `true` / `false`；char 与 string 的 `Debug` 加引号并转义，string 的 `Debug` 不受 precision 截断。数值默认右对齐，文本默认左对齐；zero padding 在符号与 `#` 前缀之后补零。数组用 `[a, b]`、元组用 `(a, b)`、`Option` / `Result` 用 `Some(..)` / `Ok(..)` / `Err(..)` 的结构化 debug 形状。
+内建实现的输出固定为：整数 `Print` / `Debug` 是十进制并保留负号，进制格式按 64 位补码写出且不带负号；浮点 `Print` 不带 precision 时是源类型的最短往返十进制表示，f32 不扩宽到 f64 后再格式化。浮点格式与 Rust 的同类型格式化一致：`Debug` 无 precision 时选择普通小数或科学计数，普通小数形式的整数保留 `.0`；指定 precision 时输出固定的小数位数，零位允许没有小数点。`e` / `E` 是尾数 1 位整数的科学计数，precision 指尾数的小数位数；显式 precision 按精确值舍入，恰好居中时取偶。保留负零；`NaN` 不带符号，`inf` 可带请求的正号，`NaN` / `inf` / `-inf` 不做 zero padding，但仍支持 width、fill 和 alignment。bool 写 `true` / `false`；char 与 string 的 `Debug` 加引号并转义，string 的 `Debug` 不受 precision 截断。数值默认右对齐，文本默认左对齐；zero padding 在符号与 `#` 前缀之后补零。数组用 `[a, b]`、元组用 `(a, b)`、`Option` / `Result` 用 `Some(..)` / `Ok(..)` / `Err(..)` 的结构化 debug 形状。
 
 `std.fmt.Formatter` 只写入当前构建中的 string，不执行 I/O。格式 trait 实现可以调用 Formatter 的文本（`write_str` / `write_char`）、padding（`pad` 用于文本、`pad_integral` 用于带符号与前缀的数字）和结构化 debug（`debug_tuple` / `debug_list` / `debug_map` / `debug_struct`）方法，但不能读取或改变已解析的格式说明；`#` 是否生效由这些方法自行体现。f-string 构建失败只可能是 panic（例如内存耗尽或负的动态计数），不返回领域错误。comptime 域中的 f-string 使用同一套解析、兼容规则与内建实现，见[comptime capability registry](#comptime-capability-registry)。
 
-运行时 f-string 通过普通 trait 调用构建字符串；用户定义的 `Print` 实现与标准库实现使用相同的 `&Formatter` 目标。每个插值先求值一次，再读取该插值的动态 width / precision。`Formatter::new()` 建立空目标，`finish()` 返回当前字符串；每个插值的说明由编译器设置，不由用户格式 trait 修改。当前运行时标准库提供 string、char、bool 与全部整数类型的格式实现，以及上述文本和 padding 方法；浮点 `Print`（包括 `print` / `println` 等输出函数的浮点参数）、其它浮点格式与结构化 debug builder 尚未提供运行时实现，comptime 格式化不受此限制。
+运行时 f-string 通过普通 trait 调用构建字符串；用户定义的 `Print` 实现与标准库实现使用相同的 `&Formatter` 目标。每个插值先求值一次，再读取该插值的动态 width / precision。`Formatter::new()` 建立空目标，`finish()` 返回当前字符串；每个插值的说明由编译器设置，不由用户格式 trait 修改。当前运行时标准库提供 string、char、bool 与全部整数类型的格式实现，以及 f32 / f64 的 `Print`、`Debug`、`LowerExp`、`UpperExp`；浮点值可直接传给 `print` / `println` 等输出函数。上述文本、padding 和结构化 debug builder 方法均已实现。
+
+结构化 debug API 的签名如下（类型均在 `std.fmt` 中）：
+
+```text
+Formatter.debug_struct(self: &Self, name: string) DebugStruct
+Formatter.debug_tuple(self: &Self, name: string) DebugTuple
+Formatter.debug_list(self: &Self) DebugList
+Formatter.debug_set(self: &Self) DebugSet
+Formatter.debug_map(self: &Self) DebugMap
+DebugStruct.field[T: Debug](self: &Self, name: string, value: &T) &Self
+DebugTuple.entry[T: Debug](self: &Self, value: &T) &Self
+DebugList.entry[T: Debug](self: &Self, value: &T) &Self
+DebugSet.entry[T: Debug](self: &Self, value: &T) &Self
+DebugMap.entry[K: Debug, V: Debug](self: &Self, key: &K, value: &V) &Self
+```
+
+每种 builder 都有 `pub fn finish(self: &Self)`，返回 unit；`field` / `entry` 返回同一 builder 引用，可链式调用。`finish()` 追加结束定界符，重复调用不再追加；结束后追加条目会 panic。空 struct 只输出名字；空 tuple、list、set、map 分别输出 `Name()`、`[]`、`{}`、`{}`。非空 compact 输出依次为 `Name { field: value }`、`Name(a, b)`、`[a, b]`、`{a, b}`、`{key: value}`，按调用顺序排列；struct 字段名原样输出，map 键经 Debug 格式化。
+
+`{:#?}` 的 `#` 传给用户 `impl Debug` 的目标 Formatter。builder 逐行输出、每层缩进四个空格，非空末条目保留逗号；嵌套子项每个换行后的内容再缩进四个空格。子 Formatter 仅继承 `#` 并以 Debug 格式调用值，不继承父级 width、precision、sign、zero、fill 或 alignment。builder 不对整个结构做 padding。
 
 Formatter 追加文本不复制已有输出；累计追加 n 字节的存储量为 O(n)，`finish()` 线性物化当前内容的独立快照。
 
@@ -334,6 +354,8 @@ SmallVec[T, comptime N: int]
 SmallMap[K, V, comptime N: int]
 ```
 
+预导入的 `HashMap` / `HashSet` 与 `std.collections` 导出的同名类型相同；不需要显式 use 即可构造和使用。
+
 MultiMap 不作为独立标准类型；使用 `HashMap[K, Vec[V]]` 或 `BTreeMap[K, Vec[V]]` 组合，重复值顺序由所选 Vec 明确表达。
 
 Vec、Deque、BinaryHeap、LinkedList、BitSet、SmallVec 和全部 Map/Set 都是共享身份句柄：赋值只复制句柄，通过任一别名修改时，所有别名继续观察同一个逻辑集合。集合内部可以为快照迭代封存并替换 backing；这只改变物理表示，不把集合改成 COW 值语义。
@@ -344,35 +366,91 @@ Map 的普通读取返回 value 的语义副本，不公开会因 rehash、树�
 
 ```text
 impl[K: Eq + Hash + StableHash, V] HashMap[K, V] {
+    fn new() Self
+    fn len(self: &Self) int
+    fn is_empty(self: &Self) bool
     fn get(self: &Self, key: &K) Option[V]
+    fn contains_key(self: &Self, key: &K) bool
     fn with_ref[R, F: Fn(&V) R](self: &Self, key: &K, f: F) Option[R]
     fn for_each_ref[F: Fn(&K, &V) ()](self: &Self, f: F)
     fn insert(self: &Self, key: K, value: V) Option[V]
     fn remove(self: &Self, key: &K) Option[V]
     fn update[F: Fn(V) V](self: &Self, key: &K, f: F) bool
     fn entry(self: &Self, key: K) Entry[K, V]
+    fn iter(self: &Self) HashMapIter[K, V]
 }
 
 impl[K: Ord + StableOrd, V] BTreeMap[K, V] {
+    fn new() Self
+    fn len(self: &Self) int
+    fn is_empty(self: &Self) bool
+    fn get(self: &Self, key: &K) Option[V]
+    fn contains_key(self: &Self, key: &K) bool
     fn with_ref[R, F: Fn(&V) R](self: &Self, key: &K, f: F) Option[R]
     fn for_each_ref[F: Fn(&K, &V) ()](self: &Self, f: F)
-    /* 其它 value 访问操作同 HashMap */
+    fn insert(self: &Self, key: K, value: V) Option[V]
+    fn remove(self: &Self, key: &K) Option[V]
+    fn update[F: Fn(V) V](self: &Self, key: &K, f: F) bool
+    fn entry(self: &Self, key: K) BTreeEntry[K, V]
+    fn iter(self: &Self) BTreeMapIter[K, V]
+}
+
+impl[K: Eq + Hash + StableHash, V] Entry[K, V] {
+    fn or_insert(self: &Self, value: V) V
+    fn or_insert_with[F: Fn() V](self: &Self, f: F) V
+    fn and_modify[F: Fn(V) V](self: &Self, f: F) Self
+}
+
+impl[K: Ord + StableOrd, V] BTreeEntry[K, V] {
+    fn or_insert(self: &Self, value: V) V
+    fn or_insert_with[F: Fn() V](self: &Self, f: F) V
+    fn and_modify[F: Fn(V) V](self: &Self, f: F) Self
 }
 ```
 
-SecureHashMap、SmallMap 与 HashMap 使用同一组 value 访问操作和约束。`with_ref` 在 key 存在时对 value 建立 `ScopedRead` view，调用 callback 并返回 `Some` 结果；key 不存在时不调用 callback 并返回 `None`。`for_each_ref` 在一次共享结构访问期间按实现当前顺序逐项调用 callback，不创建 snapshot，也不复制 K/V。两者都不能在 callback 中修改同一 map：通过任一别名发出的 `insert`、`remove`、`update` 与 Entry 写入都必须等待 view 结束，在 view 内写入是 panic。整个 `with_ref` / `for_each_ref` 调用位于接收者的 view 动态 extent 内；callback 的无 suspend、无 escape 和 safepoint relocation 规则见[函数与闭包](functions.md#scoped-borrowed-view-callback)。
+`new` 建立空 Map；`len` 返回键数，`is_empty` 等价于长度为零。键按 Eq 相等或 Ord 比较等价视为同一键。`get` / `contains_key` 只查询；`insert` 在新键时返回 None，在已有键时替换 value 并返回旧值；`remove` 删除已有键并返回旧值，缺失时返回 None 且不改变长度。插入使长度超出 int 上界时 panic。BTreeMap 的查询、插入、删除使用 O(log len) 次键比较；其 `iter` 和 `for_each_ref` 都按键升序访问，每个键恰好一次。
 
-`update` 只在键存在时调用一次 `f`，把当前 value 的语义副本交给它，再以返回值替换槽；存在时返回 true。Entry 的 `and_modify`、`or_insert` 和 `or_insert_with` 同样只传入或返回语义副本，不产生集合内部引用。Set 的元素约束与对应 Map 的键约束相同。
+SecureHashMap、SmallMap 保留与 HashMap 相同的 value 访问契约和约束，当前版本尚未实现其完整可执行 API。`with_ref` 在 key 存在时对 value 建立 `ScopedRead` view，调用 callback 并返回 `Some` 结果；key 不存在时不调用 callback 并返回 `None`。`for_each_ref` 在一次共享结构访问期间逐项调用 callback，每个键恰好一次，空 Map 不调用 callback，不创建 snapshot，也不复制 K/V。两者都不能在 callback 中修改同一 map：通过任一别名发出的 `insert`、`remove`、`update` 与 Entry 写入在 view 内都是 panic，包括缺失键或本不会改变内容的写操作。整个 `with_ref` / `for_each_ref` 调用位于接收者的 view 动态 extent 内；callback 的无 suspend、无 escape 和 safepoint relocation 规则见[函数与闭包](functions.md#scoped-borrowed-view-callback)。
 
-标准集合的 `iter()` 捕获创建时快照，产生元素的语义副本；Map 的 Item 是 `(K, V)`。拥有独立 backing 的集合创建迭代器时 O(1) 封存 backing，之后通过任一集合别名发生的第一次修改先分离 backing，现有迭代器继续遍历旧快照。内联 Small 容器和 LinkedList 创建迭代器时分别复制至多 N 个槽和当前全部节点值，以保持相同快照语义；因此它们的迭代器创建成本分别是 O(N) 上界和 O(len)。迭代器与集合可以同时存活，修改集合不会让 `next` panic，也不会让迭代结果弱一致。需要避免大值复制时使用 Map 的 `with_ref`、Map 的 `for_each_ref` 或 LinkedList 的 `for_each_ref`；这些 API 不改变 `iter()` 的 snapshot 语义。
+`update` 只在键存在时调用一次 `f`，把当前 value 的语义副本交给它，再以返回值替换槽；存在时返回 true，缺失时不调用 f 并返回 false。`entry` 保存集合身份与键，不锁定当前是否存在；每次 Entry 操作都查询同一共享 Map 的当前状态。`and_modify` 等价于对该键 update 后返回 Entry；`or_insert` 在缺失时插入传入值，否则保留旧值；`or_insert_with` 只在缺失时调用一次 f 生成插入值。后两者返回最终 value 的语义副本。所有 Entry 操作只传入或返回语义副本，不产生集合内部引用。
+
+Set 的元素约束与对应 Map 的键约束相同：
+
+```text
+impl[T: Eq + Hash + StableHash] HashSet[T] {
+    fn new() Self
+    fn len(self: &Self) int
+    fn is_empty(self: &Self) bool
+    fn contains(self: &Self, key: &T) bool
+    fn insert(self: &Self, key: T) bool
+    fn remove(self: &Self, key: &T) bool
+    fn iter(self: &Self) HashSetIter[T]
+    fn for_each_ref[F: Fn(&T) ()](self: &Self, f: F)
+}
+
+impl[T: Ord + StableOrd] BTreeSet[T] {
+    fn new() Self
+    fn len(self: &Self) int
+    fn is_empty(self: &Self) bool
+    fn contains(self: &Self, key: &T) bool
+    fn insert(self: &Self, key: T) bool
+    fn remove(self: &Self, key: &T) bool
+    fn iter(self: &Self) BTreeSetIter[T]
+    fn for_each_ref[F: Fn(&T) ()](self: &Self, f: F)
+}
+```
+
+Set 的 `insert` 只在新增元素时返回 true，`remove` 只在实际删除时返回 true。`for_each_ref` 恰好访问每个现存元素一次，空 Set 不调用 callback；view 内通过任一别名写同一 Set 必须 panic。BTreeSet 的遍历为升序。四种 Map/Set 均实现 IntoIter；其关联迭代器实现 Iter，Map 的 Item 为 `(K, V)`，Set 为 T，耗尽后继续返回 None。
+
+标准集合的 `iter()` 捕获创建时快照，产生元素的语义副本；Map 的 Item 是 `(K, V)`。Vec、HashMap、HashSet、BTreeMap、BTreeSet 创建迭代器的成本是 O(1)，之后通过任一集合别名插入、删除或替换值都不改变现有迭代器观察的键和值，每个快照元素恰好出现一次；这不递归复制元素内部的共享身份对象。内联 Small 容器和 LinkedList 创建迭代器时分别复制至多 N 个槽和当前全部节点值，以保持相同快照语义；因此它们的迭代器创建成本分别是 O(N) 上界和 O(len)。迭代器与集合可以同时存活，修改集合不会让 `next` panic，也不会让迭代结果弱一致。需要避免大值复制时使用 Map 的 `with_ref`、Map 的 `for_each_ref` 或 LinkedList 的 `for_each_ref`；这些 API 不改变 `iter()` 的 snapshot 语义。
 
 SmallVec 与 SmallMap 的 N 必须是非负 comptime 整数。它们的 GC 对象内含 N 个连续内联槽，复制容器仍只复制共享身份句柄；元素超过 N 后溢出到堆 backing，别名、相等、修改和迭代语义不变。SmallMap 在内联阶段使用至多 N 项的紧凑线性查找，溢出后使用与 HashMap 相同的表表示；N 是调用方明确提供的小规模上界，不是运行时猜测阈值。
 
 LinkedList 的节点是具有稳定 GC 身份且不复用代际的对象。`ListCursor[T]` 绑定 list 身份、node 身份与 node generation；`cursor_front`、`cursor_back`、`insert_before`、`insert_after`、`remove`、`splice_before`、`splice_after` 和 `value` / `update` 都返回 `Result[..., StaleCursor]`，不暴露节点引用。另提供 `for_each_ref[F: Fn(&T) ()](self: &Self, f: F)`：它在一次受保护遍历中直接访问节点值，不创建 snapshot或复制 T；callback 不能结构性修改该 list，且遵守 scoped view 的无 suspend、无 escape 和 relocation 规则。插入和同一 list 内的重排不使既有 cursor 失效；删除节点会使其全部 cursor 变为 stale。把另一 list 的节点 splice 进当前 list 时，目标 cursor 以及两边未移动节点的 cursor 仍有效，绑定到被移动节点旧 list 身份的 cursor 变为 stale。StaleCursor 是普通领域错误，不是 panic 或未定义行为。
 
-HashMap/HashSet 使用 hashbrown/SwissTable 类的 control-byte group、SIMD lookup 与三角 group probing；具体 group 宽度、装载阈值和内存布局不是稳定 ABI，可以随目标指令集和工具链改变。迭代顺序不保证，也可以在不同进程、不同表和不同工具链间变化。
+HashMap/HashSet 的表示和内存布局不是稳定 ABI，可以随目标指令集和工具链改变。迭代顺序不保证，也可以在不同进程、不同集合和不同工具链间变化。
 
-默认 HashMap/HashSet 使用随机化 FoldHash-fast。它追求整数和 string 键的吞吐，不承诺抵抗能与进程交互并观察行为的 HashDoS 攻击。SecureHashMap/SecureHashSet 使用由 OS CSPRNG 初始化的 SipHash 1-3，供不可信键使用。两组类型的集合语义相同，不能依赖具体 hash 值或迭代顺序。
+默认 HashMap/HashSet 使用 FoldHash-fast，seed 由实现选择，允许在不同进程和工具链间变化。它追求整数和 string 键的吞吐，不承诺抵抗能与进程交互并观察行为的 HashDoS 攻击。SecureHashMap/SecureHashSet 保留由 OS CSPRNG 初始化的 SipHash 1-3 契约，供不可信键使用；当前版本仅保留类型声明，其实现是后续工作。不能依赖具体 hash 值或迭代顺序。
 
 `std.hash.Hasher` 是预导入的普通名义值类型，当前公开确定性 FoldHash-fast 接口：
 
@@ -1085,9 +1163,9 @@ fn root_publish[T](place: T, value: T)
 enum Signal {
     Interrupt,
     Terminate,
-    #[cfg(os = "linux")] Hangup,
-    #[cfg(os = "linux")] User1,
-    #[cfg(os = "linux")] User2,
+    #[cfg(any(os = "linux", os = "macos"))] Hangup,
+    #[cfg(any(os = "linux", os = "macos"))] User1,
+    #[cfg(any(os = "linux", os = "macos"))] User2,
     #[cfg(os = "windows")] Break,
 }
 

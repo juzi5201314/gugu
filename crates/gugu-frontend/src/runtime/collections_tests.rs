@@ -12,7 +12,9 @@ fn compile(source: &str) -> crate::Compilation {
 
 #[test]
 fn collection_views_and_handle_copies_lower_in_generic_gir() {
-    let compilation = compile("fn main() {}");
+    let compilation = compile(
+        "use std.collections.{HashMap, BTreeMap}\nfn peek(map: HashMap[int, int]) Option[int] {\n let key = 1\n map.with_ref(&key, fn(value: &int) int = 0) }\nfn walk(map: BTreeMap[int, int]) {\n map.for_each_ref(fn(key: &int, value: &int) {}) }\nfn share(map: HashMap[int, int]) {\n let alias = map\n _ = alias }\nfn main() {}",
+    );
     assert!(compilation.is_success());
     let dump = compilation.dump_gir().expect("GIR");
     let body = |owner: &str| {

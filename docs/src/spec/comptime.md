@@ -20,6 +20,7 @@ comptime 宏则运行一段编译期脚本，生成源码文本，再把文本�
 
 ## 值 comptime 语法
 
+<!-- docs-example: gap 未解析的编译期名称 -->
 ```gugu
 fn repeat[T](comptime n: int, x: T) [T; n] {
     let a: [T; n]
@@ -158,6 +159,7 @@ comptime 中调用它，必须使用带明确片段类别的便利入口。
 解析失败返回 `Err(SyntaxError)`，脚本可以用普通 `match`、`?` 或其它控制流捕获并
 转换错误：
 
+<!-- docs-example: parse -->
 ```gugu
 comptime source {
     let text = make_source()
@@ -265,6 +267,7 @@ unknown；unknown 不能删除运行时检查，也不能被当成 lint 错误�
 
 例如：
 
+<!-- docs-example: parse -->
 ```gugu
 fn demo() {
     let n = 20

@@ -218,9 +218,11 @@ pub(crate) fn build(
         unwind_index: 0,
         runtime_bridge: false,
         panic_landing: false,
-        has_stack_interior: points
-            .iter()
-            .any(|(_, map)| map.registers[4] != 0 || map.slots[4].iter().any(|word| *word != 0)),
+        has_stack_interior: points.iter().any(|(_, map)| {
+            map.registers[4] != 0
+                || map.slots[4].iter().any(|word| *word != 0)
+                || map.typed.iter().any(|root| root.root_kind == 4)
+        }),
     };
     let stackmaps = stackmap_codec::encode_for(StackMapArchitecture::Aarch64, &[code], &points)
         .map_err(fail)?;

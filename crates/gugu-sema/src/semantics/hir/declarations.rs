@@ -213,9 +213,23 @@ impl Builder<'_, '_> {
                     | ast::ItemKind::Const { value: Some(_), .. } => {
                         Some(self.model.value_type(definition)?)
                     }
-                    ast::ItemKind::Const { ty: Some(ty), .. }
-                    | ast::ItemKind::TypeAlias { ty: Some(ty), .. } => {
+                    ast::ItemKind::Const { ty: Some(ty), .. } => {
                         Some(self.model.form(definition.module, ty)?)
+                    }
+                    ast::ItemKind::TypeAlias {
+                        ty: Some(ty),
+                        generics,
+                    } => {
+                        let mut parameters =
+                            self.model.parameters_at(definition.module, &item.span);
+                        parameters
+                            .extend(self.model.generic_parameters(definition.module, generics));
+                        Some(self.model.form_inner(
+                            definition.module,
+                            ty,
+                            &parameters,
+                            &mut Vec::new(),
+                        )?)
                     }
                     ast::ItemKind::Struct { .. }
                     | ast::ItemKind::Enum { .. }
@@ -519,6 +533,9 @@ fn constant_literal(value: &super::super::model::ConstantValue) -> Option<hir::L
     Some(match value {
         ConstantValue::Int(value) => hir::Literal::Integer(*value as u128),
         ConstantValue::Float(value) => hir::Literal::Float(*value),
+        ConstantValue::Float32(value) => {
+            hir::Literal::Float(f64::from(f32::from_bits(*value)).to_bits())
+        }
         ConstantValue::Bool(value) => hir::Literal::Bool(*value),
         ConstantValue::String(value) => hir::Literal::String(value.clone()),
         // 非字面量常量经成员 definition 的 HIR initializer 消费。

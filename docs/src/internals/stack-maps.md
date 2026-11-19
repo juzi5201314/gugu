@@ -87,6 +87,7 @@ v5 header byte 24 的 u32 为架构 tag 183，byte 28 的 u32 仍为零。v4 隐
 只接受 (version=4, tag=0) 与 (version=5, tag=183)，未知组合拒绝。
 
 A64 用五个 u32 register mask，xN 的位号就是 N（0..30）；SP/bit31 不编码。
+A64 函数的 has_stack_interior 标志包含 typed/gated 的 StackInterior 根，即使寄存器掩码和固定槽位图均为空；初始化字节只门控本次扫描，不消除函数的换栈修正义务。
 x16/x17 scratch、x18 platform、x27/x28 runtime context、x29 FP 与 x30 LR 不得为用户根。
 CallReturn/PollResume/SuspendResume/ForeignBridge 的 mask 全零；MorestackEntry 仅可
 登记 x0-x8 参数根，slot_count=0 且无 typed root。非入口点的根槽与初始化字节必须在 frame 内。
@@ -150,6 +151,7 @@ LIR 为每个栈槽维护逐根字段的初始化事件流 `RootInit { slot, pos
 - 整值写入但来源变体不可知时（从别的槽、参数或返回值复制整值），按覆盖范围保守置位全部并集条目。这类动态多变体副本要收窄到实际变体需要类型 trace，属于后续集成变更；
 - 复位：`StorageLive`（建立新值）与 `StorageDead`（结束占用）清空该槽全部位，旧值的位不得被新值继承；
 - 位置顺序是语义的一部分：`Reset` 之后必须有新的 `Set`，该根字才能被当成指针，所以重写 pass 必须用同一份锚点映射精确定位每个事件，不能丢弃或钳位到块尾；
+- 初始化证明使用块内指令位置（安全点 instruction 减去所属块的 instructions.start），不能使用带块排序前缀的 LogicalSafepoint.position；安全点之后的 Set 不得影响当前图；
 - 消费者只追踪置位的根字；未置位的并集条目表示该字在当前值里是标量或尚未写入。
 
 帧内位图已接线：`FrameLayout::init_bases` 为每个带根字的栈槽在 frame 内分配**每根一字节**的区域（`base + bit`），`alloc/rewrite.rs` 在每个站点代码之前按块内位置游标发射 `mov byte [rsp + offset], 1/0`。选一字节一根而不是位图字，是因为置位与复位都不需要读改写、不占用 scratch 寄存器；站点游标保证这些写入落在那次读取位图的安全点之前，块尾把剩余事件全部刷新。每帧位图与普通值存储分开，未初始化 payload 不会被读到。

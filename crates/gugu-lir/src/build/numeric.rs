@@ -1,9 +1,37 @@
+use super::comparison::UNORDERED;
 use super::values::Computed;
 use super::{Builder, Diagnostic, TypeKind, invalid};
 use crate::body::{Condition, FloatOp, IntOp, Op, Origin, RuntimeCall, Type, ValueId, ValueType};
 use crate::gir::body::{BinaryOp, CheckOpKind, CompareOp, Operand, UnaryOp};
 
 impl Builder<'_> {
+    pub(super) fn comparison_protocol(
+        &mut self,
+        protocol: crate::gir::concrete::Protocol,
+        operands: &[Operand],
+        ty: u32,
+    ) -> Result<Computed, Diagnostic> {
+        let left = self.comparison_argument(&operands[0])?;
+        let right = self.comparison_argument(&operands[1])?;
+        if protocol == crate::gir::concrete::Protocol::Eq {
+            return self.compare_computed(CompareOp::Eq, left, right, ty);
+        }
+        let result = self.comparison_result(left, right, false)?;
+        Ok(Computed::Values {
+            ty,
+            values: vec![result],
+        })
+    }
+
+    fn comparison_argument(&mut self, operand: &Operand) -> Result<Computed, Diagnostic> {
+        let value = self.operand(operand)?;
+        let TypeKind::Reference(ty) = *self.kind(value.ty()) else {
+            return Err(invalid("比较 trait 实参必须是引用"));
+        };
+        let address = self.computed_values(value)?[0];
+        Ok(Computed::Address { ty, address })
+    }
+
     pub(super) fn binary(
         &mut self,
         op: BinaryOp,
@@ -131,26 +159,51 @@ impl Builder<'_> {
     ) -> Result<Computed, Diagnostic> {
         let lhs = self.operand(left)?;
         let rhs = self.operand(right)?;
-        if matches!(self.kind(lhs.ty()), TypeKind::String) {
-            let mut arguments = self.explicit_abi_values(lhs)?;
-            arguments.extend(self.explicit_abi_values(rhs)?);
-            let result = self.runtime(
-                RuntimeCall::StringCompare,
-                &arguments,
-                &[ValueType::scalar(Type::I64)],
-            )?[0];
+        self.compare_computed(op, lhs, rhs, ty)
+    }
+
+    pub(super) fn compare_computed(
+        &mut self,
+        op: CompareOp,
+        lhs: Computed,
+        rhs: Computed,
+        ty: u32,
+    ) -> Result<Computed, Diagnostic> {
+        let value = if matches!(
+            self.kind(lhs.ty()),
+            TypeKind::Unit | TypeKind::String | TypeKind::Array { .. } | TypeKind::Aggregate { .. }
+        ) {
+            let equality = matches!(op, CompareOp::Eq | CompareOp::Ne);
+            let result = self.comparison_result(lhs, rhs, equality)?;
             let zero = self.constant(0, Type::I64);
             let value = self.compare_value(condition(op), true, result, zero);
-            return Ok(Computed::Values {
-                ty,
-                values: vec![value],
-            });
-        }
+            if equality {
+                value
+            } else {
+                let unordered = self.constant(UNORDERED, Type::I64);
+                let ordered = self.compare_value(Condition::Ne, true, result, unordered);
+                self.boolean(IntOp::And, value, ordered)
+            }
+        } else {
+            self.scalar_comparison(op, lhs, rhs)?
+        };
+        Ok(Computed::Values {
+            ty,
+            values: vec![value],
+        })
+    }
+
+    pub(super) fn scalar_comparison(
+        &mut self,
+        op: CompareOp,
+        lhs: Computed,
+        rhs: Computed,
+    ) -> Result<ValueId, Diagnostic> {
         let signed = matches!(self.kind(lhs.ty()), TypeKind::Int { signed: true, .. });
         let lhs = self.computed_values(lhs)?;
         let rhs = self.computed_values(rhs)?;
         let condition = condition(op);
-        let value = if lhs.len() == 2 && rhs.len() == 2 {
+        Ok(if lhs.len() == 2 && rhs.len() == 2 {
             self.wide_compare(condition, signed, &lhs, &rhs)
         } else {
             let (&lhs, &rhs) = lhs
@@ -158,10 +211,6 @@ impl Builder<'_> {
                 .zip(rhs.first())
                 .ok_or_else(|| invalid("比较缺少机器值"))?;
             self.compare_value(condition, signed, lhs, rhs)
-        };
-        Ok(Computed::Values {
-            ty,
-            values: vec![value],
         })
     }
 

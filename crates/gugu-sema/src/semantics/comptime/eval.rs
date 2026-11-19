@@ -61,6 +61,7 @@ pub enum ConstantValue {
     ResultOk(Box<ConstantValue>),
     /// `Err(...)` 构造值；只在 SourceExpand 域出现。
     ResultErr(Box<ConstantValue>),
+    Float32(u32),
 }
 
 impl ConstantValue {
@@ -546,6 +547,9 @@ impl Model<'_> {
                     (UnOp::Neg, ConstantValue::Float(bits)) => {
                         Ok(ConstantValue::Float((-f64::from_bits(bits)).to_bits()))
                     }
+                    (UnOp::Neg, ConstantValue::Float32(bits)) => {
+                        Ok(ConstantValue::Float32((-f32::from_bits(bits)).to_bits()))
+                    }
                     _ => Err(fail()),
                 }
             }
@@ -854,11 +858,19 @@ impl Model<'_> {
                 state.bind(self.name(module, name).to_owned(), value.clone());
                 true
             }
-            PatKind::Literal(lit) => self.literal_value(module, lit).as_ref() == Some(value),
+            PatKind::Literal(lit) => match (self.literal_value(module, lit), value) {
+                (Some(ConstantValue::Float(bits)), ConstantValue::Float32(value)) => {
+                    f32::from_bits(*value) == f64::from_bits(bits) as f32
+                }
+                (literal, _) => literal.as_ref() == Some(value),
+            },
             PatKind::NegativeLiteral(lit) => match (self.literal_value(module, lit), value) {
                 (Some(ConstantValue::Int(inner)), ConstantValue::Int(value)) => -inner == *value,
                 (Some(ConstantValue::Float(bits)), ConstantValue::Float(value)) => {
                     f64::from_bits(*value) == -f64::from_bits(bits)
+                }
+                (Some(ConstantValue::Float(bits)), ConstantValue::Float32(value)) => {
+                    f32::from_bits(*value) == -(f64::from_bits(bits) as f32)
                 }
                 _ => false,
             },
@@ -1699,6 +1711,7 @@ fn display_value(value: &ConstantValue) -> String {
         ConstantValue::Unit => "()".to_owned(),
         ConstantValue::Int(value) => value.to_string(),
         ConstantValue::Float(bits) => f64::from_bits(*bits).to_string(),
+        ConstantValue::Float32(bits) => f32::from_bits(*bits).to_string(),
         ConstantValue::Bool(value) => value.to_string(),
         ConstantValue::String(value) => value.clone(),
         ConstantValue::Type(_) => "TypeId".to_owned(),
@@ -1794,7 +1807,10 @@ fn lang_item_identity(segments: &[&str]) -> Option<String> {
 fn in_type(value: ConstantValue, ty: &Ty) -> ConstantValue {
     match (value, ty) {
         (ConstantValue::Float(bits), Ty::Float(32)) => {
-            ConstantValue::Float(f64::from(f64::from_bits(bits) as f32).to_bits())
+            ConstantValue::Float32((f64::from_bits(bits) as f32).to_bits())
+        }
+        (ConstantValue::Float32(bits), Ty::Float(64)) => {
+            ConstantValue::Float(f64::from(f32::from_bits(bits)).to_bits())
         }
         (ConstantValue::Int(value), Ty::Int { signed, bits }) if *bits < 128 => {
             debug_assert!(*bits > 0, "整数类型至少占一位");
@@ -1851,6 +1867,37 @@ fn evaluate(op: BinOp, a: ConstantValue, b: ConstantValue) -> Option<ConstantVal
             BinOp::Ne => ConstantValue::Bool(a != b),
             _ => return None,
         },
+        (ConstantValue::Float32(a), ConstantValue::Float(b)) => {
+            return evaluate(
+                op,
+                ConstantValue::Float32(a),
+                ConstantValue::Float32((f64::from_bits(b) as f32).to_bits()),
+            );
+        }
+        (ConstantValue::Float(a), ConstantValue::Float32(b)) => {
+            return evaluate(
+                op,
+                ConstantValue::Float32((f64::from_bits(a) as f32).to_bits()),
+                ConstantValue::Float32(b),
+            );
+        }
+        (ConstantValue::Float32(a), ConstantValue::Float32(b)) => {
+            let (a, b) = (f32::from_bits(a), f32::from_bits(b));
+            match op {
+                BinOp::Add => ConstantValue::Float32((a + b).to_bits()),
+                BinOp::Sub => ConstantValue::Float32((a - b).to_bits()),
+                BinOp::Mul => ConstantValue::Float32((a * b).to_bits()),
+                BinOp::Div => ConstantValue::Float32((a / b).to_bits()),
+                BinOp::Rem => ConstantValue::Float32((a % b).to_bits()),
+                BinOp::Eq => ConstantValue::Bool(a == b),
+                BinOp::Ne => ConstantValue::Bool(a != b),
+                BinOp::Lt => ConstantValue::Bool(a < b),
+                BinOp::Le => ConstantValue::Bool(a <= b),
+                BinOp::Gt => ConstantValue::Bool(a > b),
+                BinOp::Ge => ConstantValue::Bool(a >= b),
+                _ => return None,
+            }
+        }
         (ConstantValue::Float(a), ConstantValue::Float(b)) => {
             let (a, b) = (f64::from_bits(a), f64::from_bits(b));
             match op {

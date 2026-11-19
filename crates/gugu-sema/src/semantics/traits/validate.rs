@@ -100,7 +100,14 @@ impl Model<'_> {
                     && self.modules[def.module].path == "std.fmt"
                     && matches!(
                         definition.name.as_str(),
-                        "Print" | "Debug" | "Binary" | "Octal" | "LowerHex" | "UpperHex"
+                        "Print"
+                            | "Debug"
+                            | "Binary"
+                            | "Octal"
+                            | "LowerHex"
+                            | "UpperHex"
+                            | "LowerExp"
+                            | "UpperExp"
                     ))
                 && !(self.modules[def.module].builtin
                     && self.modules[def.module].path == "std.hash"

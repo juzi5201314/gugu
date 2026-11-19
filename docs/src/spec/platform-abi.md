@@ -69,6 +69,10 @@ A64 runtime 中省略 CallReturn map 的 poll-free managed leaf 不得进入 mor
 
 内部 A64 runtime 编译也可登记局部槽中的根字；多变体根和未能静态证明初始化的根必须由逐根初始化字节门控，未初始化或生命周期已结束的根不得被扫描。此能力不等于协程换栈或生产镜像 decoder 已接通。
 
+局部根的静态初始化证明只能消费该安全点之前或同位置的块内初始化事件，不能把块的排序编号当作初始化位置；后续写入不得把先前安全点的未初始化字变成固定根。
+
+A64 栈图函数的栈内引用标志必须包含受初始化字节门控的栈内引用，不能因为固定槽位图和寄存器掩码为空而省略。
+
 Linux 目标在没有动态 FFI、系统 Resolver 或可达环境 API 需求时不依赖动态解释器或 libc 初始化。闭世界实际可达的系统 Resolver、环境 API 及通过环境快照依赖它的 Command.spawn 自动采用目标工具链登记的 libc、pthread 与解释器。args/current_dir/set_current_dir、普通 fs、数字网络和空程序仍使用静态 syscall 路径。Windows 目标不链接 CRT，通过薄 IAT 使用运行时所需的系统 DLL；可达的网络功能按需加入 Winsock，进程创建遵守 [CreateProcessW](https://learn.microsoft.com/en-us/windows/win32/api/processthreadsapi/nf-processthreadsapi-createprocessw) 的 application、命令行、环境与继承句柄契约。其它动态库必须通过显式 FFI 构建配置加入，不能由宿主链接器隐式补齐。系统需求与显式配置合并后的库、符号、Function/Data 种类和解释器均进入 action key；同名符号来自冲突库或具有冲突种类时必须拒绝，不能替换调用方配置。详见[程序与编译模型](program-model.md)和[包、依赖与构建模型](packages-builds.md)。
 
 A64 内部挂起调用使用权威 SuspendResume 栈图，跨点指针必须落槽。Context 的 SP、PC、x19–x26、x29 和 d8–d15 使用共享布局；x27/x28 由恢复方提供。stackless handoff 的复制输入必须由配对的精确 PC 栈图与 CFA 元数据产生，修复 StackInterior、保存的 FP 链和 Context FP；非根整数、代码地址和浮点位型不得猜测性修复。这仍不是生产协程调度或 A64 用户镜像已接通的声明。
@@ -366,7 +370,7 @@ rt0 和 runtime 通过 PE 导入表调用目标注册表允许的系统 DLL；�
 
 ### macOS（内部验证）
 
-rt0 和运行时通过 libSystem 调用 Darwin 接口；文件系统、套接字和进程接口使用同一标准库语义，但原生结构和错误码不与 Linux 互换。内部目标暂不提供 `std.signal` 信号订阅；该限制不改变子进程退出状态的报告。
+rt0 和运行时通过 libSystem 调用 Darwin 接口；文件系统、套接字、进程和信号订阅使用同一标准库语义，但原生结构、信号编号和错误码不与 Linux 互换。普通信号由 kqueue 收集；订阅期间的原生处理器不执行用户代码，也不把忽略信号的 disposition 传给通过 exec 启动的子进程。
 
 Darwin 的对齐地址预留先将请求长度向上取整为整页，再裁剪对齐所需的额外地址空间；裁剪失败时不得报告预留成功。
 

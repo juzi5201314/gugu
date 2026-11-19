@@ -110,6 +110,7 @@ fn pin[T, R, F: Fn() R](p: &T, f: F) R
 
 区域分配与 pin 的用法：
 
+<!-- docs-example: parse -->
 ```gugu
 fn demo() {
     let arena = LocalArena::new()

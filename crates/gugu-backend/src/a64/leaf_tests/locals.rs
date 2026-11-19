@@ -252,6 +252,68 @@ fn branch_join_maps_use_the_path_specific_initialization_byte() {
 }
 
 #[test]
+fn non_entry_future_set_does_not_initialize_an_earlier_poll() {
+    let mut f = fixture(&[], &[Type::I64, Type::I64]);
+    slot(&mut f, vec![(0, Provenance::GcHeap)], 8);
+    let next = f.block(&[]);
+    let address = base(&mut f);
+    let scalar = f.constant(Type::I64, 0xbeef);
+    f.op(Op::Store(access()), &[address, scalar], &[]);
+    let edge = f.edge(next, &[]);
+    f.body.blocks[0].terminator = Terminator::Jump(edge);
+    f.switch_to(next);
+    poll(&mut f);
+    let first = f.op(Op::Load(access()), &[address], &[Type::I64])[0];
+    let pointer = f.constant(Type::I64, 0x2000);
+    f.op(Op::Store(access()), &[address, pointer], &[]);
+    init(&mut f, 0, true);
+    poll(&mut f);
+    let last = f.op(Op::Load(access()), &[address], &[Type::I64])[0];
+    f.ret(&[first, last]);
+    let fragment = compile(&mut f);
+    let mut harness = Harness {
+        flags: 1,
+        gc_direct_delta: 0x1000,
+        repeat_polls: true,
+        ..Default::default()
+    };
+    assert_eq!(
+        runtime_vm::run(&fragment, &[], &mut harness),
+        [0xbeef, 0x3000]
+    );
+    assert_eq!(harness.polls, 2);
+    let maps = maps(&fragment);
+    let polls = maps
+        .safepoints
+        .iter()
+        .filter(|p| p.kind == 1)
+        .collect::<Vec<_>>();
+    assert_eq!(maps.maps[polls[0].map_index as usize].typed.len(), 1);
+    assert!(maps.maps[polls[1].map_index as usize].typed.is_empty());
+}
+
+#[test]
+fn typed_only_stack_roots_set_the_function_stack_interior_flag() {
+    let mut f = fixture(&[], &[]);
+    slot(&mut f, vec![(0, Provenance::Stack)], 8);
+    poll(&mut f);
+    f.ret(&[]);
+    let fragment = compile(&mut f);
+    let maps = maps(&fragment);
+    let point = maps
+        .safepoints
+        .iter()
+        .find(|point| point.kind == 1)
+        .unwrap();
+    let map = &maps.maps[point.map_index as usize];
+    assert!(map.registers.iter().all(|mask| *mask == 0));
+    assert!(map.slots.iter().all(Vec::is_empty));
+    assert_eq!(map.typed.len(), 1);
+    assert_eq!(map.typed[0].root_kind, 4);
+    assert_ne!(maps.functions[0].flags & 4, 0);
+}
+
+#[test]
 fn entry_header_backedges_keep_gates_but_do_not_prove_first_entry_initialized() {
     let mut f = fixture(&[Type::I64], &[Type::I64]);
     slot(&mut f, vec![(0, Provenance::GcHeap)], 8);

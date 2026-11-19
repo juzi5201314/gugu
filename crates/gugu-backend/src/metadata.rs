@@ -65,11 +65,15 @@ pub(crate) fn local_root(
         .or_else(|| roots.iter().position(|(root, _)| *root == offset))
         .ok_or("栈槽根不在槽 root 表里")?;
     let ambiguous = roots.iter().filter(|(root, _)| *root == offset).count() > 1;
+    let position = anchor
+        .instruction
+        .checked_sub(body.blocks[anchor.block as usize].instructions.start)
+        .ok_or("初始化查询不在安全点所在块内")?;
     let gate = if ambiguous
         || init.is_none_or(|init| {
             !init.is_initialized(
                 crate::lir::body::BlockId(anchor.block),
-                anchor.position,
+                position,
                 slot as usize,
                 bit,
             )
