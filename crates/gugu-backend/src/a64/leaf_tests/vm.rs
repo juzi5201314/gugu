@@ -99,8 +99,53 @@ pub(super) fn execute_inner(
     fragment: &codegen::LeafFragment,
     callees: &[&codegen::LeafFragment],
     args: &[u64],
-    mut runtime: Option<&mut super::runtime_vm::Harness>,
+    runtime: Option<&mut super::runtime_vm::Harness>,
 ) -> ([u64; 2], BTreeMap<u64, u8>) {
+    let (result, _, memory) =
+        execute_machine(fragment, callees, args, &[], BTreeMap::new(), runtime);
+    (result, memory)
+}
+
+pub(super) fn execute_fp(
+    fragment: &codegen::LeafFragment,
+    callees: &[&codegen::LeafFragment],
+    args: &[(Type, u128)],
+    runtime: Option<&mut super::runtime_vm::Harness>,
+) -> ([u64; 2], [u128; 32], BTreeMap<u64, u8>) {
+    let (locations, _) = abi::arguments(args.iter().map(|(ty, _)| *ty)).unwrap();
+    let mut gprs = [0; 8];
+    let mut vectors = [0; 8];
+    let mut stack = BTreeMap::new();
+    for ((ty, bits), location) in args.iter().zip(locations) {
+        match location {
+            abi::Argument::Register(id) if id >= 32 => vectors[(id - 32) as usize] = *bits,
+            abi::Argument::Register(id) => gprs[id as usize] = *bits as u64,
+            abi::Argument::Stack(offset) => {
+                for byte in 0..ty.bytes().unwrap() {
+                    stack.insert(
+                        (1_u64 << 40) + u64::from(offset) + byte,
+                        (bits >> (byte * 8)) as u8,
+                    );
+                }
+            }
+        }
+    }
+    let stubs = runtime.as_ref().map(|_| super::runtime_vm::stubs());
+    let mut linked = callees.to_vec();
+    if let Some(stubs) = &stubs {
+        linked.extend(stubs.iter());
+    }
+    execute_machine(fragment, &linked, &gprs, &vectors, stack, runtime)
+}
+
+fn execute_machine(
+    fragment: &codegen::LeafFragment,
+    callees: &[&codegen::LeafFragment],
+    args: &[u64],
+    fp_args: &[u128],
+    mut memory: BTreeMap<u64, u8>,
+    mut runtime: Option<&mut super::runtime_vm::Harness>,
+) -> ([u64; 2], [u128; 32], BTreeMap<u64, u8>) {
     let fragments = std::iter::once(fragment)
         .chain(callees.iter().copied())
         .collect::<Vec<_>>();
@@ -116,8 +161,11 @@ pub(super) fn execute_inner(
         runtime.setup(&mut registers);
     }
     let saved = registers;
+    let mut vectors =
+        std::array::from_fn::<_, 32, _>(|id| (id as u128 + 100) | (0xcafe_u128 << 64));
+    let saved_fp = vectors;
+    vectors[..fp_args.len()].copy_from_slice(fp_args);
     let mut calls = Vec::new();
-    let mut memory = BTreeMap::new();
     for (index, value) in args.iter().enumerate() {
         if index < 8 {
             registers[index] = *value;
@@ -176,11 +224,18 @@ pub(super) fn execute_inner(
         assert_eq!(registers[31] % 16, 0, "SP alignment");
         if key == "ret" {
             let target = get(rr(&op[0]), &registers);
-            if let Some((return_pc, before)) = calls.pop() {
+            if let Some((return_pc, before, before_fp)) = calls.pop() {
                 let before: [u64; 32] = before;
+                let before_fp: [u128; 32] = before_fp;
                 assert_eq!(target, return_pc);
                 assert_eq!(registers[31], before[31]);
                 assert_eq!(&registers[19..30], &before[19..30]);
+                for id in 8..16 {
+                    assert_eq!(
+                        vectors[id] as u64, before_fp[id] as u64,
+                        "callee-saved d{id}"
+                    );
+                }
                 pc = target as usize;
                 continue;
             }
@@ -195,19 +250,39 @@ pub(super) fn execute_inner(
                 registers[31],
                 runtime.as_ref().map_or(INITIAL_SP, |r| r.expected_sp)
             );
-            return ([registers[0], registers[1]], memory);
+            for id in 8..16 {
+                assert_eq!(
+                    vectors[id] as u64, saved_fp[id] as u64,
+                    "callee-saved d{id}"
+                );
+            }
+            return ([registers[0], registers[1]], vectors, memory);
         }
         let mut next = pc + 4;
         if key == "bl" {
+            let entry = sites::lookup(&fragment.runtime_sites, (pc - base + 4) as u32)
+                .is_some_and(|site| site.kind == sites::SiteKind::MorestackEntry);
             if let Some(runtime) = runtime.as_mut()
                 && runtime.call(fragment, pc - base, &mut registers, &mut memory, args.len())
             {
+                super::fp_vm::clobber(&mut vectors, entry);
                 registers[30] = (pc + 4) as u64;
                 pc += 4;
                 continue;
             }
-            calls.push(((pc + 4) as u64, registers));
+            calls.push(((pc + 4) as u64, registers, vectors));
             registers[30] = (pc + 4) as u64;
+        }
+        if super::fp_vm::execute(
+            inst,
+            &mut registers,
+            &mut vectors,
+            &mut flags,
+            &mut memory,
+            condition,
+        ) {
+            pc = next;
+            continue;
         }
         let read = |index: usize| get(rr(&op[index]), &registers);
         if key == "bl" || key == "b" || key == "b.cond" || key.starts_with("cb") {
@@ -272,7 +347,7 @@ pub(super) fn execute_inner(
                         at,
                         &registers,
                         &memory,
-                        calls.last().map(|(_, entry)| entry),
+                        calls.last().map(|(_, entry, _)| entry),
                     );
                 }
                 let value = (0..bytes).fold(0_u64, |value, byte| {
@@ -351,12 +426,14 @@ pub(super) fn execute_inner(
                 a.wrapping_shr(b as u32)
             } else if key == "asrv.X" {
                 (a as i64).wrapping_shr(b as u32) as u64
-            } else if key == "csinc.X" || key == "csel.X" {
+            } else if matches!(key, "csinc.X" | "csel.X" | "csinv.X") {
                 let Operand::Condition(c) = op[3] else {
                     panic!()
                 };
                 if condition(c, flags) {
                     a
+                } else if key == "csinv.X" {
+                    !b
                 } else {
                     b + u64::from(key == "csinc.X")
                 }

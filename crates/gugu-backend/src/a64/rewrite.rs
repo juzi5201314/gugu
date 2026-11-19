@@ -183,6 +183,9 @@ pub(super) fn adjust(
 }
 
 fn stack(out: &mut Vec<layout::Item>, load: bool, reg: u8, offset: u32) -> Result<(), Error> {
+    if reg >= 32 {
+        return super::fp::stack(out, load, reg, Width::Q, offset);
+    }
     let (base, offset) = if offset.is_multiple_of(8) && offset <= 32760 {
         (Reg::sp(Width::X), offset)
     } else {
@@ -221,7 +224,13 @@ fn prologue(out: &mut Vec<layout::Item>, frame: &Frame) -> Result<(), Error> {
     stack(out, false, 29, frame.record)?;
     stack(out, false, 30, frame.record + 8)?;
     for (reg, offset) in &frame.saves {
-        stack(out, false, *reg, *offset)?;
+        super::fp::stack(
+            out,
+            false,
+            *reg,
+            if *reg >= 32 { Width::D } else { Width::X },
+            *offset,
+        )?;
     }
     adjust(out, Reg::x(29), Reg::sp(Width::X), frame.record, false)
 }
@@ -229,7 +238,13 @@ fn prologue(out: &mut Vec<layout::Item>, frame: &Frame) -> Result<(), Error> {
 fn restore(out: &mut Vec<layout::Item>, frame: &Frame) -> Result<(), Error> {
     if frame.size != 0 {
         for (reg, offset) in &frame.saves {
-            stack(out, true, *reg, *offset)?;
+            super::fp::stack(
+                out,
+                true,
+                *reg,
+                if *reg >= 32 { Width::D } else { Width::X },
+                *offset,
+            )?;
         }
         stack(out, true, 29, frame.record)?;
         stack(out, true, 30, frame.record + 8)?;
@@ -240,7 +255,7 @@ fn restore(out: &mut Vec<layout::Item>, frame: &Frame) -> Result<(), Error> {
 
 fn location(reg: MReg, allocation: &Allocation) -> Result<Option<Location>, Error> {
     match reg {
-        MReg::Physical(id) if id < 31 => Ok(Some(Location::Reg(PhysReg(id)))),
+        MReg::Physical(id) if id < 64 && id != 31 => Ok(Some(Location::Reg(PhysReg(id)))),
         MReg::Physical(_) => Err(super::error("invalid physical GPR")),
         MReg::Virtual(id) => match allocation.values.get(id as usize).map(|v| v.placement) {
             Some(Placement::Location(loc)) => Ok(Some(loc)),
@@ -268,10 +283,22 @@ fn move_loc(
     src: Location,
     dst: Location,
     frame: &Frame,
+    class: crate::regalloc::Class,
 ) -> Result<(), Error> {
     match (src, dst) {
         (Location::Reg(src), Location::Reg(dst)) => {
             if src != dst {
+                if class == super::abi::FPR {
+                    return emit(
+                        out,
+                        "orr.Q",
+                        vec![
+                            Operand::Reg(super::fp::reg(dst.0, Width::Q)),
+                            Operand::Reg(super::fp::reg(src.0, Width::Q)),
+                            Operand::Reg(super::fp::reg(src.0, Width::Q)),
+                        ],
+                    );
+                }
                 emit(
                     out,
                     "orr.X.shift",
@@ -288,27 +315,28 @@ fn move_loc(
         (Location::Slot(src), Location::Reg(dst)) => stack(out, true, dst.0, offset(frame, src)?),
         (Location::Reg(src), Location::Slot(dst)) => stack(out, false, src.0, offset(frame, dst)?),
         (Location::Slot(src), Location::Slot(dst)) => {
-            stack(out, true, 17, offset(frame, src)?)?;
-            stack(out, false, 17, offset(frame, dst)?)
+            let scratch = if class == super::abi::FPR { 63 } else { 17 };
+            stack(out, true, scratch, offset(frame, src)?)?;
+            stack(out, false, scratch, offset(frame, dst)?)
         }
     }
 }
 
 struct Policy<'a>(&'a Frame);
-impl CopyPolicy<Location, ()> for Policy<'_> {
+impl CopyPolicy<Location, crate::regalloc::Class> for Policy<'_> {
     fn break_cycle(
         &self,
         saved: Location,
-        _: (),
-        _: &[Copy<Location, ()>],
-    ) -> CycleBreak<Location, ()> {
+        class: crate::regalloc::Class,
+        _: &[Copy<Location, crate::regalloc::Class>],
+    ) -> CycleBreak<Location, crate::regalloc::Class> {
         use crate::regalloc::RegisterFile;
-        let holder = if self.0.size > 32752 {
+        let holder = if self.0.size > 32752 && class == super::abi::GPR {
             Location::Slot(u32::MAX)
         } else {
             Location::Reg(
                 super::abi::A64Registers
-                    .copy_scratch(super::abi::GPR)
+                    .copy_scratch(class)
                     .unwrap_or(PhysReg(16)),
             )
         };
@@ -317,7 +345,7 @@ impl CopyPolicy<Location, ()> for Policy<'_> {
             saves: vec![Copy {
                 src: saved,
                 dst: holder,
-                ty: (),
+                ty: class,
             }],
             uses_scratch: false,
         }
@@ -376,13 +404,24 @@ fn rewrite_item(
             };
             let reg = match loc {
                 Location::Reg(reg) => reg.0,
-                Location::Slot(_) => 16,
+                Location::Slot(_) => {
+                    if super::abi::class(allocation.types[*dest as usize]) == super::abi::FPR {
+                        62
+                    } else {
+                        16
+                    }
+                }
             };
             let at = index
-                .checked_mul(8)
-                .and_then(|n| n.checked_add(frame.size))
+                .checked_add(frame.size)
                 .ok_or_else(|| super::error("incoming stack argument offset overflow"))?;
-            stack(out, true, reg, at)?;
+            super::fp::stack(
+                out,
+                true,
+                reg,
+                super::fp::width(allocation.types[*dest as usize]),
+                at,
+            )?;
             if let Location::Slot(slot) = loc {
                 stack(out, false, reg, offset(frame, slot)?)?;
             }
@@ -394,13 +433,30 @@ fn rewrite_item(
                 if let Some(dst) = location(*dst, allocation)? {
                     let src = location(*src, allocation)?
                         .ok_or_else(|| super::error("copy reads dead value"))?;
-                    moves.push(Copy { src, dst, ty: () });
+                    let class = match dst {
+                        Location::Reg(reg) if reg.0 >= 32 => super::abi::FPR,
+                        Location::Slot(slot)
+                            if allocation
+                                .slots
+                                .slots
+                                .get(slot as usize)
+                                .is_some_and(|s| s.size == 16) =>
+                        {
+                            super::abi::FPR
+                        }
+                        _ => super::abi::GPR,
+                    };
+                    moves.push(Copy {
+                        src,
+                        dst,
+                        ty: class,
+                    });
                 }
             }
             let plan = parallel::resolve_copies(&moves, &Policy(frame), true)
                 .map_err(super::alloc::shared)?;
             for mov in plan.moves {
-                move_loc(out, mov.src, mov.dst, frame)?;
+                move_loc(out, mov.src, mov.dst, frame, mov.ty)?;
             }
             Ok(())
         }
@@ -430,13 +486,15 @@ fn rewrite_item(
                     link: true,
                 });
             }
+            let result_registers =
+                super::abi::results(results.iter().map(|id| allocation.types[*id as usize]))?;
             rewrite_item(
                 out,
                 &Item::Copies(
                     results
                         .iter()
-                        .enumerate()
-                        .map(|(index, value)| (MReg::Physical(index as u8), MReg::Virtual(*value)))
+                        .zip(result_registers)
+                        .map(|(value, id)| (MReg::Physical(id), MReg::Virtual(*value)))
                         .collect(),
                 ),
                 allocation,
@@ -513,31 +571,50 @@ fn arguments_to_abi(
     tail: bool,
     runtime: &mut super::sites::Emitter<'_>,
 ) -> Result<(), Error> {
-    for (index, value) in arguments.iter().enumerate().skip(8) {
+    let (locations, _) =
+        super::abi::arguments(arguments.iter().map(|id| allocation.types[*id as usize]))?;
+    for (value, argument) in arguments.iter().zip(&locations) {
+        let super::abi::Argument::Stack(at) = argument else {
+            continue;
+        };
         let src = location(MReg::Virtual(*value), allocation)?
             .ok_or_else(|| super::error("call reads dead argument"))?;
         let reg = match src {
             Location::Reg(reg) => reg.0,
             Location::Slot(slot) => {
-                stack(out, true, 16, offset(frame, slot)?)?;
-                16
+                let reg = if super::abi::class(allocation.types[*value as usize]) == super::abi::FPR
+                {
+                    62
+                } else {
+                    16
+                };
+                stack(out, true, reg, offset(frame, slot)?)?;
+                reg
             }
         };
-        let at = u32::try_from(index - 8)
-            .ok()
-            .and_then(|index| index.checked_mul(8))
-            .and_then(|offset| offset.checked_add(if tail { frame.size } else { 0 }))
+        let at = at
+            .checked_add(if tail { frame.size } else { 0 })
             .ok_or_else(|| super::error("outgoing argument offset overflow"))?;
-        stack(out, false, reg, at)?;
+        super::fp::stack(
+            out,
+            false,
+            reg,
+            super::fp::width(allocation.types[*value as usize]),
+            at,
+        )?;
     }
     rewrite_item(
         out,
         &Item::Copies(
             arguments
                 .iter()
-                .take(8)
-                .enumerate()
-                .map(|(index, value)| (MReg::Virtual(*value), MReg::Physical(index as u8)))
+                .zip(locations)
+                .filter_map(|(value, location)| match location {
+                    super::abi::Argument::Register(id) => {
+                        Some((MReg::Virtual(*value), MReg::Physical(id)))
+                    }
+                    _ => None,
+                })
                 .collect(),
         ),
         allocation,
@@ -569,12 +646,20 @@ fn rewrite_operands(
             && !loaded.iter().any(|(id, _)| *id == source)
             && let Some(Location::Slot(slot)) = location(source, allocation)?
         {
-            if loaded.len() >= 2 {
+            let fp = allocation
+                .values
+                .get(match source {
+                    MReg::Virtual(id) => id as usize,
+                    _ => usize::MAX,
+                })
+                .is_some_and(|v| v.class == super::abi::FPR);
+            let count = loaded.iter().filter(|(_, reg)| (*reg >= 32) == fp).count();
+            if count >= if fp { 3 } else { 2 } {
                 return Err(super::error(
                     "instruction exceeds two reserved spill-read temporaries",
                 ));
             }
-            let reg = 16 + loaded.len() as u8;
+            let reg = if fp { 61 } else { 16 } + count as u8;
             stack(out, true, reg, offset(frame, slot)?)?;
             loaded.push((source, reg));
         }
@@ -595,20 +680,28 @@ fn rewrite_operands(
         {
             Location::Reg(reg) => reg.0,
             Location::Slot(slot) => {
-                let physical = loaded
-                    .iter()
-                    .find(|(source, _)| *source == reg)
-                    .map_or(16, |(_, reg)| *reg);
+                let physical = loaded.iter().find(|(source, _)| *source == reg).map_or(
+                    if allocation
+                        .values
+                        .get(match reg {
+                            MReg::Virtual(id) => id as usize,
+                            _ => usize::MAX,
+                        })
+                        .is_some_and(|v| v.class == super::abi::FPR)
+                    {
+                        62
+                    } else {
+                        16
+                    },
+                    |(_, reg)| *reg,
+                );
                 if write {
                     stores.push((physical, slot));
                 }
                 physical
             }
         };
-        let physical = Reg {
-            kind: super::reg::RegKind::Gpr(physical),
-            width,
-        };
+        let physical = super::fp::reg(physical, width);
         final_operands.push(if matches!(operand, MOperand::Address(_)) {
             Operand::Address(Address {
                 base: physical,

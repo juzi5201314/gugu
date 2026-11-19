@@ -110,9 +110,13 @@ pub(crate) fn build(
             slot_count: if entry { 0 } else { frame.size / 8 },
         };
         if entry {
-            for (index, parameter) in body.signature.parameters.iter().take(8).enumerate() {
-                if let Some(class) = parameter.provenance.and_then(|p| p.root_kind()) {
-                    map.registers[class as usize] |= 1 << index;
+            let (locations, _) =
+                super::abi::arguments(body.signature.parameters.iter().map(|p| p.ty))?;
+            for (parameter, location) in body.signature.parameters.iter().zip(locations) {
+                if let (Some(class), super::abi::Argument::Register(id)) =
+                    (parameter.provenance.and_then(|p| p.root_kind()), location)
+                {
+                    map.registers[class as usize] |= 1 << id;
                 }
             }
         } else if let Some(anchor) = anchor {
@@ -150,10 +154,12 @@ pub(crate) fn build(
                             if site.kind == SiteKind::SuspendResume {
                                 let inst = &body.instructions[anchor.instruction as usize];
                                 for (index, argument) in
-                                    body.args(&inst.arguments).iter().enumerate().skip(8)
+                                    body.args(&inst.arguments).iter().enumerate()
                                 {
-                                    if argument.0 == *value {
-                                        set_slot(&mut map, class, (index as u32 - 8) * 8)?;
+                                    if argument.0 == *value
+                                        && let Some(offset) = argument_offset(body, inst, index)?
+                                    {
+                                        set_slot(&mut map, class, offset)?;
                                     }
                                 }
                             }
@@ -165,8 +171,8 @@ pub(crate) fn build(
                                 .get(*index as usize)
                                 .ok_or_else(|| super::error("unknown call root argument"))?;
                             place_value(allocation, frame, &mut map, class, value.0, position)?;
-                            if *index >= 8 {
-                                set_slot(&mut map, class, (*index - 8) * 8)?;
+                            if let Some(offset) = argument_offset(body, inst, *index as usize)? {
+                                set_slot(&mut map, class, offset)?;
                             }
                         }
                         LogicalRoot::Slot { slot, offset } => {
@@ -283,4 +289,20 @@ fn set_slot(
     let word = offset / 8;
     map.slots[class][word as usize / 64] |= 1 << (word % 64);
     Ok(())
+}
+
+fn argument_offset(
+    body: &crate::lir::body::Body,
+    inst: &crate::lir::body::Instruction,
+    index: usize,
+) -> Result<Option<u32>, Error> {
+    let (locations, _) = super::abi::arguments(
+        body.args(&inst.arguments)
+            .iter()
+            .map(|id| body.values[id.index()].kind.ty),
+    )?;
+    Ok(match locations.get(index) {
+        Some(super::abi::Argument::Stack(offset)) => Some(*offset),
+        _ => None,
+    })
 }

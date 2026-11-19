@@ -25,14 +25,14 @@ fn byte_exact_fixtures() {
 #[test]
 fn frozen_contract() {
     contract::verify().unwrap();
-    assert_eq!(contract::catalog().len(), 307);
+    assert_eq!(contract::catalog().len(), 310);
     let hex: String = contract::fingerprint()
         .iter()
         .map(|b| format!("{b:02x}"))
         .collect();
     assert_eq!(
         hex,
-        "4abb52a688f61778d2a536a416b50fc3c2343706553e1096b1a3e2f64bc2f5d0"
+        "58a3beeb1731ee610674e024fd359f6a0bfd1c3c0c2a407b8e91888c8b82d40b"
     );
 }
 

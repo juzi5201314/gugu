@@ -641,6 +641,26 @@ StackInterior map 可交给既有 copy_input 生成 fixup 槽表。尚未执行 
 完整换栈修正，也未把 x64 CoroutineContext 当成 A64 context 复用。完整 4c.2b 超过约 2000 行，
 先交付本部分，下一部分完成 gated locals、A64 coroutine/stack-copy 与生产 decoder 集成。
 
+### A64 标量 FP 与 SIMD 传输（4d.1）
+
+A64 使用共享 regalloc 的第二寄存器类；内部 PhysReg 32–63 表示 v0–v31，绝不进入
+栈图的 xN 寄存器编号。v29–v31 留作 spill/parallel-copy scratch。F32/F64/V128 使用
+16-byte、16-aligned spill 槽；callee-save 只保存 d8–d15 的低 64 位，V128 不分配到
+这些跨调用仅部分保留的寄存器。调用与 poll 都固定 clobber 全部 caller-saved FP；
+scalar 可跨点留在 d8–d15，V128 跨点必须落槽。morestack 入口仍保存完整 q0–q7。
+
+内部调用独立分配 x0–x7 与 v0–v7 参数车道；溢出标量占 8-byte 栈槽，V128 占
+16-byte 对齐的栈槽。返回支持两个整数与八个 FP/SIMD 车道。incoming、outgoing、
+tail-area 检查和指针参数的栈图都复用同一 ABI placement，不按实参序号猜寄存器。
+这不是外部 C ABI：foreign/system-stack 协议与 Darwin variadic 差异由 4d.3 接线。
+
+标量算术、IEEE ordered/unordered 比较、FP select、常量、整数/FP 转换、resize 与
+等宽 bitcast 使用表驱动 ARMv8.0 FP 形式。浮点转整数依赖已有 LIR 范围检查；不以
+硬件饱和结果取代语言 panic。V128 此部分提供完整位型的 copy、内存、select、ABI
+与 spill；向量算术以及其余未接通 LIR 操作继续给出显式 unsupported，后续补齐。
+默认测试解释已编码字节，覆盖 FP bank、SIMD 高半部、混合参数、压力、entry/poll
+和真实链接调用；不执行生成的 A64 机器码或 OS FFI。
+
 ### A64 生产源与镜像数据绑定
 
 `runtime/a64.gg` 随已有 runtime source table 提供，用现有 `#![cfg(arch = "aarch64")]`

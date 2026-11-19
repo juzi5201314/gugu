@@ -69,14 +69,14 @@ pub(crate) fn lower_mode(
             .map(|id| body.values[id.index()].kind)
             .collect::<Vec<_>>()
     };
-    if kinds(args) != call.parameters
-        || (!tail && kinds(results) != call.results)
-        || call.results.len() > 2
-    {
+    if kinds(args) != call.parameters || (!tail && kinds(results) != call.results) {
         return Err(crate::a64::error("call argument/result signature mismatch"));
     }
+    abi::results(call.results.iter().map(|p| p.ty))?;
     for kind in call.parameters.iter().chain(&call.results) {
-        super::bits(kind.ty)?;
+        if abi::class(kind.ty) == abi::GPR {
+            super::bits(kind.ty)?;
+        }
         if kind.provenance.is_some_and(|p| p.managed()) && !runtime {
             return Err(crate::a64::error(
                 "requires checked entry / stack maps (4c)",
@@ -97,7 +97,8 @@ pub(crate) fn lower_mode(
             || body.signature.sret.is_some()
             || call.results != body.signature.results
             || body.stack_slots.iter().any(|slot| slot.bytes != 0)
-            || args.len().saturating_sub(8) > body.signature.parameters.len().saturating_sub(8)
+            || abi::arguments(call.parameters.iter().map(|p| p.ty))?.1
+                > abi::arguments(body.signature.parameters.iter().map(|p| p.ty))?.1
             || call
                 .parameters
                 .iter()
@@ -123,6 +124,9 @@ pub(crate) fn lower_mode(
             },
         });
         for result in results {
+            if abi::class(body.values[result.index()].kind.ty) == abi::FPR {
+                continue;
+            }
             let bits = super::bits(body.values[result.index()].kind.ty)?;
             if bits < 64 {
                 b.normalize(result.0, result.0, bits, false)?;

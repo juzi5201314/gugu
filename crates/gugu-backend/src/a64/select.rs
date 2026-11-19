@@ -170,22 +170,32 @@ fn entry(body: &Body, b: &mut Builder<'_>) -> Result<(), Error> {
         .iter()
         .filter(|p| body.values[p.value.index()].kind.ty != Type::Mem)
         .collect::<Vec<_>>();
+    let (locations, _) =
+        super::abi::arguments(params.iter().map(|p| body.values[p.value.index()].kind.ty))?;
     b.push(Item::Copies(
         params
             .iter()
-            .take(8)
-            .enumerate()
-            .map(|(index, p)| (MReg::Physical(index as u8), MReg::Virtual(p.value.0)))
+            .zip(&locations)
+            .filter_map(|(p, location)| match location {
+                super::abi::Argument::Register(id) => {
+                    Some((MReg::Physical(*id), MReg::Virtual(p.value.0)))
+                }
+                _ => None,
+            })
             .collect(),
     ));
-    for (index, param) in params.iter().enumerate() {
-        if index >= 8 {
+    for (param, location) in params.iter().zip(locations) {
+        if let super::abi::Argument::Stack(offset) = location {
             b.push(Item::Incoming {
                 dest: param.value.0,
-                index: index as u32 - 8,
+                index: offset,
             });
         }
-        let bits = lower::bits(body.values[param.value.index()].kind.ty)?;
+        let ty = body.values[param.value.index()].kind.ty;
+        if super::abi::class(ty) == super::abi::FPR {
+            continue;
+        }
+        let bits = lower::bits(ty)?;
         if bits < 64 {
             b.normalize(param.value.0, param.value.0, bits, false)?;
         }
@@ -270,11 +280,16 @@ fn terminator(
             Ok(successors)
         }
         Terminator::Return { values, .. } => {
+            let locations = super::abi::results(
+                body.args(values)
+                    .iter()
+                    .map(|value| body.values[value.index()].kind.ty),
+            )?;
             b.push(Item::Copies(
                 body.args(values)
                     .iter()
-                    .enumerate()
-                    .map(|(index, value)| (MReg::Virtual(value.0), MReg::Physical(index as u8)))
+                    .zip(locations)
+                    .map(|(value, id)| (MReg::Virtual(value.0), MReg::Physical(id)))
                     .collect(),
             ));
             b.push(Item::Return);
@@ -360,14 +375,10 @@ fn validate(body: &Body, leaf: bool, runtime: bool) -> Result<(), Error> {
     {
         return Err(super::error("invalid leaf schema/entry/CFG size"));
     }
-    if (leaf && body.signature.sret.is_some())
-        || !body.signature.by_value.is_empty()
-        || body.signature.results.len() > 2
-    {
-        return Err(super::error(
-            "leaf aggregate/sret or more than two results unsupported",
-        ));
+    if (leaf && body.signature.sret.is_some()) || !body.signature.by_value.is_empty() {
+        return Err(super::error("leaf aggregate/sret signature unsupported"));
     }
+    super::abi::results(body.signature.results.iter().map(|p| p.ty))?;
     if let Some((bytes, alignment, _)) = body.signature.sret
         && (bytes == 0
             || !alignment.is_power_of_two()
@@ -382,9 +393,22 @@ fn validate(body: &Body, leaf: bool, runtime: bool) -> Result<(), Error> {
         return Err(super::error("invalid hidden sret signature"));
     }
     for value in &body.values {
+        if super::abi::class(value.kind.ty) == super::abi::FPR && value.kind.provenance.is_some() {
+            return Err(super::error(
+                "FP/vector values cannot carry pointer provenance",
+            ));
+        }
         if !matches!(
             value.kind.ty,
-            Type::I8 | Type::I16 | Type::I32 | Type::I64 | Type::Ptr | Type::Mem
+            Type::I8
+                | Type::I16
+                | Type::I32
+                | Type::I64
+                | Type::Ptr
+                | Type::Mem
+                | Type::F32
+                | Type::F64
+                | Type::V128(_)
         ) || (!runtime && value.kind.provenance.is_some_and(|p| p.managed()))
         {
             return Err(Error(format!(
@@ -399,7 +423,9 @@ fn validate(body: &Body, leaf: bool, runtime: bool) -> Result<(), Error> {
         .iter()
         .chain(&body.signature.results)
     {
-        lower::bits(ty.ty)?;
+        if super::abi::class(ty.ty) == super::abi::GPR {
+            lower::bits(ty.ty)?;
+        }
         if !runtime && ty.provenance.is_some_and(|p| p.managed()) {
             return Err(super::error("managed leaf signature unsupported"));
         }

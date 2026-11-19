@@ -7,6 +7,7 @@ pub mod codegen;
 pub mod contract;
 pub mod decode;
 pub mod encode;
+mod fp;
 pub mod fragments;
 pub mod frame;
 pub mod glue;

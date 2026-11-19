@@ -315,4 +315,7 @@ pub static FORMS: &[Form] = &[
     Form::new("fmov.X.D", "fmov", 0x9e660000, &[reg(X, false, false, 0), reg(D, false, true, 5)], FpAdvSimd),
     Form::new("fcvt.S.D", "fcvt", 0x1e624000, &[reg(S, false, true, 0), reg(D, false, true, 5)], FpAdvSimd),
     Form::new("fcvt.D.S", "fcvt", 0x1e22c000, &[reg(D, false, true, 0), reg(S, false, true, 5)], FpAdvSimd),
+    Form::new("orr.Q", "orr", 0x4ea01c00, &[reg(Q, false, true, 0), reg(Q, false, true, 5), reg(Q, false, true, 16)], FpAdvSimd),
+    Form::new("dup.Q.X", "dup", 0x4e080c00, &[reg(Q, false, true, 0), reg(X, false, false, 5)], FpAdvSimd),
+    Form::new("bsl.Q", "bsl", 0x6e601c00, &[reg(Q, false, true, 0), reg(Q, false, true, 5), reg(Q, false, true, 16)], FpAdvSimd),
 ];

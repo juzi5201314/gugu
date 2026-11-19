@@ -410,7 +410,7 @@ fn malformed_call_signatures_and_foreign_effects_are_rejected() {
         let error = codegen::compile_function(&f.body).unwrap_err().0;
         assert!(error.contains("block 0 site 0"), "{error}");
     }
-    let mut f = caller(&[Type::F64], &[]);
+    let mut f = caller(&[Type::Flags], &[]);
     f.ret(&[]);
     assert!(codegen::compile_function(&f.body).is_err());
     let mut f = caller(&[], &[]);
