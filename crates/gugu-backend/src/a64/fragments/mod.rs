@@ -3,6 +3,7 @@
 mod atomic;
 mod coroutine;
 mod darwin_fd;
+mod darwin_net;
 mod entry;
 mod poll;
 
@@ -12,6 +13,7 @@ pub use coroutine::{
     morestack_or_poll,
 };
 pub use darwin_fd::{darwin_fd_dispatch, darwin_fd_imports};
+pub use darwin_net::{darwin_net_dispatch, darwin_net_imports};
 pub(crate) use entry::darwin_main;
 pub use entry::rt0;
 pub use poll::safepoint_slow;
