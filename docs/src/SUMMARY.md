@@ -41,3 +41,4 @@
 - [镜像 GC 执行边界](internals/gc-metadata.md#image-execution-boundary-block-ledger)
 - [调度器](internals/scheduler.md)
 - [x86_64 后端](internals/backend.md)
+- [性能与延迟门禁](internals/performance.md)
