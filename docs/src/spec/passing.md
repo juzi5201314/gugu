@@ -36,17 +36,24 @@
 
 string 示例：
 
-<!-- docs-example: gap string 没有适用的方法 `push` -->
 ```gugu
+use std.io.{println}
+
 fn suffix(value: string) {
     value.push('!')
 }
 
-fn demo() {
+fn main() {
     let text = "ok"
     suffix(text)
     // text 仍是 "ok"；参数 backing 可以先共享，push 时分离
+    println(text)
 }
+```
+
+<!-- docs-example: output -->
+```text
+ok
 ```
 
 身份句柄示例：

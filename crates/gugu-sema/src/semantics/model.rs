@@ -997,7 +997,11 @@ impl<'a> Model<'a> {
     }
     pub fn find_field(&self, ty: &Ty, name: &str) -> Option<(usize, Ty, bool)> {
         let Ty::Named(index, arguments) = ty.strip_refs() else {
-            return None;
+            let Ty::Range = ty.strip_refs() else {
+                return None;
+            };
+            let index = ["start", "end"].iter().position(|field| *field == name)?;
+            return Some((index, Ty::int(), true));
         };
         let nominal = &self.nominal[*index];
         if nominal.is_enum {
@@ -1019,6 +1023,10 @@ impl<'a> Model<'a> {
     pub fn def_module(&self, ty: &Ty) -> Option<usize> {
         match ty.strip_refs() {
             Ty::Named(i, _) => Some(self.nominal[*i].definition.module),
+            Ty::String => self
+                .modules
+                .iter()
+                .position(|module| module.builtin && module.path == "std.text"),
             _ => None,
         }
     }

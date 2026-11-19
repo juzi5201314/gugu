@@ -50,7 +50,7 @@ pub fn concat(left: &[byte], right: &[byte]) string {
 #[used]
 pub fn utf8_boundary(data: &[byte], start: int, end: int) bool {
     if start < 0 || end < 0 || start > end || end > data.len() { return false }
-    if start > 0 && data[start] & 192 == 128 { return false }
+    if start > 0 && start < data.len() && data[start] & 192 == 128 { return false }
     if end < data.len() && data[end] & 192 == 128 { return false }
     true
 }
@@ -235,6 +235,130 @@ pub fn utf8_decode_lossy(source: Bytes) string {
             out = out + width
             index = index + width
         }
+    }
+    unsafe { std.runtime.string_from_utf8_unchecked(data) }
+}
+
+// string 的固有方法。修改方法把新值写回接收者；COW 分离由 `+` 与切片负责。
+impl string {
+    pub fn new() string = ""
+
+    pub fn with_capacity(capacity: int) string {
+        if capacity < 0 { panic("string capacity must not be negative") }
+        ""
+    }
+
+    pub fn len(self: &Self) int = string_data(*self).len()
+    pub fn cap(self: &Self) int = string_data(*self).len()
+    pub fn is_empty(self: &Self) bool = string_data(*self).len() == 0
+    pub fn clear(self: &Self) { *self = "" }
+
+    pub fn reserve(self: &Self, additional: int) {
+        if additional < 0 { panic("string reserve must not be negative") }
+    }
+
+    pub fn shrink_to_fit(self: &Self) {}
+    pub fn push(self: &Self, value: char) { *self = *self + encode_char(value) }
+    pub fn push_string(self: &Self, value: string) { *self = *self + value }
+
+    pub fn insert(self: &Self, byte_offset: int, value: char) {
+        let text = *self
+        *self = text[..byte_offset] + encode_char(value) + text[byte_offset..]
+    }
+
+    pub fn remove(self: &Self, byte_offset: int) char {
+        let text = *self
+        let data = string_data(text)
+        if byte_offset < 0 || byte_offset >= data.len() { panic("string remove offset out of range") }
+        let width = utf8_width(data, byte_offset)
+        *self = text[..byte_offset] + text[byte_offset + width..]
+        decode_char(data, byte_offset, width)
+    }
+
+    pub fn truncate(self: &Self, byte_len: int) {
+        let text = *self
+        *self = text[..byte_len]
+    }
+
+    pub fn replace_range(self: &Self, range: Range, value: string) {
+        let text = *self
+        let head = text[..range.start]
+        let tail = text[range.end..]
+        if range.start > range.end { panic("string range start is after its end") }
+        *self = head + value + tail
+    }
+
+    pub fn byte_at(self: &Self, byte_offset: int) Option[byte] {
+        let data = string_data(*self)
+        if byte_offset < 0 { panic("string byte offset must not be negative") }
+        if byte_offset >= data.len() { return None }
+        Some(data[byte_offset])
+    }
+
+    pub fn char_at(self: &Self, scalar_index: int) Option[char] {
+        if scalar_index < 0 { panic("string scalar index must not be negative") }
+        let chars = self.chars()
+        let index = 0
+        while let Some(value) = chars.next() {
+            if index == scalar_index { return Some(value) }
+            index = index + 1
+        }
+        None
+    }
+
+    pub fn chars(self: &Self) Chars = Chars { data: string_data(*self), offset: 0 }
+    pub fn bytes_view(self: &Self) Bytes = Bytes::from_string(*self)
+}
+
+// 迭代创建时的 string 快照，逐个产生 Unicode scalar。
+pub struct Chars {
+    data: &[byte],
+    offset: int,
+}
+
+impl Iter for Chars {
+    type Item = char
+    fn next(self: &Self) Option[char] {
+        if self.offset >= self.data.len() { return None }
+        let width = utf8_width(self.data, self.offset)
+        let value = decode_char(self.data, self.offset, width)
+        self.offset = self.offset + width
+        Some(value)
+    }
+}
+
+impl IntoIter for Chars {
+    type Item = char
+    type Iter = Chars
+    fn into_iter(self: Self) Chars = self
+}
+
+fn string_data(value: string) &[byte] = unsafe { std.runtime.string_bytes(value) }
+
+fn decode_char(data: &[byte], start: int, width: int) char {
+    if width == 1 { return char(uint(data[start])) }
+    let mask = if width == 2 { uint(31) } else if width == 3 { uint(15) } else { uint(7) }
+    let code = uint(data[start]) & mask
+    for index in 1..width { code = (code << 6) | (uint(data[start + index]) & 63) }
+    char(code)
+}
+
+pub fn encode_char(value: char) string {
+    let code = uint(value)
+    let length = if code < 128 { 1 } else if code < 2048 { 2 } else if code < 65536 { 3 } else { 4 }
+    let data = unsafe { alloc_bytes(length) }
+    if length == 1 {
+        data[0] = byte(code)
+    } else {
+        let remaining = code
+        let index = length - 1
+        while index > 0 {
+            data[index] = byte((remaining & 63) | 128)
+            remaining = remaining >> 6
+            index = index - 1
+        }
+        let prefix = if length == 2 { uint(192) } else if length == 3 { uint(224) } else { uint(240) }
+        data[0] = byte(remaining | prefix)
     }
     unsafe { std.runtime.string_from_utf8_unchecked(data) }
 }

@@ -1,4 +1,4 @@
-use std.text.{Bytes, ByteBuffer, alloc_bytes}
+use std.text.{Bytes, ByteBuffer, alloc_bytes, encode_char}
 use std.fmt_float as float_format
 
 pub struct Formatter {
@@ -19,7 +19,7 @@ impl Formatter {
     }
     pub fn finish(self: &Self) string = self.text.freeze().to_string_lossy()
     pub fn write_str(self: &Self, value: string) { self.text.append(Bytes::from_string(value)) }
-    pub fn write_char(self: &Self, value: char) { self.write_str(character(value)) }
+    pub fn write_char(self: &Self, value: char) { self.write_str(encode_char(value)) }
     pub fn debug_struct(self: &Self, name: string) DebugStruct = DebugStruct { inner: self.builder(name, 0) }
     pub fn debug_tuple(self: &Self, name: string) DebugTuple = DebugTuple { inner: self.builder(name, 1) }
     pub fn debug_list(self: &Self) DebugList = DebugList { inner: self.builder("", 2) }
@@ -62,7 +62,7 @@ impl Formatter {
         self.repeat(self.fill, padding - before)
     }
     fn repeat(self: &Self, fill: char, count: int) {
-        let text = character(fill)
+        let text = encode_char(fill)
         for _ in 0..count { self.write_str(text) }
     }
     fn float(self: &Self, bits: uint, fraction: int, exponent: int, mode: int) {
@@ -193,26 +193,6 @@ fn scalar_count(value: string) int {
     length
 }
 
-fn character(value: char) string {
-    let code = uint(value)
-    let length = if code < 128 { 1 } else if code < 2048 { 2 } else if code < 65536 { 3 } else { 4 }
-    let data = unsafe { alloc_bytes(length) }
-    if length == 1 {
-        data[0] = byte(code)
-    } else {
-        let remaining = code
-        let index = length - 1
-        while index > 0 {
-            data[index] = byte((remaining & 63) | 128)
-            remaining = remaining >> 6
-            index = index - 1
-        }
-        let prefix = if length == 2 { uint(192) } else if length == 3 { uint(224) } else { uint(240) }
-        data[0] = byte(remaining | prefix)
-    }
-    utf8(data)
-}
-
 fn digits(value: uint, base: uint, upper: bool) string {
     let alphabet = unsafe { Bytes::from_string(if upper { "0123456789ABCDEF" } else { "0123456789abcdef" }).as_slice() }
     let storage = unsafe { alloc_bytes(64) }
@@ -286,10 +266,10 @@ impl Debug for string {
     }
 }
 impl Print for char {
-    fn print(self: &Self, out: &Formatter) { out.pad(character(*self)) }
+    fn print(self: &Self, out: &Formatter) { out.pad(encode_char(*self)) }
 }
 impl Debug for char {
-    fn debug(self: &Self, out: &Formatter) { out.pad(escaped(character(*self), '\'')) }
+    fn debug(self: &Self, out: &Formatter) { out.pad(escaped(encode_char(*self), '\'')) }
 }
 impl Print for bool {
     fn print(self: &Self, out: &Formatter) { out.pad(if *self { "true" } else { "false" }) }
