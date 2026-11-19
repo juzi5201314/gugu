@@ -552,6 +552,7 @@ impl Module {
         }
         match &self.types[ty.index()] {
             Type::Tuple(fields) => Some(fields.len()),
+            Type::Range => Some(2),
             Type::Named { definition, .. } => self
                 .aggregates
                 .iter()

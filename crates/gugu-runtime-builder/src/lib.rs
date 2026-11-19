@@ -94,6 +94,11 @@ const SOURCES: &[RuntimeSourceInput<'static>] = &[
         RuntimeSourceRole::Runtime,
     ),
     source(
+        "std/text/normalization_tables.gg",
+        include_str!("../../gugu-frontend/resources/std/text/normalization_tables.gg"),
+        RuntimeSourceRole::StandardLibrary,
+    ),
+    source(
         "std/io.gg",
         include_str!("../../gugu-frontend/resources/std/io.gg"),
         RuntimeSourceRole::StandardLibrary,
