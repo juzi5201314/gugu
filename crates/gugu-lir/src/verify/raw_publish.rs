@@ -46,8 +46,9 @@ fn window(body: &Body, block_index: usize, region: usize) -> std::ops::Range<usi
     let end = usize::try_from(block.instructions.end).expect("指令终点");
     let mut begin = start;
     let mut finish = end;
-    for index in start..end {
-        match body.instructions[index].op {
+    for (offset, instruction) in body.instructions[start..end].iter().enumerate() {
+        let index = start + offset;
+        match instruction.op {
             Op::NoSafepointBegin(open) if usize::try_from(open).expect("region 编号") == region =>
             {
                 begin = index + 1;

@@ -1,0 +1,4 @@
+[profile.ci]
+# Hosted runners need more wall-clock headroom than local development runs.
+slow-timeout = { period = "10s", terminate-after = 1, grace-period = "1s", on-timeout = "fail" }
+global-timeout = "300s"

@@ -436,7 +436,8 @@ fn dylib_ordinals_stay_below_special_range() {
 
 #[test]
 fn invalid_requests_are_rejected() {
-    let cases: [(&str, fn(&mut MachORequest)); 9] = [
+    type Case = (&'static str, fn(&mut MachORequest));
+    let cases: [Case; 9] = [
         ("entry", |r| r.entry = at(2, 0)),
         ("alignment", |r| r.sections[0].align = 3),
         ("16 bytes", |r| r.sections[0].name = "x".repeat(17)),

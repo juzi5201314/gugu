@@ -1,0 +1,19 @@
+//! 写入标准输出并正常退出。
+
+use std.fs as fs
+use std.io as io
+use std.path.{Path}
+use std.text.{Bytes}
+
+fn main() {
+    let options = fs.OpenOptions::new()
+    options.write = true
+    let stdout = match fs.open(Path::from_string("/dev/stdout"), options) {
+        Ok(file) => file,
+        Err(_) => panic("open stdout"),
+    }
+    match io.write_all(&stdout, Bytes::from_string("hello, gugu\n")) {
+        Ok(_) => (),
+        Err(_) => panic("write stdout"),
+    }
+}

@@ -220,10 +220,12 @@ fn main() {
         usize::try_from(mailbox_record.bytes).expect("mailbox 字节") <= LOG_OFFSET,
         "观测区紧跟 mailbox，不与契约字段重叠"
     );
-    assert!(
-        LOG_OFFSET + LOG_WORDS * 8 <= 0x1000,
-        "bench mailbox 页容得下契约 mailbox 与观测区"
-    );
+    const {
+        assert!(
+            LOG_OFFSET + LOG_WORDS * 8 <= 0x1000,
+            "bench mailbox 页容得下契约 mailbox 与观测区"
+        );
+    }
     let cold_record = contract
         .records
         .iter()
