@@ -427,6 +427,39 @@ foldhash 固定种子状态，避免每次 emit 使用 SipHash。索引保留表
 编码契约（`ENCODER_SCHEMA = 2`、`ENCODER_REVISION = 2`、`LOWERING_REVISION = 4`、`ALLOCATION_REVISION = 2`、`METADATA_REVISION = 1`）把表、形状不变量与 lowering/分配规则版本一起冻结：`EncoderContract::verify` 校验每个 form 的形状、助记符、特性名与 baseline 归属，`fingerprint` 取域 `gugu-x64-encoder-v1` 下对规范化字节的哈希（域 `gugu-x64-encoder-catalog-v1` 单独标记目录），任何表改动都会改变指纹并进入 action key，分配规则 revision 与 lowering revision 一并进入 fragment key。`Rel8` 是独立操作数种类，覆盖 `jmp`/`jcc` 的 17 个短跳 form；`assemble` 按 form 声明的字段宽度（1 或 4 字节）回填局部标签，超出 rel8 的距离是编码错误。`SelectInstructions` 对封闭 LIR opcode 穷尽 lowering：函数级序列先按 rel32 编码，再按 code offset 只许长变短地收缩为 rel8；外部符号、冷边与 `call` 保持 rel32 reloc。内部符号文本为 `__gugu_<kind>_<64 lowercase hex>`（kind 为 `fn`、`static`、`vtable`、`glue`、`runtime`、`const` 或 `veneer`），C import/export 不加该前缀；符号 key 与 mangled 文本同源，不把已 mangled 的字符串再哈希一次。`LegalizeX86_64` 与函数级选指产出的序列连同约束、clobber、冷边、mangled 符号、**重定位引用的符号名集合**、热/冷块计数、encoded bytes 与[分配产物](#allocation-artifacts)组成 codegen fragment（`CODEGEN_SCHEMA = 5`，键域 `gugu-x64-fragment-key-v1`，世界指纹域 `gugu-x64-fragments-v1`，元数据指纹域 `gugu-x64-metadata-v1`）；fragment 校验会重算该集合，并对带 `__gugu_` 前缀的符号强制上述形状，供镜像规划做内部符号冲突检查。query key 还并入 scheduler/coroutine 契约指纹、`TypeUniverse` 指纹、`LOWERING_REVISION`、`ALLOCATION_REVISION` 与 `METADATA_REVISION`；逐站点记录指令、字节区间、重定位、约束、clobber 与点位范围，并在验证时重算站点序、字节区间、重定位范围、frame 一致性（`stats.frame_size_max == frame.frame_size`、点位段数与站点一致）与片段指纹。镜像计划与 CLI JSON 暴露 `x64-rel8-count`、`x64-hot-block-count`、`x64-cold-block-count`、`x64-entry-symbol`、`x64-frame-size-max`、`x64-spill-slot-count`、`x64-spill-bytes`、`x64-saved-gpr-count`、`x64-reload-count`、`x64-spill-store-count`、`x64-copy-move-count`、`x64-copy-cycle-count`、`x64-peak-live-gpr`、`x64-peak-live-xmm`、`x64-allocated-values`、`coroutine-stack-check-offset` 与 `scheduler-poll-flags-offset`；`x64-entry-symbol` 是 `MonoRoots` 里 `RootCategoryV1::Entry` 实例的那个片段，不能按片段顺序推断（片段按实例键升序，runtime helper 会排在入口前面）。
 
 
+### A64 独立编码库
+
+`gugu-backend::a64` 是尚未接入任何目标、CLI、lowering 或运行时的纯库，不能据此选择
+`aarch64` 目标。封闭表目前包含 307 个 ARMv8.0-A base 与 FP/AdvSIMD 标量形式；不包含
+LSE 或 V128 整数向量指令。`FormId` 是固定表序下标，操作数采用汇编顺序；W/X 与
+B/H/S/D/Q 是寄存器视图，SP 与 XZR 是不同寄存器种类，编码号 31 的解释由槽决定。
+TBZ/TBNZ 的规范形式对位号 0–31 使用 W 视图，对 32–63 使用 X 视图。
+
+每个 form 明确声明固定 `mask`/`match`（实现字段名 `fixed`）、最低特性和逐操作数字段
+位置。共享 verifier 检查形状、立即数范围、字节对齐、扩展种类、写回及独占存储的寄存器
+重叠约束。编码器生成一个小端 32 位字；逻辑立即数按元素宽度、旋转和连续 1 位段编码为
+`N:immr:imms`，零、全 1 和不可表示的位模式被拒绝。解码器按表序首匹配，拒绝未知、
+保留和不满足共享约束的字，不在指令表外猜测指令。逻辑立即数的等价位编码在重新编码时
+规范化；从本库编码结果出发，`encode → decode → encode` 必须逐字相等。
+
+符号操作数不立即求值：对应字段清零并返回目标名、加数与 `Branch26`、`Call26`、
+`CondBr19`、`TestBr14`、`AdrpPage21`、`AddLo12`、按访问大小缩放的 `LdStLo12`
+或 `Literal19` 重定位记录。地址基址不因重定位而清零。库不应用重定位、不布局标签，
+分支立即数是相对当前指令的字节位移，ADRP 的立即数是页差乘 4096。
+`AddLo12` 符号操作数仅适用于非置标志的 `add.W.imm` 与 `add.X.imm`；共享 verifier
+拒绝 `sub`、`subs`、`adds` 立即数形式上的符号目标，不生成重定位。
+
+`ENCODER_SCHEMA = 1`、`ENCODER_REVISION = 2` 冻结此契约。`contract::verify()` 校验
+目录键唯一、固定值只占固定字段、字段不重叠且不越界，以及任意两行的 mask/match 不会
+同时匹配一个字。域 `gugu-a64-encoder-catalog-v1` 覆盖有序目录、形状、特性与字段；
+域 `gugu-a64-encoder-v1` 覆盖 schema、revision 与目录摘要。目录或规则变动必须提高
+revision 并更新测试中的指纹钉值，不能静默沿用身份。
+
+`a64/fixtures/llvm.txt` 逐行保存 LLVM 汇编文本与完整指令字，来自离线宿主
+`clang -c -target arm64-apple-macos` 与 `otool -t`，并非由本编码器生成期望值。
+测试明确引用该 fixture，通过 Rust 构造每个 form 的样本及边界样本，同时比较规范文本、
+字节和解码回环；默认测试不启动 assembler 或任何子进程。
+
 ### Cost calibration profile {#cost-calibration-profile}
 
 每个 `TargetDescriptor` 关联版本化 `BackendCostProfile`，至少包含 `{ baseline_digest, inline_hot_bytes, inline_cold_bytes, max_spill_slots, max_spill_bytes_per_call, max_reload_stores, code_size_budget, regression_percent, vector_lowering }`。当前两个目标共用 `baseline_cost_profile()`：`baseline_digest` 由域 `gugu-backend-cost-baseline-v1` 对 `x86_64-v1` 哈希得到，`inline_hot_bytes = 256`、`inline_cold_bytes = 128`、`code_size_budget = 4096`、`max_spill_slots = 64`、`max_spill_bytes_per_call = 512`、`max_reload_stores = 256`、`regression_percent = 5`，且 `vector_lowering = false`。`vector_lowering = false` 表示该目标尚未提供校准的向量 lowering：`LoopVectorizationAndUnrolling` 此时只做 unroll 与 scalar remainder，不得生成任何 `V128`；只有后端提供 `vector_lowering = true` 的已校准 profile 后，vectorizer 才允许生成 vector main loop。profile固定当前 `r14/r15/r11` 保留寄存器决定，不允许后端在单个函数上临时释放 runtime register或以不同寄存器集逃避成本记录；换寄存器集必须产生新的 compiler/runtime schema和独立 profile。
