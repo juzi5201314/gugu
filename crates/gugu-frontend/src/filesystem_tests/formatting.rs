@@ -160,6 +160,28 @@ fn heterogeneous_pack_return_exits_the_function() {
 }
 
 #[test]
+fn heterogeneous_pack_closure_captures() {
+    assert_eq!(
+        render(
+            r#"
+        use std.fmt.{Formatter}
+        fn total[Ts: Print...](...args: Ts) string {
+            let out = Formatter::new()
+            for a in args {
+                let text = f"{a}"
+                let write = fn() { out.write_str(text) }
+                write()
+            }
+            out.finish()
+        }
+        fn render() string = total(1, true, "x")
+        "#
+        ),
+        "1truex"
+    );
+}
+
+#[test]
 fn heterogeneous_pack_user_dispatch_and_helpers() {
     assert_eq!(
         render(
@@ -203,6 +225,30 @@ fn runtime_format_primitives() {
             }"#
         ),
         expected
+    );
+}
+
+#[test]
+fn heterogeneous_pack_closure_element_captures() {
+    assert_eq!(
+        render(
+            r#"
+        use std.fmt.{Formatter}
+        fn total[Ts: Print...](...args: Ts) string {
+            let out = Formatter::new()
+            for a in args {
+                let write = fn() {
+                    let inner = fn() { a.print(&out) }
+                    inner()
+                }
+                write()
+            }
+            out.finish()
+        }
+        fn render() string = total(1, true, "x") + total()
+        "#
+        ),
+        "1truex"
     );
 }
 

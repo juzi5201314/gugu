@@ -110,6 +110,7 @@ pub enum ExprKind {
     },
     Closure {
         definition: DefId,
+        captures: Vec<LocalId>,
     },
     Spawn {
         definition: DefId,

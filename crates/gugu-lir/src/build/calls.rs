@@ -474,7 +474,7 @@ impl Builder<'_> {
                 };
                 arguments.push(match value {
                     Some(value) => value,
-                    None => self.capture_environment(owner.definition)?,
+                    None => self.capture_environment(owner.definition, None)?,
                 });
             }
             return Ok(CallTarget::Instance(key));

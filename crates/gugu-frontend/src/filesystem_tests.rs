@@ -229,7 +229,12 @@ fn interpret_bounded(
             let operands = body.args(&instruction.arguments);
             let args: Vec<_> = operands.iter().map(|value| values[value.index()]).collect();
             let value = match instruction.op {
-                Op::StackCheck | Op::SafepointPoll { .. } => continue,
+                Op::StackCheck
+                | Op::SafepointPoll { .. }
+                | Op::RegionPublish { .. }
+                | Op::RegionReset { .. }
+                | Op::PromoteManaged { .. }
+                | Op::RegionTransfer { .. } => continue,
                 Op::Call(ref invoked) => {
                     let returned = call(Boundary::Call(&invoked.target), &args, memory);
                     assert_eq!(returned.len(), instruction.results.len());
@@ -249,6 +254,7 @@ fn interpret_bounded(
                     continue;
                 }
                 ref operation @ (Op::GcAlloc { .. }
+                | Op::RegionAlloc { .. }
                 | Op::SymbolAddr(_)
                 | Op::GcWriteBarrier { .. }) => {
                     let returned = call(Boundary::Storage(operation), &args, memory);

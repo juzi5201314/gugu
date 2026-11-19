@@ -94,8 +94,11 @@ impl Builder<'_> {
                 let result = self.emit_select(id, arms)?;
                 return self.finish_expr(id, result);
             }
-            hir::ExprKind::Closure { definition } => self.emit_closure(id, definition, false)?,
-            hir::ExprKind::Spawn { definition } => self.emit_closure(id, definition, true)?,
+            hir::ExprKind::Closure {
+                definition,
+                captures,
+            } => self.emit_closure(id, definition, false, &captures)?,
+            hir::ExprKind::Spawn { definition } => self.emit_closure(id, definition, true, &[])?,
             hir::ExprKind::Call {
                 target,
                 receiver,
@@ -530,6 +533,7 @@ impl Builder<'_> {
         id: ExprId,
         definition: hir::DefId,
         spawn: bool,
+        captures: &[hir::LocalId],
     ) -> Result<(), Diagnostic> {
         let dest = self.temp(self.expr_ty(id));
         if spawn {
@@ -547,7 +551,10 @@ impl Builder<'_> {
                 Place::local(dest),
                 Rvalue::Aggregate {
                     kind: AggregateKind::Closure(definition),
-                    operands: Vec::new(),
+                    operands: captures
+                        .iter()
+                        .map(|local| copy_of(self.hir_to_gir[local.index()]))
+                        .collect(),
                 },
             );
         }

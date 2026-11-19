@@ -354,7 +354,7 @@ impl Builder<'_> {
                 self.channel_try(op, operands, ty)
             }
             g::IntrinsicOp::Spawn(g::SpawnTarget::Body(definition)) => {
-                self.closure(*definition, ty, true)
+                self.closure(*definition, ty, true, None)
             }
             g::IntrinsicOp::Spawn(g::SpawnTarget::Callee(callee)) => {
                 self.spawn_callee(callee, operands, ty)
@@ -656,8 +656,9 @@ impl Builder<'_> {
         definition: hir::DefId,
         ty: u32,
         spawn: bool,
+        captures: Option<&[g::Operand]>,
     ) -> Result<Computed, Diagnostic> {
-        let environment = self.capture_environment(definition)?;
+        let environment = self.capture_environment(definition, captures)?;
         if !spawn {
             return Ok(Computed::Values {
                 ty,
@@ -1015,6 +1016,7 @@ impl Builder<'_> {
     pub(super) fn capture_environment(
         &mut self,
         definition: hir::DefId,
+        sources: Option<&[g::Operand]>,
     ) -> Result<ValueId, Diagnostic> {
         let owner = self
             .module
@@ -1043,24 +1045,36 @@ impl Builder<'_> {
         };
         let mut slots = Vec::with_capacity(owner.captures.len());
         let mut keys = Vec::with_capacity(owner.captures.len());
-        for capture in &owner.captures {
-            let local = if capture.owner == self.owner.definition {
-                capture.source
+        for (index, capture) in owner.captures.iter().enumerate() {
+            let local_id = if let Some(sources) = sources {
+                let Some(g::Operand::Copy(place)) = sources.get(index) else {
+                    return Err(invalid("闭包捕获缺少源槽"));
+                };
+                if !place.is_local() {
+                    return Err(invalid("闭包捕获源不是局部槽"));
+                }
+                place.local
             } else {
-                self.owner
-                    .captures
+                let local = if capture.owner == self.owner.definition {
+                    capture.source
+                } else {
+                    self.owner
+                        .captures
+                        .iter()
+                        .find(|outer| {
+                            outer.owner == capture.owner && outer.source == capture.source
+                        })
+                        .ok_or_else(|| invalid("嵌套 capture 没有传递槽"))?
+                        .local
+                };
+                let local = self
+                    .gir
+                    .locals
                     .iter()
-                    .find(|outer| outer.owner == capture.owner && outer.source == capture.source)
-                    .ok_or_else(|| invalid("嵌套 capture 没有传递槽"))?
-                    .local
+                    .position(|candidate| candidate.hir_local == Some(local))
+                    .ok_or_else(|| invalid("capture 源槽没有 GIR 身份"))?;
+                g::LocalId(id(local))
             };
-            let local = self
-                .gir
-                .locals
-                .iter()
-                .position(|candidate| candidate.hir_local == Some(local))
-                .ok_or_else(|| invalid("capture 源槽没有 GIR 身份"))?;
-            let local_id = g::LocalId(id(local));
             let ty = self.local_ty(local_id);
             if self.layout(ty).passing.has_resource() {
                 return Err(invalid_resource(

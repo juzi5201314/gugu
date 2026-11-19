@@ -487,6 +487,9 @@ impl<'a> Harness<'a> {
                     }
                     vec![at]
                 }
+                Boundary::Storage(Op::RegionAlloc { .. }) => {
+                    vec![self.allocate(memory, usize::try_from(args[0]).unwrap())]
+                }
                 Boundary::Storage(Op::GcWriteBarrier { .. }) => vec![],
                 Boundary::Storage(Op::SymbolAddr(Symbol::Data(index))) => {
                     let data = &body.data[*index as usize].bytes;

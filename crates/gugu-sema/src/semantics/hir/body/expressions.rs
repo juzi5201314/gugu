@@ -195,7 +195,21 @@ impl BodyBuilder<'_, '_, '_, '_> {
                 {
                     effects = hir::Effects::ALLOCATE | hir::Effects::SAFEPOINT;
                 }
-                hir::ExprKind::Closure { definition }
+                let captures = self
+                    .compiler
+                    .output
+                    .owners
+                    .iter()
+                    .find(|owner| owner.definition == definition)
+                    .ok_or_else(|| self.error("闭包没有捕获 owner"))?
+                    .captures
+                    .iter()
+                    .map(|capture| capture.source)
+                    .collect();
+                hir::ExprKind::Closure {
+                    definition,
+                    captures,
+                }
             }
             ast::ExprKind::Async(body) => {
                 effects = hir::Effects::ALLOCATE | hir::Effects::SAFEPOINT;

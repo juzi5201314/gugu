@@ -286,6 +286,7 @@ impl BodyBuilder<'_, '_, '_, '_> {
             location: location.clone(),
             storage: 1,
         });
+        self.local_sources.push(None);
         let pattern = hir::PatternId(checked_id(self.patterns.len())?);
         self.patterns.push(Some(hir::Pattern {
             location,

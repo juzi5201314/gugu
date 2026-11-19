@@ -7,7 +7,7 @@ use super::{
 };
 use crate::{Diagnostic, DiagnosticCode};
 
-pub const SCHEMA_VERSION: u32 = 17;
+pub const SCHEMA_VERSION: u32 = 18;
 
 #[derive(Clone, Debug, Default, Eq, PartialEq, serde::Serialize, serde::Deserialize)]
 pub struct CheckedSemantics {
@@ -196,6 +196,7 @@ pub struct CapturePlan {
     pub expression: ExprId,
     pub function: Option<super::model::CallableId>,
     pub signature: Ty,
+    pub type_parameters: Vec<String>,
     pub captures: Vec<CapturedSlot>,
     pub coroutine: bool,
     pub dependencies: Vec<super::model::DefRef>,

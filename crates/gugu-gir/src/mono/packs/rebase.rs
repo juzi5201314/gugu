@@ -134,7 +134,12 @@ impl Expander<'_, '_> {
                 }
                 _ => {}
             },
-            E::Literal(_) | E::Closure { .. } | E::Spawn { .. } => {}
+            E::Closure { captures, .. } => {
+                for local in captures {
+                    m.local(local)
+                }
+            }
+            E::Literal(_) | E::Spawn { .. } => {}
             E::Tuple(r) | E::Array(r) => shift(r, m.expression_ids),
             E::Repeat { value, .. } | E::Comptime { value } => m.expr(value),
             E::Construct { fields, .. } => shift(fields, m.fields),
