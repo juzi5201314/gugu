@@ -246,6 +246,7 @@ AbstractState {
 
 例如：
 
+<!-- docs-example: parse -->
 ```gugu
 fn demo() {
     let n = 20

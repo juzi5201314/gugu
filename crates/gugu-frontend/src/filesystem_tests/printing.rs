@@ -2,7 +2,7 @@ use super::{CompileRequest, Compiler, TargetName, harness::Harness};
 use crate::runtime::RuntimeMachineOp;
 
 #[expect(clippy::ptr_arg, reason = "签名需与 machine_hook 一致")]
-fn capture(
+pub(super) fn capture(
     harness: &mut Harness<'_>,
     op: RuntimeMachineOp,
     args: &[u64],

@@ -59,6 +59,8 @@ runtime 提供弱公平而非 wall-clock 时间片：只要进程继续运行、
 channel 生产者与消费者的用法：
 
 ```gugu
+use std.io.{print}
+
 fn producer(jobs: chan[int]) {
     for i in 0..8 {
         jobs.send(i)

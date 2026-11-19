@@ -193,6 +193,7 @@ string 不支持单整数 `s[i]`，避免把 byte、Unicode scalar 和用户可�
 
 COW 值语义的用法：
 
+<!-- docs-example: gap string 没有适用的方法 `push` -->
 ```gugu
 fn demo() {
     let original = "gugu"
@@ -1162,9 +1163,9 @@ fn root_publish[T](place: T, value: T)
 enum Signal {
     Interrupt,
     Terminate,
-    #[cfg(os = "linux")] Hangup,
-    #[cfg(os = "linux")] User1,
-    #[cfg(os = "linux")] User2,
+    #[cfg(any(os = "linux", os = "macos"))] Hangup,
+    #[cfg(any(os = "linux", os = "macos"))] User1,
+    #[cfg(any(os = "linux", os = "macos"))] User2,
     #[cfg(os = "windows")] Break,
 }
 

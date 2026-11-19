@@ -36,6 +36,7 @@
 
 string 示例：
 
+<!-- docs-example: gap string 没有适用的方法 `push` -->
 ```gugu
 fn suffix(value: string) {
     value.push('!')
@@ -64,6 +65,7 @@ fn demo() {
 
 资源示例：
 
+<!-- docs-example: parse -->
 ```gugu
 fn inspect(file: File) {
     // 按值检查同一资源；具体租约优化不可观察
@@ -130,6 +132,7 @@ fn demo() {
 
 ## `clone`：只要深拷贝时才出现
 
+<!-- docs-example: parse -->
 ```gugu
 trait Clone {
     fn clone(self: &Self) Self

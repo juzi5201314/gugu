@@ -2,6 +2,7 @@
 mod collections;
 mod copy;
 mod debug_builders;
+mod docs_examples;
 mod float_formatting;
 mod formatting;
 mod harness;
@@ -11,6 +12,7 @@ mod platform;
 mod printing;
 mod process;
 mod resource;
+mod signal;
 mod trace;
 
 use crate::lir::body::{Body, Condition, IntOp, Op, Terminator, Type, range};

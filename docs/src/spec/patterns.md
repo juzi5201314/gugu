@@ -67,6 +67,7 @@ fn demo(r: Result[int, string], x: int) {
 
 ## `if let` / let 链 / `let-else`
 
+<!-- docs-example: parse -->
 ```gugu
 fn demo(
     r: Result[int, string],
@@ -106,6 +107,13 @@ fn demo(
 ## `let` 与参数
 
 ```gugu
+struct Point {
+    pub x: int
+    pub y: int
+}
+
+struct Meters(int)
+
 fn demo(pair: (int, int), p: Point, m: Meters) {
     let (a, b) = pair
     let Point { x, y } = p
