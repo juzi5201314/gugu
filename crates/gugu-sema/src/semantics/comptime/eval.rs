@@ -161,6 +161,7 @@ pub(super) struct EvalState<'a> {
     frames: Vec<Vec<(String, ConstantValue)>>,
     /// 函数与常量初始化只访问自身词法帧，不可读取调用者局部槽。
     frame_bases: Vec<usize>,
+    const_arguments: Vec<BTreeMap<String, Option<ConstantValue>>>,
     /// SourceExpand 域的插入上下文与 query 访问；其它域为空。
     expand: Option<ExpandState<'a>>,
     /// `embed_file` 的编译输入根；无文件系统边界的输入为空。
@@ -187,6 +188,7 @@ impl<'a> EvalState<'a> {
             const_stack: Vec::new(),
             frames: Vec::new(),
             frame_bases: Vec::new(),
+            const_arguments: Vec::new(),
             expand: None,
             embed: None,
         }
@@ -235,6 +237,7 @@ impl<'a> EvalState<'a> {
         self.calls.push(name.to_owned());
         self.frame_bases.push(self.frames.len());
         self.frames.push(Vec::new());
+        self.const_arguments.push(BTreeMap::new());
         Ok(())
     }
 
@@ -243,6 +246,7 @@ impl<'a> EvalState<'a> {
         self.calls.pop();
         self.frames.pop();
         self.frame_bases.pop();
+        self.const_arguments.pop();
     }
 
     fn bind(&mut self, name: String, value: ConstantValue) {
@@ -269,6 +273,16 @@ impl<'a> EvalState<'a> {
                     .map(|slot| (base + frame, slot))
             });
         let Some((frame, slot)) = slot else {
+            if self
+                .const_arguments
+                .last()
+                .is_some_and(|arguments| matches!(arguments.get(name), Some(None)))
+            {
+                return Err(capability_error(
+                    span,
+                    "早期求值 const 泛型调用需要显式 ::[...] const 实参".to_owned(),
+                ));
+            }
             return Ok(None);
         };
         self.alloc(self.frames[frame][slot].1.heap_bytes(), span)?;
@@ -1235,7 +1249,7 @@ impl Model<'_> {
         ) {
             return Err(self.fail(module, expression, "被调端点不是函数"));
         }
-        let generics = self.call_const_arguments(module, expression, def, &arguments, state)?;
+        let generics = self.call_const_arguments(module, expression, def, state)?;
         self.interpret_function(def, &arguments, &generics, &span, state)
     }
 
@@ -1467,7 +1481,7 @@ impl Model<'_> {
         &self,
         def: DefRef,
         arguments: &[ConstantValue],
-        generics: &BTreeMap<String, ConstantValue>,
+        generics: &BTreeMap<String, Option<ConstantValue>>,
         span: &crate::Span,
         state: &mut EvalState,
     ) -> EvalResult<ConstantValue> {
@@ -1492,8 +1506,11 @@ impl Model<'_> {
             FnBody::Eq(body) | FnBody::Block(body) => body,
         };
         state.enter(&name, span)?;
+        *state.const_arguments.last_mut().expect("函数帧已进入") = generics.clone();
         for (name, value) in generics {
-            state.bind(name.clone(), value.clone());
+            if let Some(value) = value {
+                state.bind(name.clone(), value.clone());
+            }
         }
         let result = self
             .bind_parameters(def.module, function, arguments, state)

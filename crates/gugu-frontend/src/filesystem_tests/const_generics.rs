@@ -1,5 +1,126 @@
 use super::{CompileRequest, Compiler, TargetName, printing::output};
 
+fn requires_explicit_early_const_arguments(source: &str) {
+    let compiled = Compiler::shared().compile(CompileRequest::single_file(
+        "main.gg",
+        source,
+        TargetName::X86_64Linux,
+    ));
+    assert!(
+        compiled
+            .diagnostics()
+            .items()
+            .iter()
+            .any(|diagnostic| diagnostic
+                .message()
+                .contains("早期求值 const 泛型调用需要显式 ::[...] const 实参")),
+        "{:?}",
+        compiled.diagnostics().items()
+    );
+}
+
+#[test]
+fn early_const_calls_do_not_reform_parameter_lengths() {
+    let source = "const SIZE: int = length([0])\nfn length[comptime N: int](a: [int; SIZE]) int { N }\nfn main() { _ = SIZE }";
+    requires_explicit_early_const_arguments(source);
+    let explicit = source.replace("length([0])", "length::[1]([0])");
+    let compiled = Compiler::shared().compile(CompileRequest::single_file(
+        "main.gg",
+        &explicit,
+        TargetName::X86_64Linux,
+    ));
+    assert!(
+        compiled.is_success(),
+        "{:?}",
+        compiled.diagnostics().items()
+    );
+}
+
+#[test]
+fn early_explicit_const_arguments_ignore_ordinary_caller_parameters() {
+    let actual: Vec<_> = output(
+        r#"
+use std.io.{println}
+const M: int = 3
+fn number[comptime N: int]() int { N }
+fn caller(M: int) int { number::[M]() }
+fn expression(M: int) int { number::[M + 1]() }
+const ANSWER: int = caller(7)
+const EXPRESSION: int = expression(7)
+fn main() { println(ANSWER)
+    println(EXPRESSION)
+}
+"#,
+        &[],
+    )
+    .into_iter()
+    .flat_map(|(_, bytes)| bytes)
+    .collect();
+    assert_eq!(actual, b"3\n4\n");
+}
+
+#[test]
+fn early_const_calls_do_not_inspect_inactive_enum_fields() {
+    let source = r#"
+use std.io.{println}
+enum Choice { A { data: [int; 2] }, B { data: [int; 3] } }
+fn number[comptime N: int](choice: Choice) int { N }
+const ANSWER: int = number::[4](Choice::A { data: [1, 2] })
+fn main() { println(ANSWER) }
+"#;
+    let actual: Vec<_> = output(source, &[])
+        .into_iter()
+        .flat_map(|(_, bytes)| bytes)
+        .collect();
+    assert_eq!(actual, b"4\n");
+    requires_explicit_early_const_arguments(&source.replace("number::[4]", "number"));
+}
+
+#[test]
+fn early_empty_outer_arrays_require_explicit_inner_lengths() {
+    let source = r#"
+use std.io.{println}
+fn inner[comptime N: int](a: [[int; N]; 0]) int { N }
+const ANSWER: int = inner::[3]([[1; 3]; 0])
+fn main() { println(ANSWER) }
+"#;
+    let actual: Vec<_> = output(source, &[])
+        .into_iter()
+        .flat_map(|(_, bytes)| bytes)
+        .collect();
+    assert_eq!(actual, b"3\n");
+    requires_explicit_early_const_arguments(&source.replace("inner::[3]", "inner"));
+    requires_explicit_early_const_arguments(
+        "const N: int = 9\nfn length[comptime N: int](a: [int; N]) int { N }\nconst ANSWER: int = length([1, 2])\nfn main() { _ = ANSWER }",
+    );
+}
+
+#[test]
+fn early_explicit_const_arguments_allow_empty_and_multiple_type_pack_elements() {
+    let actual: Vec<_> = output(
+        r#"
+use std.io.{println}
+fn number[comptime N: int, Ts...]() int { N }
+fn typed[T, comptime N: int, Ts...]() int { N }
+const EMPTY: int = number::[2]()
+const MULTIPLE: int = number::[3, int, bool]()
+const TYPED: int = typed::[bool, 4, int]()
+fn main() { println(EMPTY)
+    println(MULTIPLE)
+    println(TYPED)
+}
+"#,
+        &[],
+    )
+    .into_iter()
+    .flat_map(|(_, bytes)| bytes)
+    .collect();
+    assert_eq!(actual, b"2\n3\n4\n");
+    requires_explicit_early_const_arguments(
+        "fn ambiguous[Ts..., comptime N: int]() int { N }\nconst ANSWER: int = ambiguous::[2, int]()\nfn main() { _ = ANSWER }",
+    );
+}
+
 #[test]
 fn late_repeats_use_concrete_instance_lengths() {
     let actual: Vec<_> = output(
@@ -50,7 +171,7 @@ fn main() {
 }
 
 #[test]
-fn early_calls_bind_explicit_and_inferred_const_generics() {
+fn early_calls_bind_only_explicit_const_generics() {
     let actual: Vec<_> = output(
         r#"
 use std.io.{println}
@@ -58,14 +179,17 @@ const N: int = 9
 fn number[comptime N: int]() int { N }
 fn forward[comptime N: int]() int { number::[N]() }
 fn length[comptime K: int](a: [int; K]) int { K }
+fn ignore[comptime K: int](a: [int; K]) int { 5 }
 const EXPLICIT: int = number::[3]()
-const INFERRED: int = length([1, 2])
-const EMPTY: int = length([1; 0])
+const ARRAY: int = length::[2]([1, 2])
+const EMPTY: int = length::[0]([1; 0])
 const FORWARDED: int = forward::[4]()
+const IGNORED: int = ignore([1, 2, 3])
 fn main() { println(EXPLICIT)
-    println(INFERRED)
+    println(ARRAY)
     println(EMPTY)
     println(FORWARDED)
+    println(IGNORED)
 }
 "#,
         &[],
@@ -73,7 +197,7 @@ fn main() { println(EXPLICIT)
     .into_iter()
     .flat_map(|(_, bytes)| bytes)
     .collect();
-    assert_eq!(actual, b"3\n2\n0\n4\n");
+    assert_eq!(actual, b"3\n2\n0\n4\n5\n");
 }
 
 #[test]
