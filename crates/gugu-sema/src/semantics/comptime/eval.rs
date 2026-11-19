@@ -17,6 +17,7 @@ use crate::query::{QueryEngine, QueryKey, QueryKind};
 use crate::source::{ExpansionId, SourceMap, SourceSlot, SourceSnapshot};
 use crate::string;
 use crate::{Diagnostic, DiagnosticCode};
+mod generics;
 
 /// ParseSource query 的 schema 版本。
 pub const PARSE_SOURCE_SCHEMA_VERSION: u32 = 1;
@@ -1234,7 +1235,8 @@ impl Model<'_> {
         ) {
             return Err(self.fail(module, expression, "被调端点不是函数"));
         }
-        self.interpret_function(def, &arguments, &span, state)
+        let generics = self.call_const_arguments(module, expression, def, &arguments, state)?;
+        self.interpret_function(def, &arguments, &generics, &span, state)
     }
 
     /// `std.src.file`/`line`/`column` 的内建求值：折叠为调用表达式的
@@ -1465,6 +1467,7 @@ impl Model<'_> {
         &self,
         def: DefRef,
         arguments: &[ConstantValue],
+        generics: &BTreeMap<String, ConstantValue>,
         span: &crate::Span,
         state: &mut EvalState,
     ) -> EvalResult<ConstantValue> {
@@ -1489,6 +1492,9 @@ impl Model<'_> {
             FnBody::Eq(body) | FnBody::Block(body) => body,
         };
         state.enter(&name, span)?;
+        for (name, value) in generics {
+            state.bind(name.clone(), value.clone());
+        }
         let result = self
             .bind_parameters(def.module, function, arguments, state)
             .map_err(EvalError::from)

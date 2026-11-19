@@ -1,6 +1,33 @@
 use super::{CompileRequest, Compiler, TargetName, printing::output};
 
 #[test]
+fn early_calls_bind_explicit_and_inferred_const_generics() {
+    let actual: Vec<_> = output(
+        r#"
+use std.io.{println}
+const N: int = 9
+fn number[comptime N: int]() int { N }
+fn forward[comptime N: int]() int { number::[N]() }
+fn length[comptime K: int](a: [int; K]) int { K }
+const EXPLICIT: int = number::[3]()
+const INFERRED: int = length([1, 2])
+const EMPTY: int = length([1; 0])
+const FORWARDED: int = forward::[4]()
+fn main() { println(EXPLICIT)
+    println(INFERRED)
+    println(EMPTY)
+    println(FORWARDED)
+}
+"#,
+        &[],
+    )
+    .into_iter()
+    .flat_map(|(_, bytes)| bytes)
+    .collect();
+    assert_eq!(actual, b"3\n2\n0\n4\n");
+}
+
+#[test]
 fn const_generic_cached_callee_preserves_instance_identity() {
     let compiler = Compiler::new();
     let source = "fn length[comptime N: int](a: [int; N]) int { _ = a\n N }\nfn main() { _ = length([1, 2, 3]) }";
