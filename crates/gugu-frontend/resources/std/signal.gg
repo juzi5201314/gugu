@@ -47,6 +47,11 @@ fn signo(signal: Signal) uint {
         Signal::Terminate => 3,
     }
 }
+#[cfg(os = "macos")]
+fn signo(signal: Signal) uint = match signal {
+    Signal::Interrupt => 2,
+    Signal::Terminate => 15,
+}
 #[cfg(os = "linux")]
 fn signal_of(value: uint) Signal {
     if value == 2 { return Signal::Interrupt }
@@ -62,6 +67,8 @@ fn signal_of(value: uint) Signal {
     if value == 2 { return Signal::Break }
     Signal::Terminate
 }
+#[cfg(os = "macos")]
+fn signal_of(value: uint) Signal = if value == 15 { Signal::Terminate } else { Signal::Interrupt }
 
 fn subscribe_inner(signals: &[Signal], capacity: uint) Result[SignalSubscription, Error] {
     if signals.len() == 0 { return Err(Error::InvalidSignal) }

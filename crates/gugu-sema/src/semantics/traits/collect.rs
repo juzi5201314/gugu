@@ -605,7 +605,7 @@ impl Model<'_> {
             vec![(
                 "hash",
                 method_kind(
-                    vec![receiver.clone(), Ty::Ref(Box::new(Ty::Hasher))],
+                    vec![receiver.clone(), Ty::Ref(Box::new(self.hasher_type()))],
                     Ty::Unit,
                 ),
             )],

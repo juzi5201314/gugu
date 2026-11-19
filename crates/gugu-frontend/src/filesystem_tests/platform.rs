@@ -1,5 +1,7 @@
 //! 执行真实平台适配器，仅替换原生请求与 raw 缓冲分配；固定脚本逐次消费。
-use super::{Boundary, Compilation, CompileRequest, Compiler, TargetName, interpret, runtime_body};
+use super::{
+    Boundary, Compilation, CompileRequest, Compiler, TargetName, interpret_bounded, runtime_body,
+};
 use crate::lir::body::{Body, CallTarget};
 use std::collections::{BTreeMap, VecDeque};
 
@@ -42,6 +44,7 @@ struct Adapter<'a> {
     live: BTreeMap<u64, u64>,
     next: u64,
     depth: usize,
+    block_budget: usize,
 }
 impl<'a> Adapter<'a> {
     fn new(output: &'a Compilation, replies: Vec<Reply>) -> Self {
@@ -51,14 +54,20 @@ impl<'a> Adapter<'a> {
             live: BTreeMap::new(),
             next: 8192,
             depth: 0,
+            block_budget: 256,
         }
     }
     fn evaluate(&mut self, body: &Body, args: &[u64], memory: &mut Vec<u8>) -> Vec<u64> {
         self.depth += 1;
         assert!(self.depth <= 32);
-        let result = interpret(body, args, memory, &mut |target, args, memory| {
-            self.call(target, args, memory)
-        });
+        let block_budget = self.block_budget;
+        let result = interpret_bounded(
+            body,
+            args,
+            memory,
+            &mut |target, args, memory| self.call(target, args, memory),
+            block_budget,
+        );
         self.depth -= 1;
         result
     }
@@ -179,6 +188,37 @@ fn linux_cross_device_rename_has_no_copy_fallback() {
             .0,
         vec![0, 18]
     );
+}
+
+#[test]
+fn darwin_canonicalize_reports_required_capacity_without_truncating() {
+    let output = compile(TargetName::X86_64Macos);
+    let mut path = vec![b'a'; 300];
+    path[0] = b'/';
+    path[151] = b'/';
+    path.push(0);
+    for capacity in [256, 512] {
+        let mut adapter = Adapter::new(
+            &output,
+            vec![
+                Reply::new(21, 1, 0)
+                    .argument(1, INPUT)
+                    .write(2, path.clone()),
+            ],
+        );
+        adapter.block_budget = 4096;
+        let (result, memory) = adapter.run(
+            "fs_platform",
+            "call",
+            &[21, INPUT, OUTPUT, capacity, 0, 0, 0],
+        );
+        assert_eq!(result, vec![300, 0]);
+        if capacity < 300 {
+            assert_eq!(&memory[OUTPUT as usize..][..64], &[0xa5; 64]);
+        } else {
+            assert_eq!(&memory[OUTPUT as usize..][..300], &path[..300]);
+        }
+    }
 }
 
 #[test]

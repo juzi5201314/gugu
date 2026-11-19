@@ -98,7 +98,6 @@ impl Expander<'_, '_> {
             Ty::TryRecvErr => T::TryRecvErr,
             Ty::Panic => T::Panic,
             Ty::Formatter => T::Formatter,
-            Ty::Hasher => T::Hasher,
             Ty::MaybeUninit(t) => T::MaybeUninit(self.ty(t)?),
             Ty::Error | Ty::Var(_) => return Err(invalid("unresolved pack element type")),
         };

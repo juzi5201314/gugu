@@ -27,6 +27,8 @@ pub enum TargetName {
     X86_64Linux,
     /// x86_64 Windows。
     X86_64Windows,
+    /// x86_64 macOS 的内部构建产物。
+    X86_64Macos,
 }
 
 impl TargetName {
@@ -35,6 +37,7 @@ impl TargetName {
         match self {
             Self::X86_64Linux => "x86_64-linux",
             Self::X86_64Windows => "x86_64-windows",
+            Self::X86_64Macos => "x86_64-macos",
         }
     }
 }

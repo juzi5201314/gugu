@@ -121,7 +121,7 @@ trait Ord {
 }
 ```
 
-`Hash` 把值的语义字段馈送给调用方选择的 hasher；相等值必须产生相同输入。`Hasher` 与 `Formatter` 都是预导入的语言类型，写入方法随 `std.hash` 与 `std.fmt` 提供。
+`Hash` 把值的语义字段馈送给调用方选择的 hasher；相等值必须产生相同输入。`Hasher` 与 `Formatter` 都是预导入的标准库名义类型，写入方法随 `std.hash` 与 `std.fmt` 提供。`Hasher::with_seed(uint)` 创建确定性 FoldHash-fast 状态；`write_int`、`write_uint`、`write_bool`、`write_char`、`write_str`、`write_bytes` 追加规范字节流，`finish() uint` 可重复读取且不封闭后续写入。具体编码见[标准库](standard-library.md#collections-and-hash)。用户 `impl Hash` 可调用这些方法，也可通过 `self.field.hash(hasher)` 递归馈送。
 
 ```text
 trait Hash {
@@ -133,7 +133,7 @@ trait Default {
 }
 ```
 
-`Default` 是无接收者的关联函数。`Option[T]` 的 `default` 是 `None`，不要求 `T: Default`。`Result` 没有 `Default`。标量 `()`、`bool`、整数、`char`、`string` 有 `Default`；数组与元组在每个元素都有 `Default` 时有 `Default`。`Print` 与 `Debug` 覆盖 `()`、`bool`、整数、浮点、`char`、`string`、`TypeId`，以及元素满足同一 trait 的 `Option`、`Result`、数组和元组。`Hash` 覆盖除浮点以外的同一组标量，并在元素满足 `Hash` 时覆盖 `Option`、`Result`、数组和元组。`Binary`、`Octal`、`LowerHex`、`UpperHex` 只覆盖整数；`LowerExp` 与 `UpperExp` 只覆盖浮点。`Error` 由具体错误类型自行实现，编译器不提供覆盖用户 impl 的内建实现。
+`Default` 是无接收者的关联函数。`Option[T]` 的 `default` 是 `None`，不要求 `T: Default`。`Result` 没有 `Default`。标量 `()`、`bool`、整数、`char`、`string` 有 `Default`；数组与元组在每个元素都有 `Default` 时有 `Default`。`Print` 与 `Debug` 覆盖 `()`、`bool`、整数、浮点、`char`、`string`、`TypeId`，以及元素满足同一 trait 的 `Option`、`Result`、数组和元组。`Hash` 覆盖 `()`、bool、整数、char、string、Bytes，并在元素满足 `Hash` 时覆盖 `Option`、`Result` 和元组；浮点不满足 Hash，数组与 TypeId 暂保留内建 trait 资格，但调用 Hash.hash 会明确编译报错。`Binary`、`Octal`、`LowerHex`、`UpperHex` 只覆盖整数；`LowerExp` 与 `UpperExp` 只覆盖浮点。`Error` 由具体错误类型自行实现，编译器不提供覆盖用户 impl 的内建实现。
 
 `StableHash` 与 `StableOrd` 是没有方法的 unsafe marker trait：前者承诺该值副本的 Eq 与 Hash 可观察结果不能通过外部别名改变，后者对 Ord 作同一承诺。它们不使用 trait 继承；集合约束分别显式写成 `K: Eq + Hash + StableHash` 与 `K: Ord + StableOrd`。
 

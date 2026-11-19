@@ -106,7 +106,7 @@ fn query(node: uint) Result[Vec[SocketAddr], ResolveError] { unsafe {
     }
     result
 } }
-#[cfg(os = "linux")]
+#[cfg(any(os = "linux", os = "macos"))]
 fn prepare(packet: uint, a: uint, b: uint, c: uint, d: uint) {
     heap_store_word(packet + 8, 0)
     heap_store_word(packet + 16, a)
@@ -124,7 +124,7 @@ fn prepare(packet: uint, a: uint, b: uint, c: uint, d: uint) {
 }
 #[cfg(os = "linux")]
 fn sockaddr(node: uint) uint = heap_word(node + 24)
-#[cfg(os = "windows")]
+#[cfg(any(os = "windows", os = "macos"))]
 fn sockaddr(node: uint) uint = heap_word(node + 32)
 fn copy_addresses(first: uint) Result[Vec[SocketAddr], ResolveError] {
     let result = Vec[SocketAddr]::new()
@@ -156,6 +156,13 @@ fn resolve_error(code: int, native_error: uint) ResolveError {
         11002 => ResolveError::TemporaryFailure,
         _ => ResolveError::Other(code),
     }
+}
+#[cfg(os = "macos")]
+fn resolve_error(code: int, native_error: uint) ResolveError = match code {
+    7 | 8 => ResolveError::NotFound,
+    2 => ResolveError::TemporaryFailure,
+    11 => ResolveError::System(native.from_error(native_error)),
+    _ => ResolveError::Other(code),
 }
 fn service(processor: uint) {
     _ = processor

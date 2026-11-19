@@ -113,7 +113,7 @@ pub fn link_world(
     })
 }
 
-fn symbol_from_fragment(fragment: &FragmentPayload) -> Result<ObjectSymbol, String> {
+pub(super) fn symbol_from_fragment(fragment: &FragmentPayload) -> Result<ObjectSymbol, String> {
     let mut relocs = Vec::new();
     for reloc in &fragment.relocations {
         relocs.push(ObjectReloc {
@@ -139,7 +139,9 @@ fn symbol_from_fragment(fragment: &FragmentPayload) -> Result<ObjectSymbol, Stri
 }
 
 /// 登记机器片段作为一个代码符号；入口名与别名指向同一字节串。
-fn symbol_from_machine_fragment(blob: &fragments::FragmentBlob) -> Result<ObjectSymbol, String> {
+pub(super) fn symbol_from_machine_fragment(
+    blob: &fragments::FragmentBlob,
+) -> Result<ObjectSymbol, String> {
     let (first, rest) = blob
         .entries
         .split_first()

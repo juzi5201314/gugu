@@ -17,6 +17,11 @@ fn main() {
     println!("cargo:rerun-if-changed=../gugu-runtime-builder/src/lib.rs");
 
     let artifacts = gugu_runtime_builder::build_all().expect("runtime artifact build/verify");
+    let macos = gugu_compiler_core::TargetName::X86_64Macos;
+    let artifacts = artifacts.into_iter().chain([(
+        macos,
+        gugu_runtime_builder::build(macos).expect("internal macOS artifact build/verify"),
+    )]);
     fs::create_dir_all(&prebuilt_dir).expect("创建 prebuilt 目录");
     // 探针源只随 `runtime-gc-probes` 进入 artifact：文件名与嵌入路径都带上风味，两种构建互不覆盖。
     let flavor = if cfg!(feature = "runtime-gc-probes") {
@@ -35,6 +40,7 @@ fn main() {
         let name = match target {
             gugu_compiler_core::TargetName::X86_64Linux => "runtime-x86_64-linux",
             gugu_compiler_core::TargetName::X86_64Windows => "runtime-x86_64-windows",
+            gugu_compiler_core::TargetName::X86_64Macos => "runtime-x86_64-macos",
         };
         let name = format!("{name}{flavor}.gbc");
         fs::write(out_dir.join(&name), &bytes).expect("write runtime artifact");
@@ -47,5 +53,6 @@ fn frontend_target(target: gugu_compiler_core::TargetName) -> gugu_frontend::Tar
     match target {
         gugu_compiler_core::TargetName::X86_64Linux => gugu_frontend::TargetName::X86_64Linux,
         gugu_compiler_core::TargetName::X86_64Windows => gugu_frontend::TargetName::X86_64Windows,
+        gugu_compiler_core::TargetName::X86_64Macos => gugu_frontend::TargetName::X86_64Macos,
     }
 }

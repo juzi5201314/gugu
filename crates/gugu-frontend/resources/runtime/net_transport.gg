@@ -7,6 +7,7 @@ use std.runtime.fs_platform.{FsResult, control_allocate, control_free}
 use std.runtime.heap.{heap_word, heap_store_word, heap_word32, heap_store_word32, heap_fail}
 use std.runtime.scheduler.{park_current, ready_hot}
 use std.io.{Error}
+use std.net.address.{IpAddr}
 
 pub const READ: uint = 0
 pub const WRITE: uint = 1
@@ -23,6 +24,7 @@ const TAIL: uint = 1224
 pub const CONNECTED: uint = 1248
 pub const SHUT: uint = 1256
 const REGISTERED: uint = 1264
+const SPECIFIC_BINDING: uint = 1304
 pub const OVERLAPPED: uint = native.TRANSPORT_OVERLAPPED
 pub const ADDRESS: uint = 128
 pub const SCRATCH: uint = 512
@@ -168,13 +170,78 @@ fn mode_error(node: uint) uint {
 }
 pub const INVALID_STATE: uint = 18446744073709551612
 pub const NOT_CONNECTED: uint = 18446744073709551611
+#[cfg(os = "macos")]
+pub fn specific_datagram_binding(handle: uint, tcp: bool) Result[bool, Error] {
+    if tcp { return Ok(false) }
+    let address = native.address(handle, false)?
+    match address.ip() {
+        IpAddr::V4(ip) => {
+            for octet in ip.octets() {
+                if octet != 0 { return Ok(true) }
+            }
+        },
+        IpAddr::V6(ip) => {
+            for segment in ip.segments() {
+                if segment != 0 { return Ok(true) }
+            }
+        },
+    };
+    Ok(false)
+}
+#[cfg(not(os = "macos"))]
+pub fn specific_datagram_binding(handle: uint, tcp: bool) Result[bool, Error] {
+    _ = handle
+    _ = tcp
+    Ok(false)
+}
+pub fn record_datagram_binding(control: uint, specific: bool) {
+    if specific { heap_store_word(control + SPECIFIC_BINDING, 1) }
+}
 fn udp_control(node: uint) FsResult {
     let control = heap_word(node + 16)
-    let result = native.request(node + SCRATCH, 21, heap_word(control + 64), node + ADDRESS, heap_word(node + 96), 0, 0, 0)
-    if result.error == 0 { heap_store_word(control + CONNECTED, if heap_word(node + 48) == UDP_CONNECT { 1 } else { 0 }) }
+    let connecting = heap_word(node + 48) == UDP_CONNECT
+    let handle = heap_word(control + 64)
+    let result = datagram_control(node, control, handle, connecting)
+    if result.error == 0 { heap_store_word(control + CONNECTED, if connecting { 1 } else { 0 }) }
     result
 }
-#[cfg(os = "linux")]
+fn connect_datagram(node: uint, handle: uint) FsResult =
+    native.request(node + SCRATCH, 21, handle, node + ADDRESS, heap_word(node + 96), 0, 0, 0)
+#[cfg(not(os = "macos"))]
+fn datagram_control(node: uint, control: uint, handle: uint, connecting: bool) FsResult {
+    _ = control
+    _ = connecting
+    connect_datagram(node, handle)
+}
+#[cfg(os = "macos")]
+fn datagram_control(node: uint, control: uint, handle: uint, connecting: bool) FsResult {
+    let unix = heap_word(control + native.FAMILY) == 1
+    let result = if connecting { connect_datagram(node, handle) }
+    else if heap_word(control + CONNECTED) == 0 { return FsResult { value: 0, error: 0 } }
+    else if !unix {
+        // Darwin 清除本地 IP；同一个 socket 无法重新 bind。
+        if heap_word(control + SPECIFIC_BINDING) != 0 { return FsResult { value: 0, error: 45 } }
+        native.request(node + SCRATCH, 28, handle, 0, 0, 0, 0, 0)
+    } else {
+        native.put_family(node + ADDRESS, 0, heap_word(node + 96))
+        connect_datagram(node, handle)
+    }
+    if result.error != 0 {
+        let size = node + 304
+        heap_store_word32(size, 128)
+        let peer = native.request(node + SCRATCH, 6, handle, node + ADDRESS, size, 0, 0, 0)
+        if peer.error == 0 { heap_store_word(control + CONNECTED, 1) }
+        if peer.error == native.not_connected() {
+            heap_store_word(control + CONNECTED, 0)
+            // Darwin Unix socket 可已解除 peer，却拒绝 AF_UNSPEC。
+            if !connecting && unix && (result.error == 47 || result.error == 22) {
+                return FsResult { value: 0, error: 0 }
+            };
+        };
+    }
+    result
+}
+#[cfg(any(os = "linux", os = "macos"))]
 fn complete_native(node: uint, bytes: uint, status: uint) { finish(node, bytes, status) }
 #[cfg(os = "windows")]
 fn complete_native(node: uint, bytes: uint, status: uint) { complete_windows(node, bytes, status) }
@@ -227,9 +294,29 @@ fn register(node: uint) uint { unsafe {
     if result.error == 0 { heap_store_word(control + REGISTERED, events) }
     result.error
 } }
-#[cfg(os = "linux")]
+#[cfg(os = "macos")]
+fn unregister(control: uint) {
+    if update_interest(control, 0) != 0 { heap_fail() }
+}
+#[cfg(os = "macos")]
+fn register(node: uint) uint {
+    let control = heap_word(node + 16)
+    let events: uint = 0
+    if heap_word(control + HEAD) != 0 { events = events | uint(1) }
+    if heap_word(control + HEAD + 16) != 0 { events = events | uint(4) }
+    update_interest(control, events)
+}
+#[cfg(os = "macos")]
+fn update_interest(control: uint, events: uint) uint {
+    let old = heap_word(control + REGISTERED)
+    if events == old { return 0 }
+    let result = native.kevent_interest(native.port(), heap_word(control + 64), control | uint(1), old, events)
+    if result.error == 0 { heap_store_word(control + REGISTERED, events) }
+    result.error
+}
+#[cfg(any(os = "linux", os = "macos"))]
 fn cancel(node: uint, reason: uint) { finish(node, 0, reason) }
-#[cfg(os = "linux")]
+#[cfg(any(os = "linux", os = "macos"))]
 fn attempt(node: uint) {
     if !eligible(node) { return }
     let mode = mode_error(node)
@@ -241,8 +328,8 @@ fn attempt(node: uint) {
         finish(node, result.value, result.error)
         return
     }
-    let result = linux_call(node)
-    if native.would_block(result.error) || result.error == 115 || result.error == 114 || result.error == 4 {
+    let result = posix_call(node)
+    if native.would_block(result.error) || native.connecting(result.error) || result.error == 4 {
         let error = register(node)
         if error != 0 { finish(node, 0, error) }
         else { heap_store_word(node + ACTIVE, 1) }
@@ -250,8 +337,8 @@ fn attempt(node: uint) {
     }
     finish(node, result.value, result.error)
 }
-#[cfg(os = "linux")]
-fn linux_call(node: uint) FsResult {
+#[cfg(any(os = "linux", os = "macos"))]
+fn posix_call(node: uint) FsResult {
     let control = heap_word(node + 16)
     let handle = heap_word(control + 64)
     let op = heap_word(node + 48)
@@ -268,28 +355,36 @@ fn linux_call(node: uint) FsResult {
         if heap_word(node + 88) == 0 {
             heap_store_word(node + 88, 1)
             let started = native.request(scratch, 21, handle, node + ADDRESS, heap_word(node + 96), 0, 0, 0)
-            if started.error == 11 && heap_word(control + native.FAMILY) == 1 { heap_store_word(node + 88, 0) }
+            if native.would_block(started.error) && heap_word(control + native.FAMILY) == 1 { heap_store_word(node + 88, 0) }
             return started
         }
         heap_store_word32(node + 304, 4)
-        let result = native.request(scratch, 23, handle, 1, 4, node + 300, node + 304, 0)
+        let result = native.socket_error(handle, node + 300, node + 304, scratch)
         if result.error != 0 { return result }
         let status = heap_word32(node + 300)
         if status != 0 { return FsResult { value: 0, error: status } }
         // SO_ERROR=0 也可能仍在握手，getpeername 确认真正建立连接。
         heap_store_word32(node + 304, 128)
         let peer = native.request(scratch, 6, handle, node + ADDRESS, node + 304, 0, 0, 0)
-        if peer.error == 107 { return FsResult { value: 0, error: 115 } }
+        if peer.error == native.not_connected() { return FsResult { value: 0, error: native.connect_pending() } }
         return peer
     }
     if op == READ && heap_word(control + SHUT) & uint(1) != 0 { return FsResult { value: 0, error: 0 } }
     if op == WRITE && heap_word(control + SHUT) & uint(2) != 0 { return FsResult { value: 0, error: 32 } }
     if op == WRITE || op == SEND {
-        return native.request(scratch, 25, handle, data, length, 16384, if op == SEND && heap_word(node + 96) != 0 { node + ADDRESS } else { 0 }, if op == SEND { heap_word(node + 96) } else { 0 })
+        return native.request(scratch, 25, handle, data, length, native.send_flags(), if op == SEND && heap_word(node + 96) != 0 { node + ADDRESS } else { 0 }, if op == SEND { heap_word(node + 96) } else { 0 })
     }
     heap_store_word32(node + 96, 128)
-    native.request(scratch, 24, handle, data, length, if op == RECEIVE { 32 } else { 0 }, if op == READ { 0 } else { node + ADDRESS }, if op == READ { 0 } else { node + 96 })
+    if op == RECEIVE { return receive_datagram(node, handle, data, length) }
+    native.request(scratch, 24, handle, data, length, 0, 0, 0)
 }
+
+#[cfg(os = "linux")]
+fn receive_datagram(node: uint, handle: uint, data: uint, length: uint) FsResult =
+    native.request(node + SCRATCH, 24, handle, data, length, native.receive_flags(), node + ADDRESS, node + 96)
+#[cfg(os = "macos")]
+fn receive_datagram(node: uint, handle: uint, data: uint, length: uint) FsResult =
+    native.receive_datagram(node + SCRATCH, handle, data, length, node + ADDRESS, node + 96, node + 88)
 
 #[cfg(os = "windows")]
 fn unregister(control: uint) { _ = control }

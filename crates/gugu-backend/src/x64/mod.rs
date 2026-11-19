@@ -19,6 +19,7 @@ pub mod inst;
 pub mod installed;
 pub mod layout;
 pub mod lower;
+pub mod macho;
 pub mod mangle;
 pub mod metadata;
 pub mod oracle;
