@@ -8,6 +8,7 @@ use crate::{
 const STUB: [u8; 6] = [0xff, 0x25, 0, 0, 0, 0];
 
 /// 为 Function 导入追加 RIP 相对间接跳转，返回 C 名字对应的可调用地址。
+/// 调用方须先完成其余节和依赖的布局输入，随后只能按原长度填写节内容。
 pub fn append_import_stubs(
     request: &mut MachORequest,
     slots: &BTreeMap<String, ImportSlot>,
@@ -49,10 +50,12 @@ fn patch_stubs(
         unreachable!()
     };
     let mut symbols = BTreeMap::new();
-    for ((name, slot), (index, stub)) in functions
-        .iter()
-        .zip(code.chunks_exact_mut(STUB.len()).enumerate())
-    {
+    for ((name, slot), (index, stub)) in functions.iter().zip(
+        code.as_chunks_mut::<{ STUB.len() }>()
+            .0
+            .iter_mut()
+            .enumerate(),
+    ) {
         let offset = (index * STUB.len()) as u64;
         let target = layout
             .sections

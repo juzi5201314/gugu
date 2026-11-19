@@ -393,7 +393,7 @@ load command 依次为各段、`LC_DYLD_CHAINED_FIXUPS`、`LC_DYLD_EXPORTS_TRIE`
 
 签名是 linker-signed ad-hoc SuperBlob，只含一个 CodeDirectory（版本 `0x20400`、`CS_ADHOC | CS_LINKER_SIGNED`、SHA-256、4 KiB 页、无 special slot），`execSeg` 指向 `__TEXT` 并标记 main binary；页哈希覆盖 `[0, 签名偏移)`，因此签名最后写入。该模块尚未接入编译管线与目标注册。
 
-`macho::append_native_imports` 将后端的 `NativeImport` 转换为两级导入及 `__DATA_CONST,__got` 中的 bind 槽，保留声明顺序；纯库依赖仅加入 dylib 列表。返回的槽位置和导入种类不依赖架构，供后端生成调用入口或引用数据。x86_64 在最终布局中为 Function 写出 `jmp [rip+GOT]`，不为 Data 创建代码入口。
+`macho::append_native_imports` 将后端的 `NativeImport` 转换为两级导入及 `__DATA_CONST,__got` 中的 bind 槽，保留声明顺序；纯库依赖仅加入 dylib 列表。返回的槽位置和导入种类不依赖架构，供后端生成调用入口或引用数据。x86_64 在节大小及 dylib 列表固定后为 Function 写出 `jmp [rip+GOT]`，不为 Data 创建代码入口。
 
 ## 直接编码与验证
 

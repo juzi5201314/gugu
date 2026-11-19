@@ -312,7 +312,7 @@ PE 的 C 导出函数必须登记可解析的异常展开地址；入口载荷�
 
 macOS 镜像格式为 Mach-O 64（`arm64` 与 `x86_64`）的 PIE `MH_EXECUTE`：由 `/usr/lib/dyld` 加载并经 `LC_MAIN` 进入，导入只经 dylib 两级命名空间绑定，`libSystem.B.dylib` 总是第一个 dylib；镜像必须带覆盖全部签名前字节的 ad-hoc `LC_CODE_SIGNATURE`，因为 arm64 内核拒绝执行未签名代码。macOS 目标尚未登记，这一镜像形式在目标登记前不对外承诺。
 
-macOS 的 C 导入声明使用 C 名字，由写出器加一个前导下划线形成 dyld 名字。每个 Function 或 Data 导入有一个 dyld bind 槽；只有 Function 可以生成可调用入口。仅声明 dylib 依赖不创建 bind 槽。
+macOS 的 C 导入声明使用 C 名字，由写出器加一个前导下划线形成 dyld 名字。每个 Function 或 Data 导入有一个 dyld bind 槽；只有 Function 可以生成可调用入口，且入口在镜像布局确定后以指向该槽的地址写入。仅声明 dylib 依赖不创建 bind 槽。
 
 static PIE自重定位、PE header字段、section排序和 archive编码见[后端内部规范](../internals/backend.md)，不得在该文档扩展本节公开镜像面。
 
