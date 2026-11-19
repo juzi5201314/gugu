@@ -120,6 +120,7 @@ pub fn gc_a64_scan_frame(out: uint, capacity: uint, section: uint, length: uint,
     let record = section + read(section + 32) + function * 32
     let size = read32(record + 12)
     let site = section + read(section + 40) + point * 12
+    if byte_at(site + 9) & 2 == 0 { return ROOT_NO_ENTRY }
     let map_index = read32(site + 4)
     let indices = section + read(section + 48)
     let start = read(indices + map_index * 8)

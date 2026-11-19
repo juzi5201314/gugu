@@ -307,6 +307,75 @@ fn a64_gated_root_beyond_fixed_bitmap_scans_by_frame_bounds() {
     }
 }
 
+#[test]
+fn a64_scan_disallowed_safepoints_reject_both_scan_entries_without_emitting() {
+    let (hir, bodies, _) = runtime_layouts();
+    let mut h = Harness::from_bodies(&hir, &bodies);
+    for allowed in [false, true] {
+        let image = review_image(12, allowed);
+        for initialized in [0, 1] {
+            let mut memory = vec![0; 262144];
+            install(&mut memory, &image);
+            put(&mut memory, SNAP + 152, BASE + 16);
+            put(&mut memory, FRAME + 88, 0);
+            memory[FRAME as usize + 64] = initialized;
+            let direct = h.invoke(
+                MODULE,
+                "gc_a64_scan_frame",
+                &[
+                    OUT,
+                    4,
+                    MAPS,
+                    image.maps().len() as u64,
+                    BASE,
+                    FRAME,
+                    BASE + 16,
+                    1,
+                    0,
+                    0,
+                ],
+                &mut memory,
+            )[0];
+            let direct_counts = [
+                word(&memory, OUT),
+                word(&memory, OUT + 8),
+                word(&memory, OUT + 16),
+            ];
+            memory[OUT as usize..OUT as usize + 512].fill(0);
+            let walk = h.invoke(
+                MODULE,
+                "gc_a64_walk_roots",
+                &[OUT, 4, 256, 0, SNAP, 1, FRAME, FRAME + 96, 1],
+                &mut memory,
+            )[0];
+            let expected = if allowed {
+                u64::from(initialized)
+            } else {
+                NONE
+            };
+            assert_eq!(
+                [direct, walk],
+                [expected; 2],
+                "scan_allowed={allowed}, gate={initialized}"
+            );
+            let counts = if allowed {
+                [u64::from(initialized), u64::from(initialized), 1]
+            } else {
+                [0; 3]
+            };
+            assert_eq!(direct_counts, counts);
+            assert_eq!(
+                [
+                    word(&memory, OUT),
+                    word(&memory, OUT + 8),
+                    word(&memory, OUT + 16)
+                ],
+                counts
+            );
+        }
+    }
+}
+
 fn fragment(roots: bool) -> (Vec<u8>, Vec<u8>) {
     fragment_size(roots, 96)
 }

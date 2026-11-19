@@ -80,6 +80,7 @@ A64 内部挂起调用使用权威 SuspendResume 栈图，跨点指针必须落�
 A64 元数据的数据 ABI 可通过现有 Rt0Payload 显式绑定：写入前必须联合校验 v5 栈图、每函数 CFA 和规范化目录，拒绝错架构、越界、重叠及非精确返回 PC。Gugu 扫描入口只消费已验证且不变的镜像，按调用方提供的栈界限与帧数上限枚举根；失败后必须丢弃整个输出，容量不足必须保留完整 needed 计数。帧链只能在零 PC 或载荷中声明的 main-return 哨兵结束，不得跳过未知 helper。A64 Context、scratch、mailbox 与 snapshot 的 Gugu/Rust 布局必须一致；scratch 和保存的 Context 绑定到不移动的 owner 存储。A64 runtime 源声明只通过现有 arch cfg 在 descriptor 架构名为 aarch64 时启用，不进入 x64 编译域。此数据接口不选择 A64 目标，也不替代尚未接通的 A64 启动、调度及平台镜像 writer。
 
 A64 门控根的根字与初始化字节都按完整 frame_size 校验，不能以固定槽位图的 slot_count 作为帧上界；固定槽位图为空也可以存在合法门控根。
+A64 显式逐帧与整栈扫描入口必须拒绝 scan_allowed=false 的站点，不得枚举根、增加根数或帧数，即使实际根集为空。
 
 挂起调用中，已被权威逻辑根登记的值若另有传出栈实参副本，这些副本也必须进入同一来源种类的物理栈图；只登记原 spill 不足以保证被调方入口搬栈后的参数有效。
 
