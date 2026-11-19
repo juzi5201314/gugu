@@ -80,3 +80,19 @@ fn string_mutation_does_not_alias_copies() {
         "gu 0 4\n"
     );
 }
+
+#[test]
+fn string_edits_at_the_end() {
+    assert_eq!(
+        stdout(
+            r#"let s = "aé"
+    s.insert(s.len(), '!')
+    println(s, " [", s[s.len()..], "]")
+    println(s.remove(s.len() - 1), " ", s)
+    s.replace_range(1..s.len(), "bc")
+    s.truncate(s.len())
+    println(s)"#
+        ),
+        "aé! []\n! aé\nabc\n"
+    );
+}

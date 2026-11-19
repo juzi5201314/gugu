@@ -50,7 +50,7 @@ pub fn concat(left: &[byte], right: &[byte]) string {
 #[used]
 pub fn utf8_boundary(data: &[byte], start: int, end: int) bool {
     if start < 0 || end < 0 || start > end || end > data.len() { return false }
-    if start > 0 && data[start] & 192 == 128 { return false }
+    if start > 0 && start < data.len() && data[start] & 192 == 128 { return false }
     if end < data.len() && data[end] & 192 == 128 { return false }
     true
 }
