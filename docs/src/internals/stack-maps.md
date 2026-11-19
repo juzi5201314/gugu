@@ -204,8 +204,32 @@ flags=1 是 MorestackEntry（cfa=0、lr=10 表示 x10）；flags=0 为建帧后�
 （cfa=frame_size、lr=fp_offset+8 表示 SP-relative 字节偏移）。其他 flags 拒绝。
 PC 严格递增、4 字节对齐且在 code range 内；与 v5 map 的每个 PC/kind 必须一一匹配。
 caller 恢复只接受精确返回 PC；缺失 snapshot 或 SP 溢出都报错，不读宿主地址。
-此格式是 safepoint walker 的记录，不是平台 EH unwind；gated local、协程 handoff 与
-镜像内的 Gugu decoder 仍未接入。x64 v4 编码、raw contract 与 runtime 源码均不变。
+此格式是 safepoint walker 的记录，不是平台 EH unwind。上述分阶段 lowering 不选择目标。
+
+### A64 生产元数据的数据绑定（4c.2b.2b.2）
+
+`runtime-abi::a64_binding::Sections` 消费已生成的逐函数 v5/CFA，按代码 RVA 排序、联合验证并
+合并为一个 v5 section；输入逐片段 RVA 必须为零。函数的 unwind_index 是同序 CFA 目录下标。
+目录头为 `GUGUAD01` 八字节 magic、u32 函数数、u32 架构 183，随后有 count+1 个 u64
+section-relative offsets，后接不改格式的 GUGUCF01 表。首 offset 紧接目录，末 offset 是总长；
+相邻半开区间不得重叠或截断，每个表必须与对应函数的 frame、精确 PC 和 entry kind 一致。
+FP/LR record 与 typed gate/root 字不能重叠，继续复用 FrameMetadata 的校验。
+
+bind 只修改现有 Rt0Payload 的 stackmap/stackmap_len、fragment_base、unwind/unwind_len，
+先验证版本、对齐、地址溢出及 metadata/code 重叠，失败不得部分发布。frames(code_bias) 将同一
+镜像交给既有 Rust stack/context copier，不另造迁移算法。载荷布局和 x64 raw contract 不变。
+
+生产源 `std/runtime/a64.gg` 提供显式 `gc_a64_scan_frame` 与 `gc_a64_walk_roots`。二者复用
+roots.gg 的精确函数/安全点查找与零字过滤、容量计数、root record 发布；A64 只解释自己的
+u32 masks/24-byte map header 与 CFA。调用方持有已联合验证且不变的元数据、有效 snapshot
+和输出存储。错误返回 ROOT_NO_ENTRY，调用方必须丢弃整个输出；绝不猜测缺图、调用真实 GC
+或解析 handle/compression。寄存器文件为 31 个 xN 字，入口只允许 x0–x8；x10 仅用于入口
+caller LR，不是根。typed byte gate 为零时跳过，不修改 snapshot/帧内非根和浮点位型。
+
+整栈扫描受 low/high 与 limit 限制，MorestackEntry 不把尚未分配的 callee frame 算进栈范围；
+其 caller SP 不变，caller PC 来自 x10。普通站点用 CFA 恢复 SP 和保存的 LR。只有零 PC 或
+Rt0Payload.main_return 的精确哨兵可结束，未知 helper 拒绝；帧迹与 needed/written 保持旧输出 ABI。
+这些显式入口是可测试的数据接口，不接入现有 x64 collector 路由，不使 A64 用户镜像可运行。
 
 ### header
 

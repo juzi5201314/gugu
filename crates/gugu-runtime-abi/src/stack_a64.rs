@@ -61,6 +61,7 @@ impl FrameMetadata {
 /// `return_pc`/registers describe the user boundary, not the switch fragment PC.
 /// Morestack supplies these from its nonmoving scratch before restoring it.
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
+#[repr(C)]
 pub struct Snapshot {
     pub context: A64Context,
     pub return_pc: u64,

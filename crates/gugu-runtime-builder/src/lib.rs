@@ -478,6 +478,11 @@ const SOURCES: &[RuntimeSourceInput<'static>] = &[
         include_str!("../../gugu-frontend/resources/runtime/value.gg"),
         RuntimeSourceRole::Runtime,
     ),
+    source(
+        "std/runtime/a64.gg",
+        include_str!("../../gugu-frontend/resources/runtime/a64.gg"),
+        RuntimeSourceRole::Runtime,
+    ),
 ];
 
 #[cfg(feature = "runtime-gc-probes")]
