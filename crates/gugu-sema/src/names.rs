@@ -1,6 +1,7 @@
 use std::collections::{BTreeMap, BTreeSet};
 
 mod model;
+mod prelude;
 
 use model::is_reserved_name;
 pub use model::{
@@ -90,7 +91,9 @@ pub fn analyze_with_prefix(
     };
     diagnose_definition_conflicts(&candidates.values, &mut diagnostics);
     let module_bindings = module_bindings(&definitions);
-    let pending = collect_imports(external_packages, modules, &mut diagnostics, prefix);
+    let mut pending = collect_imports(external_packages, modules, &mut diagnostics, prefix);
+    let implicit = prelude::implicit_imports(modules, &pending, &module_bindings);
+    pending.extend(implicit);
     if let Some(import) = import_cycle(&pending, modules.len()) {
         diagnostics.push(Diagnostic::error(
             DiagnosticCode::ImportCycle,
