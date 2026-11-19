@@ -19,6 +19,8 @@ gugu-compiler-core = { path = "../gugu-compiler-core" }
 gugu-frontend = { path = "../gugu-frontend" }
 
 [dev-dependencies]
+gugu-backend = { path = "../gugu-backend" }
+gugu-base = { path = "../gugu-base" }
 gugu-runtime-abi = { path = "../gugu-runtime-abi" }
 
 [build-dependencies]

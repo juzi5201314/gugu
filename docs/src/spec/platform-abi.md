@@ -375,7 +375,7 @@ Gugu 对象文件、静态库和动态库之间不提供独立的 Gugu-to-Gugu A
 7. ELF/PE 的入口、重定位、保留节、导入表、展开信息和 strip 后必需元数据；
 8. GC 对象 pin、外部保存指针、普通 `ForeignBridge`/`ForeignBridge[DirtyCpu]`/`ForeignLeaf` 调用模式、线程局部错误状态和 safepoint 前后的生命周期。
 
-这些检查必须使用确定性的 C 对照程序或固定镜像 fixture；不能用削弱声明、改变 fixture 或忽略失败来获得通过。规范测试的运行方式见[测试](testing.md)。
+其中 `i128` 与更大的按值聚合按 8 字节 lane 拆分，归入第 3、4 项的聚合边界矩阵：SysV 记两个 `INTEGER` lane、占用相邻整数寄存器，超过单 lane 可表示宽度的值不产生新的槽位类别；Microsoft x64 超出 8 字节的按值参数按位置规则落到共享槽或栈。这些检查必须使用确定性的 C 对照程序或固定镜像 fixture；不能用削弱声明、改变 fixture 或忽略失败来获得通过。规范测试的运行方式见[测试](testing.md)。
 
 ## 外部基准文档
 

@@ -93,6 +93,8 @@ rax, rbx, rcx, rdx, rdi, rsi, r8, r9, r10
 
 整数和浮点 bank 分别前进；某一 aggregate 的任意 piece 无法放入对应寄存器时，该 aggregate 的所有 piece 都放到 stack，避免半寄存器半内存。stack 参数按参数顺序放入 8 字节 slot（`V128` 占 16 字节），并满足自身更高对齐；caller 固定 outgoing 区承载。C ABI 侧 Linux 仍按 SysV 的独立 bank 前进，Windows 的 Microsoft x64 则让整数与浮点**按参数位置共用**同一组槽：位置 0..3 对应 `rcx/rdx/r8/r9` 与 `xmm0..xmm3`，例如 `(i64, f64)` 是 `rcx` + `xmm1`；位置越界的参数从 32 字节 shadow space 之后开始。
 
+双目标一致性回归固定在 `x64/abi_tests.rs` 与 `gugu-compiler/tests/abi_image_consistency.rs`：前者是 SysV/Microsoft x64 的槽位黄金表（0/1/2/16/17-byte aggregate 边界、shadow space、栈对齐填充、sret 隐藏指针、寄存器耗尽回退、按位置共享槽、混合返回），后者让同一组 FFI fixture（`repr(C)`/`packed`/`transparent`/`union`/`enum` 按值穿越 extern 边界、leaf/dirty/ordinary bridge、`#[os_thread_local]`/`#[coroutine_local]`、`#[export_name]`、panic 路径）在两个目标上各生成结构完整的 ELF/PE 镜像，并按字节断言入口、导入库/符号、导出符号、PT_INTERP 与 strip 后保留的运行时字符串。外部线程接入经 `NativeLink::THREAD_SYMBOLS` 的 glibc 导入登记，缺导入时 `BackendInvariant` 拒绝镜像。
+
 内部 ABI 的间接 aggregate 不是借用 caller 原 place。通常 caller 先按 value descriptor在 outgoing 区物化完整语义副本并把地址传入；该存储在调用期间归 callee参数 local所有，callee可以修改并必须在正常/panic出口执行相应 drop/resource cleanup，caller返回后不再 drop同一副本。若 `EscapeAndPlacement` 已证明参数地址越过调用，caller改为物化独立 managed box，callee cleanup只结束参数绑定，box内 value由 GC/resource descriptor管理。trivial bit-copy 类型也不能因地址分析猜测而把可变参数别名到原值。
 
 sret destination在 callee执行期间视为 caller未初始化字节，不能加入 `CallReturn` root map。callee必须先在自己 frame或已提升 managed box中构造返回值，以逐 safepoint初始化图追踪；只有所有字段成功且不再经过 safepoint时，epilogue才把完整值 transfer到 sret、清除本地所有权并返回。panic只清理本地部分值，绝不让 caller观察/扫描半初始化 sret。C export thunk同样先取得完整 Gugu返回值，再按 C ABI写外部 sret。
