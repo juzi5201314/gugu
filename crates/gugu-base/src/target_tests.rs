@@ -1,10 +1,50 @@
 //! 目标描述符、sysroot 与成本/调优 profile 身份回归：字段变化必须移动 descriptor 身份。
 
 use crate::target::{
-    BackendCostProfile, CpuBaseline, CpuFeature, IMPORT_POLICY_REVISION, TARGET_PAGE_SIZE,
-    TargetName, baseline_cost_profile, target_sysroot_digest,
+    Architecture, BackendCostProfile, CPU_FEATURES, CpuBaseline, CpuFeature,
+    IMPORT_POLICY_REVISION, ObjectFormat, OperatingSystem, PointerCompression, Rt0Kind,
+    TARGET_PAGE_SIZE, TargetName, baseline_cost_profile, target_sysroot_digest,
 };
 use crate::tuning::RUNTIME_TUNING_PROFILE;
+
+#[test]
+fn dimension_names_are_canonical() {
+    assert_eq!(Architecture::X86_64.name(), "x86_64");
+    assert_eq!(Architecture::Aarch64.name(), "aarch64");
+    assert_eq!(OperatingSystem::Linux.name(), "linux");
+    assert_eq!(OperatingSystem::Windows.name(), "windows");
+    assert_eq!(OperatingSystem::Macos.name(), "macos");
+    assert_eq!(ObjectFormat::Elf64.name(), "elf64");
+    assert_eq!(ObjectFormat::Pe32Plus.name(), "pe32+");
+    assert_eq!(ObjectFormat::MachO64.name(), "macho64");
+    assert_eq!(Rt0Kind::MacosLibSystem.name(), "macos-libsystem");
+}
+
+#[test]
+fn arm_baseline_rejects_all_x86_features() {
+    assert_eq!(CpuBaseline::Armv8A.name(), "armv8.0-a");
+    for feature in CPU_FEATURES {
+        assert!(!CpuBaseline::Armv8A.allows(feature));
+    }
+}
+
+#[test]
+fn aarch64_pointer_compression_uses_48_bit_addresses() {
+    let capability = PointerCompression::aarch64();
+    assert!(capability.supported);
+    assert_eq!(capability.canonical_bits, 48);
+    assert_eq!(capability.max_cage_bytes, 1 << 32);
+    assert_eq!(capability.min_alignment, 2 * 1024 * 1024);
+    assert_eq!(capability, PointerCompression::x86_64());
+}
+
+#[test]
+fn dimension_values_do_not_register_targets() {
+    for name in ["", "aarch64-linux", "aarch64-macos"] {
+        let error = TargetName::parse(name).expect_err("unregistered target");
+        assert_eq!(error.requested(), name);
+    }
+}
 
 #[test]
 fn registered_targets_have_distinct_stable_descriptor_digests() {
