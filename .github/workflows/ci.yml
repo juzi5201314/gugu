@@ -27,7 +27,7 @@ jobs:
         with:
           tool: nextest@0.9.115
       - run: cargo build --workspace
-      - run: cargo nextest run --workspace
+      - run: cargo nextest run --workspace --profile ci --tool-config-file "ci:$PWD/ci/nextest.toml"
       - run: cargo clippy --workspace --all-targets -- -D warnings
 
   book:
