@@ -36,9 +36,11 @@ const METHODS: &[(usize, &str, Abi)] = &[
     (26, "fcntl", Fcntl),
     (27, "recvmsg", Ssize(3)),
     (28, "disconnectx", Int(3)),
+    (29, "sigaction", Int(3)),
 ];
 
 const CLOSE_CALLBACK: usize = 19;
+const SIGNAL_HANDLER: usize = 30;
 const VALUE: usize = 72;
 const ERROR: usize = 80;
 const EINVAL: u16 = 22;
@@ -80,6 +82,11 @@ pub fn darwin_net_dispatch() -> Fragment {
         successes.push(branch(&mut b, "b", [next()]));
         b.patch_branch(skip, "b.cond", &[], &[condition(NE)]);
     }
+    let skip_handler = compare_op(&mut b, SIGNAL_HANDLER);
+    let handler_ref = b.offset();
+    b.emit("adr", [reg(RESULT), next()]);
+    successes.push(branch(&mut b, "b", [next()]));
+    b.patch_branch(skip_handler, "b.cond", &[], &[condition(NE)]);
     b.emit("movz.X", [reg(RESULT), movz(EINVAL)]);
     let invalid = branch(&mut b, "b", [next()]);
     for at in failures {
@@ -98,6 +105,8 @@ pub fn darwin_net_dispatch() -> Fragment {
     leave(&mut b, 32, &saved);
     b.patch_branch(callback_ref, "adr", &[reg(RESULT)], &[]);
     close_callback(&mut b);
+    b.patch_branch(handler_ref, "adr", &[reg(RESULT)], &[]);
+    b.ret();
     b.finish()
 }
 
