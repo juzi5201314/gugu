@@ -18,7 +18,7 @@ use serde_json::json;
 
 use crate::output::{OutputFormat, emit_event};
 use crate::{
-    GlobalArgs, emit_cli_error, enabled_features, package_resolution, print_compilation,
+    GlobalArgs, RunDomain, emit_cli_error, enabled_features, package_resolution, print_compilation,
     resolve_project_lock,
 };
 
@@ -84,8 +84,13 @@ pub(crate) fn run(options: &GlobalArgs, open: bool, no_deps: bool) -> i32 {
             );
             return 2;
         };
-        let (identity, external) =
-            package_resolution(&lock, &workspace_root, package, target_ref.kind());
+        let (identity, external) = package_resolution(
+            &lock,
+            &workspace_root,
+            package,
+            target_ref.kind(),
+            RunDomain::Default,
+        );
         let request = CompileRequest::project_target(
             package, target_ref, identity, target, features, external,
         );

@@ -785,8 +785,13 @@ pub(crate) fn compile_package(
         }
     };
     // build task 在任何 target 源码编译前运行一次；输出注入所有 target。
-    let (build_identity, build_externals) =
-        package_resolution(lock, project_root, package, TargetKind::Build);
+    let (build_identity, build_externals) = package_resolution(
+        lock,
+        project_root,
+        package,
+        TargetKind::Build,
+        RunDomain::Default,
+    );
     let build_output = build_task::run_build_task(
         project_root,
         package,
@@ -801,7 +806,7 @@ pub(crate) fn compile_package(
     let mut exit_code = 0;
     for package_target in selected {
         let (package_identity, external_packages) =
-            package_resolution(lock, project_root, package, package_target.kind());
+            package_resolution(lock, project_root, package, package_target.kind(), domain);
         let mut request = CompileRequest::project_target(
             package,
             package_target,
@@ -954,11 +959,13 @@ pub(crate) fn package_resolution(
     project_root: &Path,
     package: &Package,
     target: TargetKind,
+    domain: RunDomain,
 ) -> (String, BTreeSet<String>) {
+    // test/bench 域下 lib 也用 test-dependencies 编译（库内 #[test]/#[bench]）。
     let include_test = matches!(
         target,
         TargetKind::Test | TargetKind::Bench | TargetKind::Example
-    );
+    ) || matches!(domain, RunDomain::Test | RunDomain::Bench);
     let relative = package
         .root()
         .strip_prefix(project_root)
