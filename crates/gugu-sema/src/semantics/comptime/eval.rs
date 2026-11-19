@@ -1237,6 +1237,20 @@ impl Model<'_> {
         if segments == ["panic"] {
             return self.comptime_panic(module, args, &span, state);
         }
+        if state.domain == Domain::SOURCE_EXPAND && matches!(segments.as_slice(), ["Ok"] | ["Err"])
+        {
+            let arguments = self.value_list(module, args, state)?;
+            if arguments.len() != 1 {
+                return Err(self.fail(module, expression, "构造器实参数量不符"));
+            }
+            state.alloc(64u64.saturating_add(arguments[0].heap_bytes()), &span)?;
+            let payload = Box::new(arguments[0].clone());
+            return Ok(if segments == ["Ok"] {
+                ConstantValue::ResultOk(payload)
+            } else {
+                ConstantValue::ResultErr(payload)
+            });
+        }
         self.check_capability(module, &segments, &span, state)?;
         if let Some(value) = self.src_builtin(module, expression, &segments, args, &span)? {
             return Ok(value);
@@ -1348,7 +1362,7 @@ impl Model<'_> {
         )))
     }
 
-    /// SourceExpand 域的内建调用：`std.syntax.parse_*` 解析闸门与 `Ok`/`Err` 构造。
+    /// SourceExpand 域的内建调用：`std.syntax.parse_*` 解析闸门。
     ///
     /// 返回 `None` 表示不是内建，沿普通调用路径继续。解析闸门把生成文本经
     /// `ParseSource` query 送入主 lexer/parser；失败返回 `Err(SyntaxError)`
@@ -1362,18 +1376,6 @@ impl Model<'_> {
         span: &crate::Span,
         state: &mut EvalState,
     ) -> EvalResult<Option<ConstantValue>> {
-        match segments {
-            ["Ok"] | ["Err"] if arguments.len() == 1 => {
-                state.alloc(64u64.saturating_add(arguments[0].heap_bytes()), span)?;
-                let payload = Box::new(arguments[0].clone());
-                return Ok(Some(if segments == ["Ok"] {
-                    ConstantValue::ResultOk(payload)
-                } else {
-                    ConstantValue::ResultErr(payload)
-                }));
-            }
-            _ => {}
-        }
         let canonical = self.external_path(module, segments);
         let Some(canonical) = canonical else {
             return Ok(None);

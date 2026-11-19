@@ -1,6 +1,98 @@
 use super::{CompileRequest, Compiler, TargetName, printing::output};
 
 #[test]
+fn imported_result_constructor_names_do_not_evaluate_function_const_arguments() {
+    let compiled = compile_imported_result_constructors(
+        r#"
+use helpers.{shadow as Ok, shadow as Err, genuine as User}
+const ANSWER: int = comptime source {
+    let n = 0
+    let ok = Ok::[{ n += 1
+        n
+    }](4)
+    let err = Err::[{ n += 10
+        n
+    }](5)
+    let left = match ok { Ok(value) => value, Err(_) => 0 }
+    let right = match err { Err(value) => value, Ok(_) => 0 }
+    if left != 4 || right != 5 || n != 0 { panic("constructor evaluated imported function const arguments") }
+    let called = User::[{ n += 2
+        n
+    }](3)
+    if called != 5 || n != 2 { panic("user function must evaluate its const arguments") }
+    std.syntax.parse_source("450")
+}
+fn main() { _ = ANSWER
+    let ordinary: Result[int, int] = Ok::[panic("generic argument must not run")](7)
+    _ = ordinary
+}
+"#,
+    );
+    assert!(
+        compiled.is_success(),
+        "{:?}",
+        compiled.diagnostics().items()
+    );
+}
+
+#[test]
+fn imported_result_constructor_names_validate_constructor_arity_first() {
+    for constructor in ["Ok", "Err"] {
+        for arguments in ["", "1, 2"] {
+            let source = format!(
+                r#"
+use helpers.{{shadow as {constructor}}}
+const ANSWER: int = comptime source {{
+    _ = {constructor}::[panic("function const argument must not run")]({arguments})
+    std.syntax.parse_source("0")
+}}
+fn main() {{ _ = ANSWER }}
+"#
+            );
+            let compiled = compile_imported_result_constructors(&source);
+            assert!(!compiled.is_success());
+            assert!(
+                compiled
+                    .diagnostics()
+                    .items()
+                    .iter()
+                    .any(|diagnostic| diagnostic.message().contains("构造器实参数量不符")),
+                "{:?}",
+                compiled.diagnostics().items()
+            );
+        }
+    }
+}
+
+fn compile_imported_result_constructors(source: &str) -> crate::Compilation {
+    let root = tempfile::tempdir().unwrap();
+    let src = root.path().join("src");
+    std::fs::create_dir(&src).unwrap();
+    std::fs::write(
+        root.path().join("gugu.toml"),
+        "[package]\nname = \"constructors\"\nversion = \"0.0.0\"\n",
+    )
+    .unwrap();
+    std::fs::write(src.join("main.gg"), source).unwrap();
+    std::fs::write(src.join("helpers.gg"), "pub fn shadow[comptime N: int](value: int) int { panic(\"imported function must not run\") }\npub fn genuine[comptime N: int](value: int) int { N + value }\n").unwrap();
+    let project = crate::Project::discover(root.path()).unwrap();
+    let package = project.current_package().unwrap();
+    let target = package
+        .targets()
+        .iter()
+        .find(|target| target.kind() == crate::TargetKind::Bin)
+        .unwrap();
+    Compiler::shared().compile(CompileRequest::project_target(
+        package,
+        target,
+        "constructors@0.0.0 (path+.)",
+        TargetName::X86_64Linux,
+        vec!["default".to_owned()],
+        Default::default(),
+    ))
+}
+
+#[test]
 fn early_const_arguments_run_before_value_arguments() {
     let actual: Vec<_> = output(
         r#"
