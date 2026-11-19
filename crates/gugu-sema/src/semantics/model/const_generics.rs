@@ -132,7 +132,7 @@ impl Model<'_> {
             .map_err(|_| self.error(module, "comptime 泛型实参或数组长度必须非负且不超过 u64"))
     }
 
-    fn has_const_parameter(
+    pub(in super::super) fn has_const_parameter(
         &self,
         module: usize,
         expression: ExprId,

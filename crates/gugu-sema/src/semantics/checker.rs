@@ -281,6 +281,14 @@ pub(super) fn check(
 impl<'m, 'a> Checker<'m, 'a> {
     /// 优先消费 EarlyConstTable 中已求值的整数常量。
     pub(super) fn early_int(&self, expression: ExprId) -> Option<i128> {
+        let span = &self.arena().exprs[expression.0 as usize].span;
+        let params = self.model.parameters_at(self.module, span);
+        if self
+            .model
+            .has_const_parameter(self.module, expression, &params)
+        {
+            return None;
+        }
         match self.early.expression_value(self.module, expression.0) {
             Some(super::comptime::eval::ConstantValue::Int(value)) => Some(*value),
             _ => None,

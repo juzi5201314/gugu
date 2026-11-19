@@ -1,6 +1,26 @@
 use super::{CompileRequest, Compiler, TargetName, printing::output};
 
 #[test]
+fn generic_repeat_length_shadows_module_constant() {
+    let actual: Vec<_> = output(
+        r#"
+use std.io.{println}
+const N: int = 1
+fn size[comptime N: int](x: int) int {
+    let a = [x; N]
+    a.len()
+}
+fn main() { println(size::[3](7)) }
+"#,
+        &[],
+    )
+    .into_iter()
+    .flat_map(|(_, bytes)| bytes)
+    .collect();
+    assert_eq!(actual, b"3\n");
+}
+
+#[test]
 fn const_generic_arrays_execute_distinct_instances() {
     let source = r#"
 use std.io.{println}
