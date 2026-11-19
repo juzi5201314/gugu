@@ -351,6 +351,10 @@ macOS 的 C 导入声明使用 C 名字，由写出器加一个前导下划线�
 
 内部验证目标 `x86_64-macos` 使用 Darwin x86-64 C 调用约定；启动入口接收 dyld 提供的 `argc`、`argv` 与环境指针。运行时经 libSystem 访问文件、套接字和子进程，并按 Darwin errno 解释原生错误。内部验证入口不改变目标名解析、公开目标列表或宿主默认选择。
 
+内部 aarch64 Linux 镜像使用 ELF64 static PIE：`ET_DYN`、`EM_AARCH64 = 183`，无 `PT_INTERP`，具有 `PT_PHDR` 和分别为 R-X、R、RW 的三个 `PT_LOAD`，段按 64 KiB 对齐以兼容 4 KiB、16 KiB 和 64 KiB 内核页；不存在 W+X 映射。绝对指针槽只允许位于可写数据，登记为 `R_AARCH64_RELATIVE = 1027`，由镜像入口自行加上加载偏移，不依赖内核执行动态重定位。此形式不登记新目标，也不扩大 CLI 或闭世界编译的支持范围。
+
+内部 aarch64 Linux `_start` 从内核初始栈取得 `argc`、`argv`、`envp`，由参数块的运行时地址减去其链接期地址得到加载偏移，完成 RELATIVE 重定位后，以 x0–x4 = 参数块、加载偏移、`envp`、`argc`、`argv` 调用共享 rt0。rt0 初始化 x27/x28 并将原生启动参数写入 `Rt0Payload`，调用 `rt0_start`；正常返回后以 x0 为状态、x8 = 94 执行 `svc #0`（`exit_group`）。调用方提供载荷、初始槽、processor 和 `rt0_start`；入口只补写载荷版本与初始槽指针，其余镜像内载荷指针仍须由调用方登记 RELATIVE 重定位。此路径不声明 Linux 文件、网络、进程或 VM 适配器已接通。
+
 static PIE自重定位、PE header字段、section排序和 archive编码见[后端内部规范](../internals/backend.md)，不得在该文档扩展本节公开镜像面。
 
 ### 入口、重定位与 TLS {#entry-relocation-tls}
