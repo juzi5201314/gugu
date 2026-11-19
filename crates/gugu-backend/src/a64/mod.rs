@@ -1,9 +1,10 @@
-//! 独立的 ARMv8.0-A 编码库；尚未接入目标、选指或运行时。
+//! ARMv8.0-A 编码库与独立运行时机器片段；尚未接入目标。
 
 mod bits;
 pub mod contract;
 pub mod decode;
 pub mod encode;
+pub mod fragments;
 pub mod inst;
 mod print;
 pub mod reg;
