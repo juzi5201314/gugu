@@ -19,7 +19,7 @@ use gugu_registry::{
 };
 use serde_json::json;
 
-use crate::commands::{discover, fail, format_of};
+use crate::commands::{discover, fail, format_of, parse_target_or_exit};
 use crate::config::{ConfigValues, load_config};
 use crate::output::{OutputFormat, emit_cli_error, emit_event};
 use crate::package_cmds::archive_bytes;
@@ -79,12 +79,7 @@ impl RegistrySession {
         } else {
             logical
         };
-        let allowed = &self.values.registry_allowed;
-        if !allowed.is_empty() && !allowed.iter().any(|item| item == name) {
-            return Err(source_not_allowed(format!(
-                "registry `{name}` 不在 registry.allowed 白名单中"
-            )));
-        }
+        self.check_allowed(name)?;
         let def = self
             .values
             .registries
@@ -100,9 +95,11 @@ impl RegistrySession {
     /// 依赖声明中的 registry 字段（逻辑名或已是身份 URL）→ 规范身份。
     fn identity_of(&self, source_name: &str) -> Result<String, RegistryError> {
         if source_name.contains("://") {
-            for def in self.values.registries.values() {
+            // 依赖写身份 URL：仍须命中已定义 registry 且其逻辑名过 allowlist。
+            for (name, def) in &self.values.registries {
                 if let Some(index) = &def.index {
                     if normalize_index_url(index).ok().as_deref() == Some(source_name) {
+                        self.check_allowed(name)?;
                         return Ok(source_name.to_owned());
                     }
                 }
@@ -112,6 +109,30 @@ impl RegistrySession {
             )));
         }
         self.resolve_logical(source_name).map(|(_, id)| id)
+    }
+
+    fn check_allowed(&self, name: &str) -> Result<(), RegistryError> {
+        let allowed = &self.values.registry_allowed;
+        if !allowed.is_empty() && !allowed.iter().any(|item| item == name) {
+            return Err(source_not_allowed(format!(
+                "registry `{name}` 不在 registry.allowed 白名单中"
+            )));
+        }
+        Ok(())
+    }
+
+    /// resolver 用的逻辑名 → 身份别名表。
+    pub(crate) fn aliases(&self) -> BTreeMap<String, String> {
+        self.values
+            .registries
+            .iter()
+            .filter_map(|(name, def)| {
+                def.index
+                    .as_deref()
+                    .and_then(|index| normalize_index_url(index).ok())
+                    .map(|identity| (name.clone(), identity))
+            })
+            .collect()
     }
 
     /// 身份 URL → 逻辑名（反查 client / 签名上下文用）。
@@ -218,12 +239,14 @@ impl RegistrySession {
 
     /// 按清单依赖声明做不动点索引收集：每条记录的依赖把新 package 加入前沿，
     /// 直到闭包。返回全部候选；`offline` 时跳过网络并校验锁覆盖。
+    /// `refresh`：`gugu update` 时总是抓索引提供新版本候选；
+    /// 普通构建只在锁未覆盖、`--deny-yanked` 或 `--require-signature` 时抓。
     pub(crate) fn gather_candidates(
         &self,
         specs: &[DependencySpec],
         lock_candidates: &[PackageMetadata],
         offline: bool,
-        format: OutputFormat,
+        refresh: bool,
     ) -> Result<RegistryFetch, RegistryError> {
         let default_identity = self.default_identity();
         let mut clients: BTreeMap<String, Client<'_, UreqTransport>> = BTreeMap::new();
@@ -252,13 +275,14 @@ impl RegistrySession {
             for (registry, package) in pending {
                 let identity = self.identity_of(&registry)?;
                 fetched.insert((identity.clone(), package.clone()));
-                let covered = lock_candidates.iter().any(|metadata| {
-                    metadata.id.name() == package
-                        && matches!(
-                            metadata.id.source(),
-                            PackageSource::Registry { registry } if registry == &identity
-                        )
-                });
+                let covered = !refresh
+                    && lock_candidates.iter().any(|metadata| {
+                        metadata.id.name() == package
+                            && matches!(
+                                metadata.id.source(),
+                                PackageSource::Registry { registry } if registry == &identity
+                            )
+                    });
                 let need_fetch = if offline {
                     // 离线时未覆盖即 registry-offline-missing；已覆盖则不再抓索引。
                     if !covered {
@@ -277,19 +301,19 @@ impl RegistrySession {
                 let client = self.client_for(&mut clients, &registry)?;
                 let records = client.index(&package)?;
                 for record in &records {
-                    self.check_signature(&identity, record, format)?;
                     if record.yanked {
                         yanked.insert((identity.clone(), record.name.clone(), record.vers.clone()));
                     }
-                    if covered {
-                        // 锁已覆盖：只收集 yanked 状态，不把其他版本喂给 resolver。
-                        continue;
-                    }
                     for dep in &record.deps {
+                        // 传递依赖始终入队：锁覆盖下的子依赖在严格策略下也要检查。
                         wanted.insert((
                             dep.registry.clone().unwrap_or_else(|| "default".to_owned()),
                             dep.package.clone(),
                         ));
+                    }
+                    if covered {
+                        // 锁已覆盖：只收集 yanked 状态，不把其他版本喂给 resolver。
+                        continue;
                     }
                     let mut metadata = record.to_metadata(&identity)?;
                     for dep in &mut metadata.dependencies {
@@ -308,23 +332,22 @@ impl RegistrySession {
         })
     }
 
-    /// 下载索引中某版本的归档并写入内容寻址缓存；
-    /// 校验锁 checksum 与索引记录一致、`--deny-yanked` 与签名策略。
-    pub(crate) fn fetch_and_store(
+    /// 校验锁图中某版本的索引记录：checksum 一致、yanked 策略、签名策略。
+    /// 只针对最终选中的版本；与版本无关的无签名记录不阻断解析。
+    fn verify_locked_record(
         &self,
         identity: &str,
         name: &str,
         version: &str,
         checksum: &str,
-        cache: &DependencyCache,
         format: OutputFormat,
-    ) -> Result<(), RegistryError> {
+    ) -> Result<(Client<'_, UreqTransport>, IndexRecord), RegistryError> {
         let logical = self.logical_for_identity(identity)?;
         let mut clients: BTreeMap<String, Client<'_, UreqTransport>> = BTreeMap::new();
         let client = self.client_for(&mut clients, &logical)?;
         let records = client.index(name)?;
         let record = records
-            .iter()
+            .into_iter()
             .find(|record| record.vers == version)
             .ok_or_else(|| package_invalid(format!("索引中不存在 `{name}@{version}`")))?;
         if record.cksum != checksum {
@@ -337,13 +360,102 @@ impl RegistrySession {
                 "`{name}@{version}` 已被 yank（--deny-yanked）"
             )));
         }
-        self.check_signature(identity, record, format)?;
-        let archive = client.download(record)?;
+        self.check_signature(identity, &record, format)?;
+        Ok((clients.remove(identity).expect("client 已连接"), record))
+    }
+
+    /// 下载索引中某版本的归档并写入内容寻址缓存；
+    /// 校验锁 checksum 与索引记录一致、`--deny-yanked` 与签名策略，
+    /// 并核对归档内清单的 owner/name/version 与锁 ID 一致。
+    pub(crate) fn fetch_and_store(
+        &self,
+        identity: &str,
+        name: &str,
+        version: &str,
+        checksum: &str,
+        cache: &DependencyCache,
+        format: OutputFormat,
+    ) -> Result<(), RegistryError> {
+        let (client, record) =
+            self.verify_locked_record(identity, name, version, checksum, format)?;
+        let archive = client.download(&record)?;
+        verify_archive_manifest(&archive, name, version)?;
         cache
             .store_archive(record.to_metadata(identity)?.id, checksum, &archive)
             .map(|_| ())
             .map_err(|error| package_checksum(format!("registry 归档校验失败：{error}")))
     }
+
+    /// 与 `verify_locked_record` 相同的检查，但不下载：
+    /// 缓存命中时在 `--deny-yanked`/`--require-signature` 下仍验证索引记录。
+    pub(crate) fn verify_locked_package(
+        &self,
+        identity: &str,
+        name: &str,
+        version: &str,
+        checksum: &str,
+        format: OutputFormat,
+    ) -> Result<(), RegistryError> {
+        self.verify_locked_record(identity, name, version, checksum, format)
+            .map(|_| ())
+    }
+}
+
+/// 核对归档内 `gugu.toml` 的 `owner`/`name`/`version` 与请求 ID 一致；
+/// 防止被污染的索引把另一个 package 的内容按所请求依赖入库。
+fn verify_archive_manifest(archive: &[u8], name: &str, version: &str) -> Result<(), RegistryError> {
+    use flate2::read::GzDecoder;
+    let mut manifest_text = None;
+    let mut tar = tar::Archive::new(GzDecoder::new(archive));
+    for entry in tar
+        .entries()
+        .map_err(|error| package_invalid(format!("registry 归档不是合法 tar：{error}")))?
+    {
+        let mut entry =
+            entry.map_err(|error| package_invalid(format!("registry 归档读取失败：{error}")))?;
+        let path = entry
+            .path()
+            .map_err(|error| package_invalid(format!("registry 归档路径非法：{error}")))?
+            .to_path_buf();
+        if path.as_os_str() == "gugu.toml" {
+            let mut text = String::new();
+            std::io::Read::read_to_string(&mut entry, &mut text)
+                .map_err(|error| package_invalid(format!("registry 归档清单读取失败：{error}")))?;
+            manifest_text = Some(text);
+            break;
+        }
+    }
+    let text = manifest_text.ok_or_else(|| package_invalid("registry 归档缺少 `gugu.toml`"))?;
+    let table: toml::Table = text
+        .parse()
+        .map_err(|error| package_invalid(format!("registry 归档清单解析失败：{error}")))?;
+    let package = table
+        .get("package")
+        .and_then(|value| value.as_table())
+        .ok_or_else(|| package_invalid("registry 归档清单缺少 [package]"))?;
+    let owner = package
+        .get("owner")
+        .and_then(|value| value.as_str())
+        .unwrap_or_default();
+    let package_name = package
+        .get("name")
+        .and_then(|value| value.as_str())
+        .unwrap_or_default();
+    let package_version = package
+        .get("version")
+        .and_then(|value| value.as_str())
+        .unwrap_or_default();
+    let actual = if owner.is_empty() {
+        package_name.to_owned()
+    } else {
+        format!("{owner}/{package_name}")
+    };
+    if actual != name || package_version != version {
+        return Err(package_invalid(format!(
+            "归档清单 `{actual}@{package_version}` 与请求 `{name}@{version}` 不一致"
+        )));
+    }
+    Ok(())
 }
 
 fn warn_unverified(format: OutputFormat, name: &str, version: &str, identity: &str) {
@@ -376,7 +488,7 @@ pub(crate) fn run_publish(
     options: &GlobalArgs,
 ) -> i32 {
     let format = format_of(options);
-    let (_project, packages) = match discover(options) {
+    let (project, packages) = match discover(options) {
         Ok(value) => value,
         Err(code) => return code,
     };
@@ -398,6 +510,19 @@ pub(crate) fn run_publish(
     };
     if let Err(message) = validate_publish_manifest(package) {
         return fail(format, 1, message);
+    }
+    // 规范步骤 5：以 --locked 等价解析检查清单与锁图一致。
+    let target = match parse_target_or_exit(options) {
+        Ok(target) => target,
+        Err(code) => return code,
+    };
+    // 有锁文件时以 --locked 等价解析检查清单与锁图一致；
+    // 无锁文件时正常解析会生成锁图（相当于首轮发布）。
+    let mut check = options.clone();
+    check.locked = project.lock_path().exists();
+    let refs = packages.iter().collect::<Vec<_>>();
+    if crate::resolve_project_lock(&project, &refs, &check, target, format, false).is_err() {
+        return 1;
     }
     let checksum = files.checksum();
     let archive = match archive_bytes(&files) {
@@ -511,21 +636,57 @@ fn validate_publish_manifest(package: &Package) -> Result<(), String> {
     if package_table.get("publish").and_then(|v| v.as_bool()) != Some(true) {
         return Err("发布要求 [package] 设置 `publish = true`".to_owned());
     }
-    for section in ["dependencies", "test-dependencies", "build-dependencies"] {
-        let Some(deps) = value.get(section).and_then(|table| table.as_table()) else {
+    // 与清单解析一致的依赖表：`build` 是子表、`target.<cond>` 是条件表。
+    let mut tables: Vec<(String, &toml::Table)> = Vec::new();
+    for (label, deps) in [
+        ("dependencies", value.get("dependencies")),
+        ("test-dependencies", value.get("test-dependencies")),
+        (
+            "build.dependencies",
+            value
+                .get("build")
+                .and_then(|build| build.get("dependencies")),
+        ),
+    ] {
+        if let Some(table) = deps.and_then(toml::Value::as_table) {
+            tables.push((label.to_owned(), table));
+        }
+    }
+    for section in [
+        value.get("target"),
+        value.get("build").and_then(|build| build.get("target")),
+    ] {
+        let Some(targets) = section.and_then(toml::Value::as_table) else {
             continue;
         };
+        for (condition, table) in targets {
+            let Some(table) = table.as_table() else {
+                continue;
+            };
+            for (key, deps) in [
+                ("dependencies", table.get("dependencies")),
+                ("test-dependencies", table.get("test-dependencies")),
+            ] {
+                if let Some(deps) = deps.and_then(toml::Value::as_table) {
+                    tables.push((format!("target.{condition}.{key}"), deps));
+                }
+            }
+        }
+    }
+    for (section, deps) in tables {
         for (dep_name, dep) in deps {
             let Some(dep_table) = dep.as_table() else {
                 continue;
             };
             if dep_table.contains_key("path") && !dep_table.contains_key("version") {
                 return Err(format!(
-                    "path 依赖 `{dep_name}` 发布时必须同时提供 registry version 回退"
+                    "path 依赖 `{dep_name}`（{section}）发布时必须同时提供 registry version 回退"
                 ));
             }
             if dep_table.contains_key("git") && !dep_table.contains_key("rev") {
-                return Err(format!("Git 依赖 `{dep_name}` 发布时必须锁定 `rev`"));
+                return Err(format!(
+                    "Git 依赖 `{dep_name}`（{section}）发布时必须锁定 `rev`"
+                ));
             }
         }
     }
@@ -612,7 +773,7 @@ pub(crate) fn run_update_precise(version: &str, options: &GlobalArgs) -> i32 {
         Ok(specs) => specs,
         Err(error) => return fail(format, 1, error.to_string()),
     };
-    let fetch = match session.gather_candidates(&specs, &lock_candidates, options.offline, format) {
+    let fetch = match session.gather_candidates(&specs, &lock_candidates, options.offline, true) {
         Ok(fetch) => fetch,
         Err(error) => return registry_fail(format, error),
     };
@@ -687,6 +848,7 @@ pub(crate) fn ensure_registry_inputs(
     cache: &DependencyCache,
     yanked: &BTreeSet<(String, String, String)>,
     offline: bool,
+    vendor: bool,
     format: OutputFormat,
 ) -> Result<(), i32> {
     for package in &graph.packages {
@@ -713,6 +875,22 @@ pub(crate) fn ensure_registry_inputs(
             ));
         }
         if cache.load(&package.id, Some(&checksum)).is_ok() {
+            // 严格策略下缓存命中也要验证索引记录中的 yanked/签名状态。
+            if !offline && (session.deny_yanked() || session.require_signature()) {
+                session
+                    .verify_locked_package(
+                        registry,
+                        package.id.name(),
+                        &package.id.version().to_string(),
+                        &checksum,
+                        format,
+                    )
+                    .map_err(|error| registry_fail(format, error))?;
+            }
+            continue;
+        }
+        if vendor {
+            // vendor 模式输入全部来自 vendor 目录，不从 registry 下载。
             continue;
         }
         if offline {
