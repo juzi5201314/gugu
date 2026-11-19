@@ -1,3 +1,4 @@
+use super::comparison::UNORDERED;
 use super::values::Computed;
 use super::{Builder, Diagnostic, TypeKind, invalid};
 use crate::body::{Condition, FloatOp, IntOp, Op, Origin, RuntimeCall, Type, ValueId, ValueType};
@@ -15,7 +16,7 @@ impl Builder<'_> {
         if protocol == crate::gir::concrete::Protocol::Eq {
             return self.compare_computed(CompareOp::Eq, left, right, ty);
         }
-        let result = self.comparison_order(left, right)?;
+        let result = self.comparison_result(left, right, false)?;
         Ok(Computed::Values {
             ty,
             values: vec![result],
@@ -172,9 +173,17 @@ impl Builder<'_> {
             self.kind(lhs.ty()),
             TypeKind::Unit | TypeKind::String | TypeKind::Array { .. } | TypeKind::Aggregate { .. }
         ) {
-            let result = self.comparison_order(lhs, rhs)?;
+            let equality = matches!(op, CompareOp::Eq | CompareOp::Ne);
+            let result = self.comparison_result(lhs, rhs, equality)?;
             let zero = self.constant(0, Type::I64);
-            self.compare_value(condition(op), true, result, zero)
+            let value = self.compare_value(condition(op), true, result, zero);
+            if equality {
+                value
+            } else {
+                let unordered = self.constant(UNORDERED, Type::I64);
+                let ordered = self.compare_value(Condition::Ne, true, result, unordered);
+                self.boolean(IntOp::And, value, ordered)
+            }
         } else {
             self.scalar_comparison(op, lhs, rhs)?
         };

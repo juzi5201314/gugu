@@ -86,6 +86,63 @@ fn aggregate_collection_keys_large_tuples() {
 }
 
 #[test]
+fn structural_comparison_nan_equality() {
+    assert_eq!(
+        printed(&format!(
+            r#"{CHECK}
+        fn main() {{
+            let nan = unsafe {{ std.mem.transmute[uint, float](0x7ff8000000000000) }}
+            check(nan != nan && nan != 1.0 && !(nan == 1.0))
+            check(!([nan] == [1.0]) && [nan] != [1.0])
+            check(!([nan] == [nan]) && [nan] != [nan])
+            check(!((nan, 0) == (1.0, 0)) && (nan, 0) != (1.0, 0))
+            check(!((nan, 0) == (nan, 0)) && (nan, 0) != (nan, 0))
+            check([1.0] == [1.0] && (1.0, 2) == (1.0, 2))
+            let negative_zero = unsafe {{ std.mem.transmute[uint, float](0x8000000000000000) }}
+            check([0.0] == [negative_zero] && !([0.0] != [negative_zero]))
+            check(!([(nan, 1)] == [(nan, 1)]) && [(nan, 1)] != [(1.0, 1)])
+            let empty: [float; 0] = []
+            check(empty == empty && !(empty != empty))
+            let narrow = unsafe {{ std.mem.transmute[u32, f32](0x7fc00000) }}
+            let one: f32 = 1.0
+            check(!([narrow] == [one]) && [narrow] != [one])
+            check(!((narrow, 0) == (narrow, 0)) && (narrow, 0) != (narrow, 0))
+            println("ok")
+        }}"#
+        )),
+        "ok\n"
+    );
+}
+
+#[test]
+fn structural_comparison_nan_ordering() {
+    assert_eq!(
+        printed(&format!(
+            r#"{CHECK}
+        fn main() {{
+            let nan = unsafe {{ std.mem.transmute[uint, float](0x7ff8000000000000) }}
+            check(!([nan] < [1.0]) && !([nan] > [1.0]) && !([nan] <= [1.0]) && !([nan] >= [1.0]))
+            check(!([nan] < [nan]) && !([nan] > [nan]) && !([nan] <= [nan]))
+            check(!((nan, 0) < (1.0, 1)) && !((nan, 1) > (1.0, 0)) && !((nan, 0) <= (1.0, 1)))
+            check(!((nan, 0) < (nan, 1)) && !((nan, 1) > (nan, 0)) && !((nan, 0) <= (nan, 0)))
+            check(!((1.0, nan) < (1.0, 2.0)) && !((1.0, nan) <= (1.0, 2.0)))
+            check((0, nan) < (1, nan) && (1, nan) > (0, nan))
+            check([1.0] <= [1.0] && [1.0] < [2.0] && [2.0] > [1.0])
+            check(!([(nan, 0)] < [(1.0, 1)]) && !([(nan, 0)] >= [(1.0, 1)]))
+            let empty: [float; 0] = []
+            check(empty <= empty && empty >= empty && !(empty < empty))
+            let narrow = unsafe {{ std.mem.transmute[u32, f32](0x7fc00000) }}
+            let one: f32 = 1.0
+            check(!([narrow] < [one]) && !([narrow] > [one]) && !([narrow] <= [one]))
+            check(!((narrow, 0) < (narrow, 1)) && !((narrow, 0) <= (narrow, 0)))
+            println("ok")
+        }}"#
+        )),
+        "ok\n"
+    );
+}
+
+#[test]
 fn aggregate_collection_keys_small_tuples() {
     aggregate_keys("(int, int)", "(-2, 50)", "(1, 2)", "(1, 9)", "(-2, 50)");
 }

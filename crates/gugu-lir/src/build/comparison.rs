@@ -4,11 +4,14 @@ use crate::body::{Condition, IntOp, Op, Origin, RuntimeCall, Type, ValueId, Valu
 use crate::gir::body::CompareOp;
 use crate::gir::concrete::Field;
 
+pub(super) const UNORDERED: u64 = 2;
+
 impl Builder<'_> {
-    pub(super) fn comparison_order(
+    pub(super) fn comparison_result(
         &mut self,
         left: Computed,
         right: Computed,
+        equality: bool,
     ) -> Result<ValueId, Diagnostic> {
         match self.kind(left.ty()).clone() {
             TypeKind::Unit => Ok(self.constant(0, Type::I64)),
@@ -24,7 +27,7 @@ impl Builder<'_> {
             TypeKind::Array { element, count } => {
                 let left = self.computed_address(left)?;
                 let right = self.computed_address(right)?;
-                self.array_order(element, count, left, right)
+                self.array_result(element, count, left, right, equality)
             }
             TypeKind::Aggregate {
                 tag_bytes,
@@ -33,33 +36,77 @@ impl Builder<'_> {
                 let left = self.computed_address(left)?;
                 let right = self.computed_address(right)?;
                 if tag_bytes == 0 {
-                    self.fields_order(&variants[0], left, right)
+                    self.fields_result(&variants[0], left, right, equality)
                 } else {
-                    self.variant_order(tag_bytes, &variants, left, right)
+                    self.variant_result(tag_bytes, &variants, left, right, equality)
                 }
             }
+            _ if equality => self.scalar_equality(left, right),
             _ => self.scalar_order(left, right),
         }
     }
 
-    fn scalar_order(&mut self, left: Computed, right: Computed) -> Result<ValueId, Diagnostic> {
-        let less = self.scalar_comparison(CompareOp::Lt, left.clone(), right.clone())?;
-        let greater = self.scalar_comparison(CompareOp::Gt, left, right)?;
-        let less = self.integer_resize(less, Type::I64, false);
-        let greater = self.integer_resize(greater, Type::I64, false);
+    fn scalar_equality(&mut self, left: Computed, right: Computed) -> Result<ValueId, Diagnostic> {
+        let equal = self.scalar_comparison(CompareOp::Eq, left, right)?;
+        let zero = self.constant(0, Type::I64);
+        let one = self.constant(1, Type::I64);
         Ok(self.emit_one(
-            Op::Integer(IntOp::Sub),
-            &[greater, less],
+            Op::Select,
+            &[equal, zero, one],
             ValueType::scalar(Type::I64),
             Origin::None,
         ))
     }
 
-    fn field_order(
+    fn scalar_order(&mut self, left: Computed, right: Computed) -> Result<ValueId, Diagnostic> {
+        let float = matches!(self.kind(left.ty()), TypeKind::Float(_));
+        let less = self.scalar_comparison(CompareOp::Lt, left.clone(), right.clone())?;
+        let greater = self.scalar_comparison(CompareOp::Gt, left.clone(), right.clone())?;
+        let less = self.integer_resize(less, Type::I64, false);
+        let greater = self.integer_resize(greater, Type::I64, false);
+        let order = self.emit_one(
+            Op::Integer(IntOp::Sub),
+            &[greater, less],
+            ValueType::scalar(Type::I64),
+            Origin::None,
+        );
+        if float {
+            self.float_order(order, left, right)
+        } else {
+            Ok(order)
+        }
+    }
+
+    fn float_order(
+        &mut self,
+        order: ValueId,
+        left: Computed,
+        right: Computed,
+    ) -> Result<ValueId, Diagnostic> {
+        let equal = self.scalar_comparison(CompareOp::Eq, left, right)?;
+        let zero = self.constant(0, Type::I64);
+        let unordered = self.constant(UNORDERED, Type::I64);
+        let tied = self.compare_value(Condition::Eq, true, order, zero);
+        let tied_order = self.emit_one(
+            Op::Select,
+            &[equal, zero, unordered],
+            ValueType::scalar(Type::I64),
+            Origin::None,
+        );
+        Ok(self.emit_one(
+            Op::Select,
+            &[tied, tied_order, order],
+            ValueType::scalar(Type::I64),
+            Origin::None,
+        ))
+    }
+
+    fn field_result(
         &mut self,
         field: &Field,
         left: ValueId,
         right: ValueId,
+        equality: bool,
     ) -> Result<ValueId, Diagnostic> {
         let left = Computed::Address {
             ty: field.ty,
@@ -69,14 +116,15 @@ impl Builder<'_> {
             ty: field.ty,
             address: self.offset(right, field.offset),
         };
-        self.comparison_order(left, right)
+        self.comparison_result(left, right, equality)
     }
 
-    fn fields_order(
+    fn fields_result(
         &mut self,
         fields: &[Field],
         left: ValueId,
         right: ValueId,
+        equality: bool,
     ) -> Result<ValueId, Diagnostic> {
         if fields.is_empty() {
             return Ok(self.constant(0, Type::I64));
@@ -84,7 +132,7 @@ impl Builder<'_> {
         let result = self.temporary_bytes(8, 8, [0; 32], Vec::new())?;
         let done = self.fresh(self.source.clone(), false);
         for (index, field) in fields.iter().enumerate() {
-            let order = self.field_order(field, left, right)?;
+            let order = self.field_result(field, left, right, equality)?;
             self.store(result, order, 8, false);
             if index + 1 < fields.len() {
                 let next = self.fresh(self.source.clone(), false);
@@ -99,21 +147,25 @@ impl Builder<'_> {
         Ok(self.load(result, ValueType::scalar(Type::I64), 8, false))
     }
 
-    fn variant_order(
+    fn variant_result(
         &mut self,
         tag_bytes: u8,
         variants: &[Vec<Field>],
         left: ValueId,
         right: ValueId,
+        equality: bool,
     ) -> Result<ValueId, Diagnostic> {
         if variants.is_empty() {
             return Err(invalid("无变体类型没有可比较值"));
         }
         let left_tag = self.load_bits(left, u64::from(tag_bytes));
         let right_tag = self.load_bits(right, u64::from(tag_bytes));
+        let less = self.compare_value(Condition::Lt, false, left_tag, right_tag);
+        let minus_one = self.constant(u64::MAX, Type::I64);
+        let one = self.constant(1, Type::I64);
         let order = self.emit_one(
-            Op::Integer(IntOp::Sub),
-            &[left_tag, right_tag],
+            Op::Select,
+            &[less, minus_one, one],
             ValueType::scalar(Type::I64),
             Origin::None,
         );
@@ -131,7 +183,7 @@ impl Builder<'_> {
             let active = self.fresh(self.source.clone(), false);
             self.branch(equal, active, next);
             self.current = active;
-            let order = self.fields_order(fields, left, right)?;
+            let order = self.fields_result(fields, left, right, equality)?;
             self.store(result, order, 8, false);
             self.jump(done);
             self.current = next;
@@ -141,12 +193,13 @@ impl Builder<'_> {
         Ok(self.load(result, ValueType::scalar(Type::I64), 8, false))
     }
 
-    fn array_order(
+    fn array_result(
         &mut self,
         element: u32,
         count: u64,
         left: ValueId,
         right: ValueId,
+        equality: bool,
     ) -> Result<ValueId, Diagnostic> {
         let result = self.temporary_bytes(8, 8, [0; 32], Vec::new())?;
         let index_slot = self.temporary_bytes(8, 8, [0; 32], Vec::new())?;
@@ -163,7 +216,7 @@ impl Builder<'_> {
         let more = self.compare_value(Condition::Lt, false, index, count);
         self.branch(more, body, done);
         self.current = body;
-        let order = self.array_element_order(element, index, left, right)?;
+        let order = self.array_element_result(element, index, left, right, equality)?;
         self.store(result, order, 8, false);
         let one = self.constant(1, Type::I64);
         let next = self.emit_one(
@@ -179,12 +232,13 @@ impl Builder<'_> {
         Ok(self.load(result, ValueType::scalar(Type::I64), 8, false))
     }
 
-    fn array_element_order(
+    fn array_element_result(
         &mut self,
         element: u32,
         index: ValueId,
         left: ValueId,
         right: ValueId,
+        equality: bool,
     ) -> Result<ValueId, Diagnostic> {
         let stride = self
             .layout(element)
@@ -200,13 +254,14 @@ impl Builder<'_> {
         );
         let left = self.dynamic_offset(left, offset);
         let right = self.dynamic_offset(right, offset);
-        self.field_order(
+        self.field_result(
             &Field {
                 ty: element,
                 offset: 0,
             },
             left,
             right,
+            equality,
         )
     }
 }

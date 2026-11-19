@@ -15,7 +15,7 @@ use std::{num::NonZeroU32, ops::Range};
 /// 17：压缩字编码从运行期 cage 基址计算 offset。
 /// 18：原生 cage 参数按值复制使用登记的 ForeignCopy 入口。
 /// 20：进程与环境机器操作目录。
-pub const REVISION: u32 = 22;
+pub const REVISION: u32 = 23;
 
 macro_rules! ids {
     ($($name:ident),* $(,)?) => { $(

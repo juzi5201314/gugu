@@ -36,8 +36,8 @@ use query::{QueryEngine, QueryKey, QueryKind};
 use serde::{Deserialize, Serialize};
 use std::sync::Arc;
 
-/// LIR query 与 world 的 schema。21：结构化内建比较。
-pub const SCHEMA: u32 = 21;
+/// LIR query 与 world 的 schema。22：结构化 IEEE 比较。
+pub const SCHEMA: u32 = 22;
 
 #[derive(Clone, Debug, Eq, PartialEq, Serialize, Deserialize)]
 struct World {

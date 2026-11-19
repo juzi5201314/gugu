@@ -234,7 +234,9 @@ placement schema 2 在分配点之外新增 region 计划：CFG 去掉直接挂�
 
 ### generic 与 monomorphic GIR
 
-具体 GIR 的类型编号只在本体内有效。内联前用稳定类型 key 映射 callee 的局部、常量和动作 descriptor 到 caller 的类型表；缺少所需类型时保留调用，不把局部编号直接复制到另一函数。当前语义 schema 为 19、LowerHir schema 为 13、GIR world schema 为 4、build schema 为 17、pipeline revision 为 4，LIR query/world schema 为 21、body revision 为 22；具体类型 schema 为 4，保留 `transparent` 以区别 Win64 的透明浮点与普通整数聚合。`Call.foreign_arguments` 保留原始参数的车道范围、字节大小、对齐与 MEMORY 分类；x64 lowering revision 为 19、allocation revision 为 6、metadata revision 为 3。调用先保存全部 outgoing 栈参数，再执行寄存器并行拷贝，防止栈参数的源寄存器被较早的参数落位覆盖。C 按值临时副本和隐藏返回区地址保留 `Stack` provenance；verifier 仅在 `by_value` / `sret` 登记位置接受这种内部地址，用户传入的 managed/stack pointer 仍不能直接跨外部边界。两类 bridge 的参数包与 spill 槽都登记精确根，fixup 的 high-relative 深度不登记为根。并行拷贝删除包括栈槽在内的自拷贝；组内存在内存到内存搬运时，环值保存到 frame scratch，不能与中转所用 r11 重叠。
+结构化比较的 equality 路径递归调用标量 `Eq`，不从排序结果为零推导相等。ordering 路径使用 -1 / 0 / 1 / 2 分别表示小于、相等、大于和无序；浮点 NaN 产生无序并沿数组与字段比较传播，不继续比较后续字段。最终直接序谓词在无序时均为 false。字符串与枚举 tag 的排序结果归一为 -1 / 0 / 1，不能与无序码混淆。
+
+具体 GIR 的类型编号只在本体内有效。内联前用稳定类型 key 映射 callee 的局部、常量和动作 descriptor 到 caller 的类型表；缺少所需类型时保留调用，不把局部编号直接复制到另一函数。当前语义 schema 为 19、LowerHir schema 为 13、GIR world schema 为 4、build schema 为 17、pipeline revision 为 4，LIR query/world schema 为 22、body revision 为 23；具体类型 schema 为 4，保留 `transparent` 以区别 Win64 的透明浮点与普通整数聚合。`Call.foreign_arguments` 保留原始参数的车道范围、字节大小、对齐与 MEMORY 分类；x64 lowering revision 为 19、allocation revision 为 6、metadata revision 为 3。调用先保存全部 outgoing 栈参数，再执行寄存器并行拷贝，防止栈参数的源寄存器被较早的参数落位覆盖。C 按值临时副本和隐藏返回区地址保留 `Stack` provenance；verifier 仅在 `by_value` / `sret` 登记位置接受这种内部地址，用户传入的 managed/stack pointer 仍不能直接跨外部边界。两类 bridge 的参数包与 spill 槽都登记精确根，fixup 的 high-relative 深度不登记为根。并行拷贝删除包括栈槽在内的自拷贝；组内存在内存到内存搬运时，环值保存到 frame scratch，不能与中转所用 r11 重叠。
 
 generic GIR 允许 `TyId` 和 `ConstId` 中引用 owner 的泛型参数，也允许
 `Operand::Function` 保存尚未替换的 `MonoCandidate`。它必须已经固定 trait/impl 选择规则；
