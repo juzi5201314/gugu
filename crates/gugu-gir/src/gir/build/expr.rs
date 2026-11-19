@@ -94,8 +94,11 @@ impl Builder<'_> {
                 let result = self.emit_select(id, arms)?;
                 return self.finish_expr(id, result);
             }
-            hir::ExprKind::Closure { definition } => self.emit_closure(id, definition, false)?,
-            hir::ExprKind::Spawn { definition } => self.emit_closure(id, definition, true)?,
+            hir::ExprKind::Closure {
+                definition,
+                captures,
+            } => self.emit_closure(id, definition, false, &captures)?,
+            hir::ExprKind::Spawn { definition } => self.emit_closure(id, definition, true, &[])?,
             hir::ExprKind::Call {
                 target,
                 receiver,
@@ -478,27 +481,19 @@ impl Builder<'_> {
     }
 
     fn emit_string(&mut self, id: ExprId, parts: Range<u32>) -> Result<(), Diagnostic> {
-        let mut operands = Vec::new();
+        let mut text = String::new();
         for part in &self.owner.string_parts[parts.start as usize..parts.end as usize] {
-            if let hir::StringPart::Value { expression, .. } = part {
-                let Some(local) = self.emit_expr(*expression)? else {
-                    return Ok(());
-                };
-                operands.push(copy_of(local));
+            match part {
+                hir::StringPart::Text(part) => text.push_str(part),
+                hir::StringPart::Value { .. } => {
+                    return Err(gir_error(
+                        "运行时插值需要 std.fmt.Formatter",
+                        Some(&self.source_of(id).location),
+                    ));
+                }
             }
         }
-        let dest = self.temp(self.expr_ty(id));
-        self.assign(
-            Place::local(dest),
-            Rvalue::Intrinsic {
-                op: IntrinsicOp::Format {
-                    parts: parts.clone(),
-                },
-                operands,
-                types: Vec::new(),
-            },
-        );
-        self.set_value(id, dest);
+        self.emit_literal(id, hir::Literal::String(text))?;
         Ok(())
     }
 
@@ -538,6 +533,7 @@ impl Builder<'_> {
         id: ExprId,
         definition: hir::DefId,
         spawn: bool,
+        captures: &[hir::LocalId],
     ) -> Result<(), Diagnostic> {
         let dest = self.temp(self.expr_ty(id));
         if spawn {
@@ -555,7 +551,10 @@ impl Builder<'_> {
                 Place::local(dest),
                 Rvalue::Aggregate {
                     kind: AggregateKind::Closure(definition),
-                    operands: Vec::new(),
+                    operands: captures
+                        .iter()
+                        .map(|local| copy_of(self.hir_to_gir[local.index()]))
+                        .collect(),
                 },
             );
         }

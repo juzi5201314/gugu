@@ -66,6 +66,13 @@ pub fn rt0_bytes(params_disp: i32, initialize_environment: bool) -> Vec<u8> {
             0x4d, 0x89, 0x02, // mov [r10], r8（启动 envp）
         ]);
     }
+    // rt_sigaction(SIGPIPE, {SIG_IGN, 0, NULL, 0}, NULL, 8)，保留 rax 中的 image bias。
+    out.extend_from_slice(&[
+        0x50, 0x48, 0x83, 0xec, 0x20, 0x48, 0xc7, 0x04, 0x24, 1, 0, 0, 0, 0x48, 0xc7, 0x44, 0x24,
+        8, 0, 0, 0, 0, 0x48, 0xc7, 0x44, 0x24, 16, 0, 0, 0, 0, 0x48, 0xc7, 0x44, 0x24, 24, 0, 0, 0,
+        0, 0xbf, 13, 0, 0, 0, 0x48, 0x89, 0xe6, 0x31, 0xd2, 0x41, 0xba, 8, 0, 0, 0, 0xb8, 13, 0, 0,
+        0, 0x0f, 0x05, 0x48, 0x83, 0xc4, 0x20, 0x58,
+    ]);
     out.extend_from_slice(&[
         0x4c, 0x8b, 0x73, 0x30, 0x49, 0x01, 0xc6, 0x4c, 0x8b, 0x7b, 0x38, 0x49, 0x01, 0xc7,
     ]);
@@ -196,4 +203,39 @@ pub fn pack_archive(members: &[(&str, &[u8])]) -> Vec<u8> {
         }
     }
     out
+}
+
+#[cfg(test)]
+mod tests {
+    #[test]
+    fn linux_startup_ignores_sigpipe_before_entering_runtime() {
+        let ignore_sigpipe = [
+            0x50, // push rax (image bias)
+            0x48, 0x83, 0xec, 0x20, // sub rsp, 32
+            0x48, 0xc7, 0x04, 0x24, 1, 0, 0, 0, // handler = SIG_IGN
+            0x48, 0xc7, 0x44, 0x24, 8, 0, 0, 0, 0, // flags = 0
+            0x48, 0xc7, 0x44, 0x24, 16, 0, 0, 0, 0, // restorer = NULL
+            0x48, 0xc7, 0x44, 0x24, 24, 0, 0, 0, 0, // mask = 0
+            0xbf, 13, 0, 0, 0, // edi = SIGPIPE
+            0x48, 0x89, 0xe6, // rsi = &action
+            0x31, 0xd2, // rdx = NULL (old action)
+            0x41, 0xba, 8, 0, 0, 0, // r10d = sizeof(kernel_sigset_t)
+            0xb8, 13, 0, 0, 0, 0x0f, 0x05, // rt_sigaction
+            0x48, 0x83, 0xc4, 0x20, 0x58, // restore rsp and image bias
+        ];
+        for initialize_environment in [false, true] {
+            let bytes = super::rt0_bytes(0, initialize_environment);
+            let sites: Vec<_> = bytes
+                .windows(ignore_sigpipe.len())
+                .enumerate()
+                .filter_map(|(at, window)| (window == ignore_sigpipe).then_some(at))
+                .collect();
+            assert_eq!(sites.len(), 1, "startup must install SIG_IGN exactly once");
+            let runtime_entry = bytes
+                .windows(4)
+                .position(|window| window == [0x4c, 0x8b, 0x5b, 0x40])
+                .unwrap();
+            assert!(sites[0] + ignore_sigpipe.len() <= runtime_entry);
+        }
+    }
 }

@@ -212,7 +212,7 @@ pub fn collect(
     let mut shapes = BTreeMap::<StableTypeKey, StorageShape>::new();
     for expression in &owner.expressions {
         let definition = match &expression.kind {
-            hir::ExprKind::Closure { definition } | hir::ExprKind::Spawn { definition } => {
+            hir::ExprKind::Closure { definition, .. } | hir::ExprKind::Spawn { definition } => {
                 *definition
             }
             // `spawn f(args)`：参数包按被 spawn 函数的定义身份登记一份原始车道缓冲。
@@ -248,8 +248,12 @@ pub fn collect(
             continue;
         }
         let mut captures = Vec::with_capacity(closure.captures.len());
-        for capture in &closure.captures {
-            captures.push(capture_type(context, entry, owner, capture)?);
+        for (index, capture) in closure.captures.iter().enumerate() {
+            let source = match &expression.kind {
+                hir::ExprKind::Closure { captures, .. } => captures.get(index).copied(),
+                _ => None,
+            };
+            captures.push(capture_type(context, entry, owner, capture, source)?);
         }
         for representation in [
             StorageRepresentation::SharedHandle,
@@ -276,8 +280,11 @@ fn capture_type(
     entry: &WalkEntry,
     owner: &hir::Owner,
     capture: &hir::Capture,
+    source: Option<hir::LocalId>,
 ) -> Result<StableTypeKey, Diagnostic> {
-    let local = if capture.owner == entry.definition {
+    let local = if let Some(source) = source {
+        source
+    } else if capture.owner == entry.definition {
         capture.source
     } else {
         owner

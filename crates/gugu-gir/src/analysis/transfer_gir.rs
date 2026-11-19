@@ -281,7 +281,7 @@ fn binary_range(op: BinaryOp, left: Interval, right: Interval) -> Interval {
 
 fn intrinsic_effects(state: &mut AbstractState, op: &IntrinsicOp) -> Interval {
     match op {
-        IntrinsicOp::Asm(_) => state.bump_foreign(),
+        IntrinsicOp::Asm(_) | IntrinsicOp::PackFor => state.bump_foreign(),
         IntrinsicOp::Spawn(_) => {
             state.effects.suspend = true;
             state.effects.allocate = true;
@@ -296,7 +296,7 @@ fn intrinsic_effects(state: &mut AbstractState, op: &IntrinsicOp) -> Interval {
                 }
             }
         }
-        IntrinsicOp::ChanNew | IntrinsicOp::Format { .. } => state.effects.allocate = true,
+        IntrinsicOp::ChanNew => state.effects.allocate = true,
         _ => {}
     }
     Interval::UNKNOWN

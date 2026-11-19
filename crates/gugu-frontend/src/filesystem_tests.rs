@@ -1,8 +1,10 @@
 //! 执行真实文件/资源函数的 LIR；地址是 Vec 下标，外部操作通过显式钩子注入。
 mod copy;
+mod formatting;
 mod harness;
 mod network;
 mod platform;
+mod printing;
 mod process;
 mod resource;
 mod trace;
@@ -227,7 +229,12 @@ fn interpret_bounded(
             let operands = body.args(&instruction.arguments);
             let args: Vec<_> = operands.iter().map(|value| values[value.index()]).collect();
             let value = match instruction.op {
-                Op::StackCheck | Op::SafepointPoll { .. } => continue,
+                Op::StackCheck
+                | Op::SafepointPoll { .. }
+                | Op::RegionPublish { .. }
+                | Op::RegionReset { .. }
+                | Op::PromoteManaged { .. }
+                | Op::RegionTransfer { .. } => continue,
                 Op::Call(ref invoked) => {
                     let returned = call(Boundary::Call(&invoked.target), &args, memory);
                     assert_eq!(returned.len(), instruction.results.len());
@@ -247,6 +254,7 @@ fn interpret_bounded(
                     continue;
                 }
                 ref operation @ (Op::GcAlloc { .. }
+                | Op::RegionAlloc { .. }
                 | Op::SymbolAddr(_)
                 | Op::GcWriteBarrier { .. }) => {
                     let returned = call(Boundary::Storage(operation), &args, memory);
@@ -255,6 +263,21 @@ fn interpret_bounded(
                     continue;
                 }
                 Op::IConst(value) => value,
+                Op::Integer(op @ (IntOp::AddCarry | IntOp::SubBorrow)) => {
+                    let (value, first) = if op == IntOp::AddCarry {
+                        args[0].overflowing_add(args[1])
+                    } else {
+                        args[0].overflowing_sub(args[1])
+                    };
+                    let (value, second) = if op == IntOp::AddCarry {
+                        value.overflowing_add(args[2])
+                    } else {
+                        value.overflowing_sub(args[2])
+                    };
+                    values[range(&instruction.results)]
+                        .copy_from_slice(&[value, u64::from(first || second)]);
+                    continue;
+                }
                 Op::StackAddr(slot) => slots[slot.index()],
                 Op::PtrOffset => args[0].wrapping_add(args[1]),
                 Op::Convert(crate::lir::body::Conversion::SignExtend) => {
@@ -272,6 +295,7 @@ fn interpret_bounded(
                     IntOp::Add => args[0].wrapping_add(args[1]),
                     IntOp::Sub => args[0].wrapping_sub(args[1]),
                     IntOp::Not => !args[0],
+                    IntOp::Neg => args[0].wrapping_neg(),
                     IntOp::Xor => args[0] ^ args[1],
                     IntOp::RemUnsigned => args[0] % args[1],
                     IntOp::DivUnsigned => args[0] / args[1],

@@ -256,7 +256,8 @@ parser 必须满足：
 - `ForeignDefinition` 与 `ForeignCall` 保存 C 声明身份、naked/imported 标志和按调用点优先级形成的 bridge/dirty/leaf 效应。`Linkage` 独立保存函数、static 与全局汇编的符号名、节和 used 状态；两张声明表在缓存命中时对照当前模型验证。
 - `AssemblyPlan` 保存求值后的模板、寄存器宽度/方向、输入与输出位置、clobber 位图及 managed/naked/dirty/global 上下文。managed 模板的有限控制流和所有出口的栈增量在前端验证；寄存器值大小由布局检查，机器编码仍属于后端。
 - `FormattingPart` 保存闭集格式码、填充/对齐/标志以及固定计数或已解析的 `int` 局部槽；动态 width/precision 经过读取、初始化和捕获检查，不把 `name$` 文本留给后端解析。插值表达式按格式码记录对应语言 trait 的派发。
-- `must_use` 保存丢掉 `Option`、`Result` 或 `#[must_use]` 类型/函数的源码范围。诊断在 lint 级别解析后才发射：默认警告，`deny`/`forbid` 才变成错误。`Formatter` 与 `Hasher` 是 8 字节位语言类型，稳定类型键分别为 29 与 30，不是 GC 根；写入方法不在这张类型表里。
+- `must_use` 保存丢掉 `Option`、`Result` 或 `#[must_use]` 类型/函数的源码范围。诊断在 lint 级别解析后才发射：默认警告，`deny`/`forbid` 才变成错误。加载标准库时，语言名称 `Formatter` 及格式 trait 参数绑定到 `std.fmt.Formatter` 的名义定义，其 string 字段按普通聚合参与 GC 追踪。无标准库的语义输入仍保留稳定类型键 29 的 8 字节占位语言类型；`Hasher` 保持类型键 30 的非 GC 根位类型。
+- 运行时 f-string 在 HIR 形成时展开为普通块：建立 Formatter 局部槽，写入字面量，每个插值保存一次求值的值、设置格式说明并调用已选择的格式 trait，最后 `finish()`。动态计数是正常的局部读取；生成表达式遵守 owner 的父节点先于子节点不变量。GIR / 单态化使用普通调用与派发，不再传递序列化的可变参数 `Format` runtime 调用。
 
 局部槽的存储需求编码为三个位：`ADDRESS_TAKEN`、`CAPTURED`、`CROSS_COROUTINE`。这些位与捕获表一起交给 HIR/GIR 的存储选择；捕获或跨协程槽不能仅因创建它的词法块结束而销毁。分析记录 callable 值在求值时引用的槽，遮蔽或后续函数值赋值不能重新绑定已经形成的闭包环境。
 

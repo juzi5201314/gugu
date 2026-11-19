@@ -66,7 +66,8 @@ pub fn summarize(
                 access_argument(owner, &parameters, argument, read, write, summary);
             }
         }
-        if let ExprKind::Closure { definition } | ExprKind::Spawn { definition } = expression.kind
+        if let ExprKind::Closure { definition, .. } | ExprKind::Spawn { definition } =
+            expression.kind
             && let Some(nested) = module
                 .owners
                 .iter()

@@ -85,7 +85,7 @@ impl Checker<'_, '_> {
             ),
             _ => unreachable!("已筛选 Any 恢复方法"),
         };
-        match self.model.assumptions_at(self.module, span) {
+        match self.assumptions(span) {
             Ok(assumptions) => self.trait_constraints.push((
                 Obligation {
                     ty: target,

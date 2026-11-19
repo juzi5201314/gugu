@@ -2,7 +2,7 @@ use super::values::Computed;
 use super::{Builder, Diagnostic, Storage, TypeKind, invalid};
 use crate::body::{
     Condition, Conversion, IntOp, Op, Origin, Provenance, RuntimeCall, Symbol, Type, ValueId,
-    ValueType, id, range,
+    ValueType, id,
 };
 use crate::gir::placement::PlacementKind;
 use crate::invalid_resource;
@@ -22,6 +22,9 @@ impl Builder<'_> {
         ty: u32,
     ) -> Result<Computed, Diagnostic> {
         match op {
+            g::IntrinsicOp::PackFor => {
+                Err(invalid("pack loop reached LIR before monomorphization"))
+            }
             g::IntrinsicOp::StringBytes | g::IntrinsicOp::StringFromUtf8Unchecked => {
                 let input = self.operand(&operands[0])?;
                 let values = match input {
@@ -351,22 +354,10 @@ impl Builder<'_> {
                 self.channel_try(op, operands, ty)
             }
             g::IntrinsicOp::Spawn(g::SpawnTarget::Body(definition)) => {
-                self.closure(*definition, ty, true)
+                self.closure(*definition, ty, true, None)
             }
             g::IntrinsicOp::Spawn(g::SpawnTarget::Callee(callee)) => {
                 self.spawn_callee(callee, operands, ty)
-            }
-            g::IntrinsicOp::Format { parts } => {
-                let metadata = serde_json::to_vec(&self.owner.string_parts[range(parts)])
-                    .expect("格式计划可序列化");
-                let mut args = vec![self.data(metadata, Provenance::Metadata)];
-                for operand in operands {
-                    let value = self.operand(operand)?;
-                    let ty = value.ty();
-                    args.push(self.computed_address(value)?);
-                    args.push(self.descriptor(ty));
-                }
-                self.runtime_result(RuntimeCall::Format, args, ty)
             }
             g::IntrinsicOp::Asm(index) => self.inline_asm(*index, operands, ty),
             g::IntrinsicOp::DeferChainEmpty => {
@@ -586,30 +577,13 @@ impl Builder<'_> {
         }
     }
 
-    pub(super) fn utf8_check(&mut self, check: u32) -> Result<ValueId, Diagnostic> {
-        let expression = self.owner.checks[usize::try_from(check).expect("检查编号")].expression;
-        let hir::ExprKind::Slice { base, start, end } =
-            self.owner.expressions[expression.index()].kind
-        else {
-            return Err(invalid("UTF-8 检查缺少切片表达式"));
-        };
-        let local = self.gir.expression_locals[base.index()]
-            .ok_or_else(|| invalid("字符串检查缺少已求值 base"))?;
-        let base = self.read_place(g::Place::local(local))?;
+    pub(super) fn utf8_check(&mut self, operands: &[g::Operand]) -> Result<ValueId, Diagnostic> {
+        let base = self.operand(&operands[0])?;
         // 与 `concat` 同理：切片/字符串是 COW 聚合，glue 绑定需要显式 (data, len) 车道。
         let mut args = self.explicit_abi_values(base)?;
-        // 调用形状固定为 (data, len, start, end)：缺省起点归一为 0，缺省终点归一为 len，
-        // `utf8_boundary` glue 因此绑定到一个固定四参数的 Gugu 函数。
-        for (index, endpoint) in [start, end].into_iter().enumerate() {
-            match endpoint {
-                Some(endpoint) => {
-                    let local = self.gir.expression_locals[endpoint.index()]
-                        .ok_or_else(|| invalid("字符串检查缺少已求值端点"))?;
-                    args.extend(self.local_values(local)?);
-                }
-                None if index == 0 => args.push(self.constant(0, Type::I64)),
-                None => args.push(args[1]),
-            }
+        for endpoint in &operands[1..] {
+            let endpoint = self.operand(endpoint)?;
+            args.extend(self.computed_values(endpoint)?);
         }
         Ok(self.runtime(
             RuntimeCall::Utf8Boundary,
@@ -682,8 +656,9 @@ impl Builder<'_> {
         definition: hir::DefId,
         ty: u32,
         spawn: bool,
+        captures: Option<&[g::Operand]>,
     ) -> Result<Computed, Diagnostic> {
-        let environment = self.capture_environment(definition)?;
+        let environment = self.capture_environment(definition, captures)?;
         if !spawn {
             return Ok(Computed::Values {
                 ty,
@@ -1041,6 +1016,7 @@ impl Builder<'_> {
     pub(super) fn capture_environment(
         &mut self,
         definition: hir::DefId,
+        sources: Option<&[g::Operand]>,
     ) -> Result<ValueId, Diagnostic> {
         let owner = self
             .module
@@ -1069,24 +1045,36 @@ impl Builder<'_> {
         };
         let mut slots = Vec::with_capacity(owner.captures.len());
         let mut keys = Vec::with_capacity(owner.captures.len());
-        for capture in &owner.captures {
-            let local = if capture.owner == self.owner.definition {
-                capture.source
+        for (index, capture) in owner.captures.iter().enumerate() {
+            let local_id = if let Some(sources) = sources {
+                let Some(g::Operand::Copy(place)) = sources.get(index) else {
+                    return Err(invalid("闭包捕获缺少源槽"));
+                };
+                if !place.is_local() {
+                    return Err(invalid("闭包捕获源不是局部槽"));
+                }
+                place.local
             } else {
-                self.owner
-                    .captures
+                let local = if capture.owner == self.owner.definition {
+                    capture.source
+                } else {
+                    self.owner
+                        .captures
+                        .iter()
+                        .find(|outer| {
+                            outer.owner == capture.owner && outer.source == capture.source
+                        })
+                        .ok_or_else(|| invalid("嵌套 capture 没有传递槽"))?
+                        .local
+                };
+                let local = self
+                    .gir
+                    .locals
                     .iter()
-                    .find(|outer| outer.owner == capture.owner && outer.source == capture.source)
-                    .ok_or_else(|| invalid("嵌套 capture 没有传递槽"))?
-                    .local
+                    .position(|candidate| candidate.hir_local == Some(local))
+                    .ok_or_else(|| invalid("capture 源槽没有 GIR 身份"))?;
+                g::LocalId(id(local))
             };
-            let local = self
-                .gir
-                .locals
-                .iter()
-                .position(|candidate| candidate.hir_local == Some(local))
-                .ok_or_else(|| invalid("capture 源槽没有 GIR 身份"))?;
-            let local_id = g::LocalId(id(local));
             let ty = self.local_ty(local_id);
             if self.layout(ty).passing.has_resource() {
                 return Err(invalid_resource(

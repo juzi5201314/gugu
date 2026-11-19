@@ -269,7 +269,14 @@ impl Module {
                             SelectArm::Default { body } => edge(*body),
                         })
             }
-            ExprKind::Closure { definition } | ExprKind::Spawn { definition } => {
+            ExprKind::Closure { captures, .. }
+                if captures
+                    .iter()
+                    .any(|local| local.index() >= owner.locals.len()) =>
+            {
+                false
+            }
+            ExprKind::Closure { definition, .. } | ExprKind::Spawn { definition } => {
                 self.definition(*definition)
                     && self
                         .owners

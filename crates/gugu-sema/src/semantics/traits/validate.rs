@@ -95,7 +95,14 @@ impl Model<'_> {
         };
         let definition = &self.traits.interfaces[interface.id];
         if definition.definition.is_none() {
-            if self.builtin_trait(&implementation.self_ty, interface) {
+            if self.builtin_trait(&implementation.self_ty, interface)
+                && !(self.modules[def.module].builtin
+                    && self.modules[def.module].path == "std.fmt"
+                    && matches!(
+                        definition.name.as_str(),
+                        "Print" | "Debug" | "Binary" | "Octal" | "LowerHex" | "UpperHex"
+                    ))
+            {
                 return Err(self.trait_error(def, "用户 impl 不能覆盖编译器提供的语言实现"));
             }
             if matches!(definition.name.as_str(), "Any" | "Fn") {

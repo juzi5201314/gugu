@@ -334,12 +334,12 @@ impl Builder<'_> {
             } => self.checked(*check, kind, operands, ty),
             Rvalue::Aggregate {
                 kind: AggregateKind::Closure(definition),
-                ..
-            } => self.closure(*definition, ty, false),
+                operands,
+            } => self.closure(*definition, ty, false, Some(operands)),
             Rvalue::Aggregate {
                 kind: AggregateKind::Coroutine(definition),
                 ..
-            } => self.closure(*definition, ty, true),
+            } => self.closure(*definition, ty, true, None),
             Rvalue::Aggregate { kind, operands } => self.aggregate(kind, operands, ty),
             Rvalue::Repeat { operand, count } => {
                 let address = self.temporary(ty)?;

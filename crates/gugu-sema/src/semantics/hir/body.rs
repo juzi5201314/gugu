@@ -60,7 +60,7 @@ struct BodyBuilder<'b, 'f, 'm, 'a> {
     statement_map: Vec<Option<hir::StmtId>>,
     dispatch_map: Vec<Option<u32>>,
     slots: Vec<Option<hir::LocalId>>,
-    local_sources: Vec<usize>,
+    local_sources: Vec<Option<usize>>,
     names: BTreeMap<&'m str, hir::LocalId>,
     scope: hir::ScopeId,
     loops: Vec<hir::ScopeId>,
@@ -343,7 +343,7 @@ impl<'b, 'f, 'm, 'a> BodyBuilder<'b, 'f, 'm, 'a> {
             location,
             storage,
         });
-        self.local_sources.push(slot);
+        self.local_sources.push(Some(slot));
         self.names.insert(origin.name.as_str(), id);
         Ok(id)
     }

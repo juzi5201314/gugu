@@ -367,7 +367,7 @@ impl Builder<'_> {
 
     pub(super) fn checked(
         &mut self,
-        check: u32,
+        _check: u32,
         kind: &CheckOpKind,
         operands: &[Operand],
         ty: u32,
@@ -409,7 +409,7 @@ impl Builder<'_> {
                     self.compare_value(Condition::Ge, true, value, zero)
                 }
             }
-            CheckOpKind::Bounds { slice } => self.bounds(check, operands, *slice)?,
+            CheckOpKind::Bounds { slice } => self.bounds(operands, *slice)?,
             CheckOpKind::UnicodeScalar => {
                 let value = self.operand(&operands[0])?;
                 let value = self.computed_values(value)?[0];
@@ -426,7 +426,7 @@ impl Builder<'_> {
             CheckOpKind::FloatToInt { signed, bits } => {
                 self.float_bounds(&operands[0], *signed, *bits)?
             }
-            CheckOpKind::Utf8Boundary => self.utf8_check(check)?,
+            CheckOpKind::Utf8Boundary => self.utf8_check(operands)?,
         };
         Ok(Computed::Values {
             ty,
@@ -434,12 +434,7 @@ impl Builder<'_> {
         })
     }
 
-    fn bounds(
-        &mut self,
-        check: u32,
-        operands: &[Operand],
-        slice: bool,
-    ) -> Result<ValueId, Diagnostic> {
+    fn bounds(&mut self, operands: &[Operand], slice: bool) -> Result<ValueId, Diagnostic> {
         let base = self.operand(&operands[0])?;
         let length = self.length(base)?;
         if !slice {
@@ -448,27 +443,10 @@ impl Builder<'_> {
             let index = self.integer_resize(index, Type::I64, false);
             return Ok(self.compare_value(Condition::Lt, false, index, length));
         }
-        let expression = &self.owner.expressions[self.owner.checks
-            [usize::try_from(check).expect("检查编号")]
-        .expression
-        .index()];
-        let crate::hir::ExprKind::Slice { start, end, .. } = expression.kind else {
-            return Err(invalid("切片检查缺少已检查的端点信息"));
-        };
-        let mut index = 1;
-        let start = if start.is_some() {
-            let value = self.operand(&operands[index])?;
-            index += 1;
-            self.computed_values(value)?[0]
-        } else {
-            self.constant(0, Type::I64)
-        };
-        let end = if end.is_some() {
-            let value = self.operand(&operands[index])?;
-            self.computed_values(value)?[0]
-        } else {
-            length
-        };
+        let start = self.operand(&operands[1])?;
+        let start = self.computed_values(start)?[0];
+        let end = self.operand(&operands[2])?;
+        let end = self.computed_values(end)?[0];
         let start = self.integer_resize(start, Type::I64, false);
         let end = self.integer_resize(end, Type::I64, false);
         let ordered = self.compare_value(Condition::Le, false, start, end);

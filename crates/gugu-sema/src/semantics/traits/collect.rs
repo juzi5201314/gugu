@@ -578,7 +578,7 @@ impl Model<'_> {
     fn core_library_interfaces(&mut self) {
         let self_ty = Ty::Param("Self".into());
         let receiver = Ty::Ref(Box::new(self_ty.clone()));
-        let formatter = Ty::Ref(Box::new(Ty::Formatter));
+        let formatter = Ty::Ref(Box::new(self.formatter_type()));
         for (name, method) in [
             ("Print", "print"),
             ("Debug", "debug"),
