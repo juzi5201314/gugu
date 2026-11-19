@@ -56,6 +56,32 @@ fn floats_follow_precision_exponent_and_non_finite_rules() {
 }
 
 #[test]
+fn floats_preserve_source_width_and_rust_debug_precision() {
+    assert_eq!(
+        render(".20", |out| format_float32(out, 0.1)),
+        format!("{:.20}", 0.1f32)
+    );
+    assert_eq!(
+        render(".20", |out| format_float(out, 0.1)),
+        format!("{:.20}", 0.1f64)
+    );
+    assert_eq!(render("", |out| format_float32(out, 0.1)), "0.1");
+    assert_eq!(render(".0?", |out| format_float32(out, 1.0)), "1");
+    assert_eq!(render(".2?", |out| format_float(out, 1.0)), "1.00");
+    assert_eq!(render("?", |out| format_float(out, 1e16)), "1e16");
+    assert_eq!(render("?", |out| format_float32(out, 1e-5)), "1e-5");
+    assert_eq!(
+        render("+08", |out| format_float32(out, f32::INFINITY)),
+        "    +inf"
+    );
+    assert_eq!(
+        render("+08", |out| format_float(out, -f64::NAN)),
+        "     NaN"
+    );
+    assert_eq!(render("", |out| format_float32(out, -0.0)), "-0");
+}
+
+#[test]
 fn text_values_pad_truncate_and_escape() {
     assert_eq!(render("", |out| format_str(out, "gugu")), "gugu");
     assert_eq!(render(".2", |out| format_str(out, "gugu")), "gu");

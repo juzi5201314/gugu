@@ -64,6 +64,24 @@ fn runtime_format_literals_and_empty() {
 }
 
 #[test]
+fn comptime_float32_preserves_source_width() {
+    assert_eq!(
+        render(
+            r#"
+        const SINGLE: f32 = 0.1
+        const SHORT: string = f"{SINGLE}"
+        const PRECISE: string = f"{SINGLE:.20?}"
+        const SUM: f32 = SINGLE + SINGLE
+        const NEGATIVE: f32 = -SINGLE
+        const OPERATIONS: string = f"{SUM}|{NEGATIVE}"
+        fn render() string = SHORT + "|" + PRECISE + "|" + OPERATIONS
+    "#
+        ),
+        format!("{}|{:.20?}|{}|{}", 0.1f32, 0.1f32, 0.2f32, -0.1f32)
+    );
+}
+
+#[test]
 fn heterogeneous_pack_formatting() {
     assert_eq!(
         render(

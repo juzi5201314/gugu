@@ -250,25 +250,40 @@ pub fn format_int(out: &mut Formatter, value: i64) {
     out.pad_integral(non_negative, prefix, &digits);
 }
 
-/// 浮点按格式码写入：precision 固定小数位；`e`/`E` 是科学计数；非有限值不做零填充。
-pub fn format_float(out: &mut Formatter, value: f64) {
-    let precision = out.spec.precision.map(clamp);
-    let digits = match (out.spec.kind, precision) {
-        (FormatKind::LowerExponent, Some(precision)) => format!("{:.*e}", precision, value.abs()),
-        (FormatKind::LowerExponent, None) => format!("{:e}", value.abs()),
-        (FormatKind::UpperExponent, Some(precision)) => format!("{:.*E}", precision, value.abs()),
-        (FormatKind::UpperExponent, None) => format!("{:E}", value.abs()),
-        (FormatKind::Debug, None) => format!("{:?}", value.abs()),
-        (_, Some(precision)) => format!("{:.*}", precision, value.abs()),
-        (_, None) => format!("{}", value.abs()),
+macro_rules! float_formatter {
+    ($name:ident, $ty:ty) => {
+        /// 使用源浮点类型的 Rust 格式化，不经 binary64 扩宽。
+        pub fn $name(out: &mut Formatter, value: $ty) {
+            let precision = out.spec.precision.map(clamp);
+            let digits = match (out.spec.kind, precision) {
+                (FormatKind::LowerExponent, Some(p)) => format!("{:.*e}", p, value.abs()),
+                (FormatKind::LowerExponent, None) => format!("{:e}", value.abs()),
+                (FormatKind::UpperExponent, Some(p)) => format!("{:.*E}", p, value.abs()),
+                (FormatKind::UpperExponent, None) => format!("{:E}", value.abs()),
+                (FormatKind::Debug, Some(p)) => format!("{:.*?}", p, value.abs()),
+                (FormatKind::Debug, None) => format!("{:?}", value.abs()),
+                (_, Some(p)) => format!("{:.*}", p, value.abs()),
+                (_, None) => format!("{}", value.abs()),
+            };
+            if value.is_finite() {
+                out.pad_integral(!value.is_sign_negative(), "", &digits);
+            } else if value.is_nan() {
+                out.write_aligned("NaN", Alignment::Right);
+            } else {
+                let sign = match (value.is_sign_negative(), out.spec.sign) {
+                    (true, _) => "-",
+                    (_, Some(Sign::Plus)) => "+",
+                    (_, Some(Sign::Space)) => " ",
+                    _ => "",
+                };
+                out.write_aligned(&format!("{sign}{digits}"), Alignment::Right);
+            }
+        }
     };
-    if value.is_finite() {
-        out.pad_integral(!value.is_sign_negative(), "", &digits);
-    } else {
-        let sign = if value.is_sign_negative() { "-" } else { "" };
-        out.write_aligned(&format!("{sign}{digits}"), Alignment::Right);
-    }
 }
+
+float_formatter!(format_float, f64);
+float_formatter!(format_float32, f32);
 
 /// bool 只有 Print/Debug：`true` / `false`。
 pub fn format_bool(out: &mut Formatter, value: bool) {

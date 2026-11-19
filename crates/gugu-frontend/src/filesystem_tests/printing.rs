@@ -66,6 +66,23 @@ fn print_hello_world() {
 }
 
 #[test]
+fn print_runtime_floats() {
+    assert_eq!(
+        output(
+            r#"
+        use std.io.{println}
+        fn main() {
+            let single: f32 = 0.1
+            println("float=", 1.5, "/", single, "/", f"{single:.2}")
+        }
+    "#,
+            &[]
+        ),
+        vec![(1, b"float=1.5/0.1/0.10\n".to_vec())]
+    );
+}
+
+#[test]
 fn print_mixed_values_and_user_impl() {
     assert_eq!(
         output(

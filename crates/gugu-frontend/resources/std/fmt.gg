@@ -1,4 +1,5 @@
 use std.text.{Bytes, ByteBuffer, alloc_bytes}
+use std.fmt_float as float_format
 
 pub struct Formatter {
     text: ByteBuffer,
@@ -54,7 +55,28 @@ impl Formatter {
         let text = character(fill)
         for _ in 0..count { self.write_str(text) }
     }
+    fn float(self: &Self, bits: uint, fraction: int, exponent: int, mode: int) {
+        let negative = bits >> (fraction + exponent) != 0
+        let magnitude = bits & ((uint(1) << (fraction + exponent)) - 1)
+        let special = ((uint(1) << exponent) - 1) << fraction
+        if magnitude >= special {
+            let text = if magnitude != special { "NaN" } else if negative { "-inf" }
+                else if self.sign == 1 { "+inf" } else if self.sign == 3 { " inf" } else { "inf" }
+            self.aligned(text, scalar_count(text), 3)
+        } else {
+            self.pad_integral(!negative, "", float_format.format(magnitude, fraction, exponent, mode, self.precision))
+        }
+    }
 }
+
+impl Print for f64 { fn print(self: &Self, out: &Formatter) { out.float(unsafe { std.mem.transmute[f64, uint](*self) }, 52, 11, 0) } }
+impl Debug for f64 { fn debug(self: &Self, out: &Formatter) { out.float(unsafe { std.mem.transmute[f64, uint](*self) }, 52, 11, 1) } }
+impl LowerExp for f64 { fn lower_exp(self: &Self, out: &Formatter) { out.float(unsafe { std.mem.transmute[f64, uint](*self) }, 52, 11, 2) } }
+impl UpperExp for f64 { fn upper_exp(self: &Self, out: &Formatter) { out.float(unsafe { std.mem.transmute[f64, uint](*self) }, 52, 11, 3) } }
+impl Print for f32 { fn print(self: &Self, out: &Formatter) { out.float(uint(unsafe { std.mem.transmute[f32, u32](*self) }), 23, 8, 0) } }
+impl Debug for f32 { fn debug(self: &Self, out: &Formatter) { out.float(uint(unsafe { std.mem.transmute[f32, u32](*self) }), 23, 8, 1) } }
+impl LowerExp for f32 { fn lower_exp(self: &Self, out: &Formatter) { out.float(uint(unsafe { std.mem.transmute[f32, u32](*self) }), 23, 8, 2) } }
+impl UpperExp for f32 { fn upper_exp(self: &Self, out: &Formatter) { out.float(uint(unsafe { std.mem.transmute[f32, u32](*self) }), 23, 8, 3) } }
 
 fn scalar_width(first: byte) int {
     if first < 128 { 1 } else if first < 224 { 2 } else if first < 240 { 3 } else { 4 }

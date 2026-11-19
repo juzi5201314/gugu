@@ -51,6 +51,9 @@ impl BodyBuilder<'_, '_, '_, '_> {
                         crate::semantics::model::ConstantValue::Float(value) => {
                             hir::Literal::Float(value)
                         }
+                        crate::semantics::model::ConstantValue::Float32(value) => {
+                            hir::Literal::Float(f64::from(f32::from_bits(value)).to_bits())
+                        }
                         crate::semantics::model::ConstantValue::Bool(value) => {
                             hir::Literal::Bool(value)
                         }
