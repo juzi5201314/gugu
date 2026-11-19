@@ -40,24 +40,23 @@ pub fn layout(body: &Body, allocation: &Allocation) -> Result<Frame, Error> {
             _ => None,
         })
         .collect::<Vec<_>>();
-    let words = calls
+    let outgoing = calls
         .iter()
-        .map(|call| call.parameters.len().saturating_sub(8))
+        .map(|call| {
+            super::abi::arguments(call.parameters.iter().map(|p| p.ty)).map(|(_, size)| size)
+        })
+        .collect::<Result<Vec<_>, _>>()?
+        .into_iter()
         .max()
         .unwrap_or(0);
-    let outgoing = align(
-        u32::try_from(words)
-            .ok()
-            .and_then(|n| n.checked_mul(8))
-            .ok_or_else(|| super::error("outgoing argument area overflow"))?,
-        16,
-    )?;
+    let outgoing = align(outgoing, 16)?;
     let mut saved = allocation
         .values
         .iter()
         .filter_map(|v| match v.placement {
             Placement::Location(Location::Reg(reg))
-                if super::abi::CALLEE_SAVED.contains(&reg.0) =>
+                if super::abi::CALLEE_SAVED.contains(&reg.0)
+                    || super::abi::FP_CALLEE_SAVED.contains(&reg.0) =>
             {
                 Some(reg.0)
             }
@@ -98,7 +97,17 @@ pub fn layout(body: &Body, allocation: &Allocation) -> Result<Frame, Error> {
         .checked_add(16)
         .ok_or_else(|| super::error("frame record overflow"))?;
     let mut offset = copy_scratch
-        .checked_add(8)
+        .checked_add(
+            if allocation
+                .types
+                .iter()
+                .any(|ty| super::abi::class(*ty) == super::abi::FPR)
+            {
+                16
+            } else {
+                8
+            },
+        )
         .ok_or_else(|| super::error("frame scratch overflow"))?;
     let mut saves = Vec::new();
     for reg in saved {

@@ -5,6 +5,7 @@ mod coroutine;
 mod darwin_fd;
 mod darwin_net;
 mod darwin_process;
+mod darwin_resolver;
 mod entry;
 mod poll;
 
@@ -16,6 +17,7 @@ pub use coroutine::{
 pub use darwin_fd::{darwin_fd_dispatch, darwin_fd_imports};
 pub use darwin_net::{darwin_net_dispatch, darwin_net_imports};
 pub use darwin_process::{darwin_process_call, darwin_process_imports, darwin_process_worker};
+pub use darwin_resolver::{darwin_resolver_imports, darwin_resolver_symbol};
 pub(crate) use entry::darwin_main;
 pub use entry::rt0;
 pub use poll::safepoint_slow;

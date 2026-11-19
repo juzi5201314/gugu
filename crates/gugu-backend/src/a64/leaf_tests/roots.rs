@@ -72,6 +72,71 @@ fn call(callee: &Fixture) -> Call {
 }
 
 #[test]
+fn mixed_fp_and_pointer_arguments_share_abi_placement_with_all_root_maps() {
+    let mut params = vec![Type::F64; 9];
+    params.extend([Type::Ptr; 9]);
+    let mut callee = fixture(&params, &[]);
+    callee.body.instance = [2; 32];
+    for index in 9..18 {
+        let p = callee.param(0, index);
+        root(&mut callee, p, Provenance::GcHeap);
+    }
+    callee.ret(&[]);
+    for suspend in [false, true] {
+        let mut f = fixture(&params, &[]);
+        f.body.instance = [1; 32];
+        for index in 9..18 {
+            let p = f.param(0, index);
+            root(&mut f, p, Provenance::GcHeap);
+        }
+        let args = (0..18).map(|index| f.param(0, index)).collect::<Vec<_>>();
+        let at = f.body.instructions.len();
+        let mut call = call(&callee);
+        call.may_suspend = suspend;
+        f.op(Op::Call(call), &args, &[]);
+        mark(
+            &mut f,
+            at,
+            if suspend {
+                SafepointKind::Suspend
+            } else {
+                SafepointKind::CallReturn
+            },
+        );
+        for p in &args[9..] {
+            f.op(
+                Op::Load(crate::lir::body::Access {
+                    alias: AliasClass::Heap,
+                    align: 8,
+                    volatile: false,
+                }),
+                &[*p],
+                &[Type::I64],
+            );
+        }
+        f.ret(&[]);
+        let fragment = compile(&f);
+        assert_eq!(fragment.frame.outgoing, 16);
+        let decoded = maps(&fragment);
+        let entry = decoded.safepoints.iter().find(|p| p.kind == 4).unwrap();
+        assert_eq!(
+            decoded.maps[entry.map_index as usize].registers,
+            [0xff, 0, 0, 0, 0]
+        );
+        let point = decoded
+            .safepoints
+            .iter()
+            .find(|p| p.kind == if suspend { 2 } else { 0 })
+            .unwrap();
+        let map = &decoded.maps[point.map_index as usize];
+        assert!(map.slots[0].contains(&1));
+        assert!(!map.slots[0].contains(&0));
+        assert_eq!(map.slots[0].len(), 10);
+        assert_eq!(map.registers, [0; 5]);
+    }
+}
+
+#[test]
 fn suspending_calls_use_authoritative_suspend_maps_and_forced_pointer_slots() {
     let mut callee = fixture(&[Type::Ptr; 9], &[]);
     callee.body.instance = [2; 32];

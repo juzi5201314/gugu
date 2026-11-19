@@ -411,6 +411,8 @@ load command 依次为各段、`LC_DYLD_CHAINED_FIXUPS`、`LC_DYLD_EXPORTS_TRIE`
 
 `a64::fragments::darwin_process_call` 在原生栈上接收 x0 的操作号和 x1 的 `ProcessRequest` 地址，处理操作 0–4（非阻塞观察、终止、关闭、管道读写）。`darwin_process_worker` 首入口返回同一片段内的 C ABI worker 地址；worker 接收 x0 的 `ProcessRequest` 地址，从请求读取操作 0–3（spawn、pipe、open null、duplicate）。两者用 `darwin_process_imports` 列出的 libSystem 调用桩，并在请求中写回 value 与 error。创建进程时用 `SpawnPacket` 配置标准流和工作目录，写回 PID；文件动作初始化成功后总会销毁，管道配置失败时先保存 errno 再关闭两端。片段不负责 worker 调度、完成发布、托管栈切换或信号订阅。
 
+`a64::fragments::darwin_resolver_symbol` 独立于套接字操作分派。它用 x0 接收 `ResolverSymbol` 操作号，通过 `ADRP/ADD` 重定位到 `darwin_resolver_imports` 声明的 libSystem 调用桩，并在 x0 返回可按 C ABI 调用的地址。无效操作号触发陷阱。片段不执行解析、不捕获 errno，也不接入 worker、托管调用、栈切换或目标注册。
+
 ## 直接编码与验证
 
 encoder 对每个 `X64Inst` 先计算 exact 长度，再写 prefix、REX、opcode、ModRM、SIB、displacement和 immediate；两次计算必须一致。每条 instruction记录起止 offset，stack map、branch、relocation和 source table只引用该边界。
@@ -595,7 +597,7 @@ terminator 前写 byte；回边不经过清零代码。byte store 和大偏移�
 入口块存在回边时，A64 保守使用 byte gate，不让回边的初始化事实证明第一次进入已初始化。
 这不改变共享 InitSlots/x64 的现行策略。init-byte 布局、事件推进和 local-root 放置从 x64
 提取到共享 metadata.rs；x64 继续使用原来的静态证明和序列化顺序。
-4c.2b.2b.1 接通内部 Context/copy 边界；生产 Gugu decoder/image 接线仍留在下一部分，
+4c.2b.2b.1 接通内部 Context/copy 边界；4c.2b.2b.2 的显式数据绑定见下文，
 不新增目标登记，也不把内部 API 当作可运行的生产协程调度器。
 
 Context、MorestackMailbox、MorestackScratch 现在由 runtime-abi 定义，fragments 复用同一
@@ -644,6 +646,49 @@ LR=SP+record+8。Rust ABI decoder 校验两表 code range/frame/PC 完全一致�
 StackInterior map 可交给既有 copy_input 生成 fixup 槽表。尚未执行 A64 Context 保存恢复或
 完整换栈修正，也未把 x64 CoroutineContext 当成 A64 context 复用。完整 4c.2b 超过约 2000 行，
 先交付本部分，下一部分完成 gated locals、A64 coroutine/stack-copy 与生产 decoder 集成。
+
+### A64 标量 FP 与 SIMD 传输（4d.1）
+
+A64 使用共享 regalloc 的第二寄存器类；内部 PhysReg 32–63 表示 v0–v31，绝不进入
+栈图的 xN 寄存器编号。v29–v31 留作 spill/parallel-copy scratch。F32/F64/V128 使用
+16-byte、16-aligned spill 槽；callee-save 只保存 d8–d15 的低 64 位，V128 不分配到
+这些跨调用仅部分保留的寄存器。调用与 poll 都固定 clobber 全部 caller-saved FP；
+scalar 可跨点留在 d8–d15，V128 跨点必须落槽。morestack 入口仍保存完整 q0–q7。
+
+内部调用独立分配 x0–x7 与 v0–v7 参数车道；溢出标量占 8-byte 栈槽，V128 占
+16-byte 对齐的栈槽。返回支持两个整数与八个 FP/SIMD 车道。incoming、outgoing、
+tail-area 检查和指针参数的栈图都复用同一 ABI placement，不按实参序号猜寄存器。
+这不是外部 C ABI：foreign/system-stack 协议与 Darwin variadic 差异由 4d.3 接线。
+
+标量算术、IEEE ordered/unordered 比较、FP select、常量、整数/FP 转换、resize 与
+等宽 bitcast 使用表驱动 ARMv8.0 FP 形式。浮点转整数依赖已有 LIR 范围检查；不以
+硬件饱和结果取代语言 panic。V128 此部分提供完整位型的 copy、内存、select、ABI
+与 spill；向量算术以及其余未接通 LIR 操作继续给出显式 unsupported，后续补齐。
+默认测试解释已编码字节，覆盖 FP bank、SIMD 高半部、混合参数、压力、entry/poll
+和真实链接调用；不执行生成的 A64 机器码或 OS FFI。
+
+### A64 生产源与镜像数据绑定
+
+`runtime/a64.gg` 随已有 runtime source table 提供，用现有 `#![cfg(arch = "aarch64")]`
+按 descriptor 的规范架构名裁项；x64 不编译其中的声明，也不执行 A64 布局校验。
+roots.gg 中供 A64 调用的三个 metadata bridge 也使用同一 arch cfg，避免进入 x64 runtime-owner 集合。
+不引入目标名、frontend dispatch、plan 分支或 opt-in 开关。
+A64Context、A64MorestackScratch、A64MorestackMailbox、A64ControlBlock 与 A64Snapshot
+按 Rust 权威布局定义；GIR 派生时用冻结 HIR 与具体布局逐字段校验，不靠解析源码推测偏移。
+a64_records 只在独立类型视图中校验，不加入 executable/contract roots。
+它们不加入旧 CoroutineRuntimeContract.records，避免改变 x64 控制块与 raw fingerprint。
+
+ControlBlock 把 Context、16-byte scratch 和 mailbox 放在不移动的 owner 存储；bind 只设置
+hot、scratch、mutator_context 与 system_context 链接，不清空已有寄存器、entry SP 或 SIMD。
+morestack snapshot 保留 Context.pc 的恢复位置，另取 scratch.return_pc 作为用户 metadata PC，
+复制 x0–x8 并把 caller_lr 放在 x10，其他 snapshot GPR 清零。Gugu/Rust Snapshot 使用同一 C 布局。
+
+`a64_binding::Sections` 聚合隔离 lowering 已生成的 metadata，并在 Rt0Payload 的已有字段中
+绑定 map/CFA 地址；同一数据可被 Gugu bounded walker 和 Rust stack copier 消费。它不替代
+尚不存在的 A64 platform writer、启动接线或 scheduler 的架构选择。默认 x64 collector 不改路由，
+也不通过把 x64 CoroutineCold 当成 A64 record 来宣称生产调度已完成。测试解释生产 Gugu LIR，
+不执行 native A64、真实 GC、真实线程或 OS 服务。解释器 fixture 仅把文件的架构谓词重定向到
+宿主，函数体不变；另校验三个 x64 artifact 均已裁去 A64 声明。
 
 ### A64 运行时机器片段
 

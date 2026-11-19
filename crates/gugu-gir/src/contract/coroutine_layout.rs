@@ -8,11 +8,63 @@ use crate::{
 };
 use std::collections::BTreeSet;
 
+pub fn verify_a64_source(
+    context: &crate::mono::keys::MonoContext<'_>,
+) -> Result<(), crate::Diagnostic> {
+    if context.target.descriptor().arch != gugu_base::target::Architecture::Aarch64 {
+        return Ok(());
+    }
+    if !context
+        .module
+        .sources
+        .iter()
+        .any(|source| source.path == "std/runtime/a64.gg")
+    {
+        return Ok(());
+    }
+    let definition = context
+        .module
+        .linkage
+        .iter()
+        .map(|linkage| linkage.definition)
+        .find(|id| {
+            let definition = &context.module.definitions[id.index()];
+            definition.name == "a64_records"
+                && source_path(definition, context.module) == "std/runtime/a64.gg"
+        })
+        .ok_or_else(|| RawModelError::new("missing A64 data ABI signature").diagnostic())?;
+    let records = crate::gir::concrete::record_types(context, definition)?;
+    let mut contract =
+        CoroutineRuntimeContract::build(Default::default()).map_err(|error| error.diagnostic())?;
+    contract.records = gugu_runtime_abi::a64_binding::source_layouts();
+    verify_paths(
+        &contract,
+        context.module,
+        &[records],
+        &["std/runtime/a64.gg"],
+    )
+    .map_err(|error| error.diagnostic())
+}
+
 pub fn verify_source(
     contract: &CoroutineRuntimeContract,
     module: &hir::Module,
     gir: &[RecordTypes],
     resources: &RuntimeResources<'_>,
+) -> Result<(), RawModelError> {
+    verify_paths(
+        contract,
+        module,
+        gir,
+        &resources.runtime_paths().collect::<Vec<_>>(),
+    )
+}
+
+fn verify_paths(
+    contract: &CoroutineRuntimeContract,
+    module: &hir::Module,
+    gir: &[RecordTypes],
+    paths: &[&str],
 ) -> Result<(), RawModelError> {
     // 空package没有runtime源图，也不生成镜像；固定machine布局仍由contract.verify校验。
     if module.sources.is_empty() {
@@ -22,7 +74,7 @@ pub fn verify_source(
     let mut found = vec![false; contract.records.len()];
     for concrete in gir {
         let definition = &module.definitions[concrete.definition.index()];
-        if !in_source(definition, module, resources) {
+        if !in_source(definition, module, paths) {
             continue;
         }
         let parameters = source_parameters(module, concrete.definition)?;
@@ -35,7 +87,7 @@ pub fn verify_source(
             types: &concrete.types,
             found: &mut found,
             visited: BTreeSet::new(),
-            resources,
+            paths,
         };
         for (source, target) in parameters.iter().zip(&concrete.parameters) {
             verifier.walk(*source, target.0, false)?;
@@ -56,14 +108,8 @@ pub fn verify_source(
     Ok(())
 }
 
-fn in_source(
-    definition: &hir::Definition,
-    module: &hir::Module,
-    resources: &RuntimeResources<'_>,
-) -> bool {
-    resources
-        .runtime_paths()
-        .any(|path| path == source_path(definition, module))
+fn in_source(definition: &hir::Definition, module: &hir::Module, paths: &[&str]) -> bool {
+    paths.contains(&source_path(definition, module))
 }
 
 /// 定义所在的逻辑源路径。
@@ -81,7 +127,7 @@ struct Verifier<'a> {
     types: &'a [TypeLayout],
     found: &'a mut [bool],
     visited: BTreeSet<(hir::TypeId, u32)>,
-    resources: &'a RuntimeResources<'a>,
+    paths: &'a [&'a str],
 }
 
 impl Verifier<'_> {
@@ -106,7 +152,7 @@ impl Verifier<'_> {
                 },
             ) => {
                 let definition_value = &self.module.definitions[definition.index()];
-                if !in_source(definition_value, self.module, self.resources) {
+                if !in_source(definition_value, self.module, self.paths) {
                     return Err(RawModelError::new("控制块包含未登记外部record"));
                 }
                 let aggregate = self

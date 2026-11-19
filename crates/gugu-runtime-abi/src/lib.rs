@@ -96,6 +96,7 @@ pub mod routing_schema;
 )]
 pub mod text;
 
+pub mod a64_binding;
 pub mod cstring;
 pub mod foreign_packet;
 pub mod foreign_schema;

@@ -77,7 +77,14 @@ Linux 目标在没有动态 FFI、系统 Resolver 或可达环境 API 需求时�
 
 A64 内部挂起调用使用权威 SuspendResume 栈图，跨点指针必须落槽。Context 的 SP、PC、x19–x26、x29 和 d8–d15 使用共享布局；x27/x28 由恢复方提供。stackless handoff 的复制输入必须由配对的精确 PC 栈图与 CFA 元数据产生，修复 StackInterior、保存的 FP 链和 Context FP；非根整数、代码地址和浮点位型不得猜测性修复。这仍不是生产协程调度或 A64 用户镜像已接通的声明。
 
+A64 元数据的数据 ABI 可通过现有 Rt0Payload 显式绑定：写入前必须联合校验 v5 栈图、每函数 CFA 和规范化目录，拒绝错架构、越界、重叠及非精确返回 PC。Gugu 扫描入口只消费已验证且不变的镜像，按调用方提供的栈界限与帧数上限枚举根；失败后必须丢弃整个输出，容量不足必须保留完整 needed 计数。帧链只能在零 PC 或载荷中声明的 main-return 哨兵结束，不得跳过未知 helper。A64 Context、scratch、mailbox 与 snapshot 的 Gugu/Rust 布局必须一致；scratch 和保存的 Context 绑定到不移动的 owner 存储。A64 runtime 源声明只通过现有 arch cfg 在 descriptor 架构名为 aarch64 时启用，不进入 x64 编译域。此数据接口不选择 A64 目标，也不替代尚未接通的 A64 启动、调度及平台镜像 writer。
+
+A64 门控根的根字与初始化字节都按完整 frame_size 校验，不能以固定槽位图的 slot_count 作为帧上界；固定槽位图为空也可以存在合法门控根。
+A64 显式逐帧与整栈扫描入口必须拒绝 scan_allowed=false 的站点，不得枚举根、增加根数或帧数，即使实际根集为空。
+
 挂起调用中，已被权威逻辑根登记的值若另有传出栈实参副本，这些副本也必须进入同一来源种类的物理栈图；只登记原 spill 不足以保证被调方入口搬栈后的参数有效。
+
+A64 内部标量调用分别使用 x0–x7 与 v0–v7 传参，返回最多两个整数和八个 FP/SIMD 车道；溢出标量使用 8-byte 栈槽，V128 使用 16-byte 对齐栈槽。d8–d15 仅低 64 位 callee-saved，V128 跨调用不得依赖其高半部；morestack 保留完整 q0–q7，poll 可破坏所有 caller-saved FP。FP/SIMD 值不携带指针 provenance，不进入 xN 栈图掩码。该内部约定尚不声明 AAPCS64 外部调用或 Darwin variadic/system-stack 协议已接通。
 
 ### 新目标登记
 
@@ -389,6 +396,8 @@ Darwin datagram 接收使用 `recvmsg` 的返回标志识别 `MSG_TRUNC`，不�
 内部 arm64 套接字和 kqueue 适配器在原生栈上通过 libSystem 执行网络请求，使用与 x86_64 Darwin 相同的请求结果和 Darwin errno。网络 `fcntl` 的可变整数实参在栈上传递；`sendto`、`recvfrom` 和 `recvmsg` 的字节计数保留完整的 `ssize_t` 宽度。原生 socket 关闭回调正常返回零，失败返回 Darwin errno。
 
 内部 arm64 信号订阅与 x86_64 Darwin 共用同一运行时协议：用 kqueue 的 `EVFILT_SIGNAL` 收集信号计数，通过 libSystem 的 `sigaction` 安装只返回的原生处理器并保存旧 disposition。最后一个订阅关闭时，运行时同步恢复旧 disposition，不等待调度器下一次轮询。
+
+内部 arm64 Darwin 的 DNS 符号查询沿用 x86_64 的操作号：0 返回 `getaddrinfo` 的可调用地址，1 返回 `freeaddrinfo` 的可调用地址。查询本身不阻塞；解析由调用方在原生栈上执行，保留 libSystem 的返回状态，结果链必须用配对的 `freeaddrinfo` 释放。
 
 Darwin 用 `disconnectx` 解除通配地址 UDP socket 的 peer，保留本地端口。Darwin 会清除已连接 UDP socket 的本地 IP，且同一 socket 无法重新绑定；原先绑定具体地址的 UDP socket 在调用原生断开前返回 `Unsupported`，保留绑定和 peer。Unix datagram 的 `AF_UNSPEC` 被拒绝时，只有确认 native socket 已不再关联 peer 才提交断开状态。
 

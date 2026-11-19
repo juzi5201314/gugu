@@ -58,6 +58,7 @@ pub fn derive(
         cfg.harness(),
     );
     let mut mono_world = super::mono::close(&context, queries, &gir)?;
+    crate::contract::coroutine_layout::verify_a64_source(&context).map_err(|error| vec![error])?;
     // 内建 link 未被裁剪时，契约记录类型目录直取物化表：七个 layout verifier 仍随后逐字段
     // 校验它，加载即校验的规矩不变。
     if let Some(prefix) = prefix {
