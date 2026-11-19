@@ -429,7 +429,7 @@ foldhash 固定种子状态，避免每次 emit 使用 SipHash。索引保留表
 
 ### A64 独立编码库
 
-`gugu-backend::a64` 是尚未接入任何目标、CLI、lowering 或运行时的纯库，不能据此选择
+`gugu-backend::a64` 尚未接入任何目标、CLI 或 lowering，不能据此选择
 `aarch64` 目标。封闭表目前包含 307 个 ARMv8.0-A base 与 FP/AdvSIMD 标量形式；不包含
 LSE 或 V128 整数向量指令。`FormId` 是固定表序下标，操作数采用汇编顺序；W/X 与
 B/H/S/D/Q 是寄存器视图，SP 与 XZR 是不同寄存器种类，编码号 31 的解释由槽决定。
@@ -459,6 +459,22 @@ revision 并更新测试中的指纹钉值，不能静默沿用身份。
 `clang -c -target arm64-apple-macos` 与 `otool -t`，并非由本编码器生成期望值。
 测试明确引用该 fixture，通过 Rust 构造每个 form 的样本及边界样本，同时比较规范文本、
 字节和解码回环；默认测试不启动 assembler 或任何子进程。
+
+### A64 运行时机器片段
+
+独立片段通过同一编码表输出字节与片段内重定位；不进入现有 x64 运行时契约，也不登记目标。
+片段边界保留 `x27`（协程槽）与 `x28`（processor）作为显式换入值，不使用平台寄存器
+`x18`。换栈记录保存 SP、续点、其余 AAPCS64 非易失整数寄存器和 `d8–d15`。
+入口冷路径经 `x28` 找到 mailbox，保存 `x0–x8`、`q0–q7`、冷路径返回 PC 及调用方
+LR（由 prologue 放入 `x10`），以 `SP - candidate` 确定所需空间，不访问用户栈。
+系统侧恢复该续点后，片段从 mailbox 关联的 scratch 重新装载参数和两条返回地址。
+poll 慢路保留调用点的 LR 与 SP，优先尾跳 callback；仅在压力状态与入口均就绪且 committed
+严格超过软上限时，将请求地址放入 `x0`，尾跳 GC 入口。
+
+rt0 的 OS 入口负责加载修正、native 启动参数与退出；A64 胶合写入启动载荷、装载初始保留
+寄存器并调用 runtime，随后恢复宿主保留寄存器并返回状态码。原子片段支持自然对齐的
+1/2/4/8 字节对象；RMW 使用 ARMv8.0-A 独占读写及重试，不依赖 LSE，比较失败清除本地
+独占监视器。各片段 ABI 仅供后续后端和运行时接线使用。
 
 ### Cost calibration profile {#cost-calibration-profile}
 
