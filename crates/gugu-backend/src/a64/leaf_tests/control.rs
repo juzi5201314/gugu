@@ -1,6 +1,58 @@
 use super::*;
 
 #[test]
+fn entry_header_backedge_preserves_register_and_stack_parameter_updates() {
+    let mut types = [Type::I64; 9];
+    types[0] = Type::I8;
+    let mut f = Fixture::new(&types, &[Type::I8]);
+    let done = f.block(&[Type::I8]);
+    let register = f.param(0, 0);
+    let counter = f.param(0, 8);
+    let one8 = f.constant(Type::I8, 1);
+    let one64 = f.constant(Type::I64, 1);
+    let next_register = f.op(Op::Integer(IntOp::Sub), &[register, one8], &[Type::I8])[0];
+    let next_counter = f.op(Op::Integer(IntOp::Sub), &[counter, one64], &[Type::I64])[0];
+    let zero = f.constant(Type::I64, 0);
+    let condition = f.op(
+        Op::Compare {
+            condition: Condition::Ne,
+            signed: false,
+        },
+        &[next_counter, zero],
+        &[Type::I8],
+    )[0];
+    let mut parameters = (0..9).map(|index| f.param(0, index)).collect::<Vec<_>>();
+    parameters[0] = next_register;
+    parameters[8] = next_counter;
+    let repeat = f.edge(0, &parameters);
+    let exit = f.edge(done, &[next_register]);
+    f.body.blocks[0].terminator = Terminator::Branch {
+        condition,
+        yes: repeat,
+        no: exit,
+    };
+    f.switch_to(done);
+    f.ret(&[f.param(done, 0)]);
+    let fragment = f.compile();
+    assert!(
+        fragment.selected.blocks[0]
+            .items
+            .iter()
+            .any(|site| matches!(site.item, machine::Item::Incoming { .. }))
+    );
+    assert!(
+        fragment
+            .selected
+            .blocks
+            .iter()
+            .skip(1)
+            .flat_map(|block| &block.items)
+            .all(|site| !matches!(site.item, machine::Item::Incoming { .. }))
+    );
+    assert_eq!(vm::run(&fragment, &[10, 0, 0, 0, 0, 0, 0, 0, 3])[0], 7);
+}
+
+#[test]
 fn return_copies_resolve_physical_cycles() {
     let mut f = Fixture::new(&[Type::I64; 2], &[Type::I64; 2]);
     f.ret(&[f.param(0, 1), f.param(0, 0)]);

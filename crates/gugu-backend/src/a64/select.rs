@@ -13,15 +13,28 @@ pub fn select(body: &Body) -> Result<Function, Error> {
     let count = body.blocks.len();
     let mut function = Function {
         name: body.name.clone(),
-        entry: body.entry.index(),
+        entry: 0,
         types: body.values.iter().map(|v| v.kind.ty).collect(),
         blocks: vec![
             Block {
                 items: vec![],
                 successors: vec![]
             };
-            count + body.edges.len()
+            count + body.edges.len() + 1
         ],
+    };
+    let mut b = Builder {
+        function: &mut function,
+        items: vec![],
+        context: format!("{} incoming arguments", body.name),
+    };
+    entry(body, &mut b)?;
+    if body.entry.index() != 0 {
+        jump(&mut b, "b", vec![], body.entry.0 + 1)?;
+    }
+    b.function.blocks[0] = Block {
+        items: b.items,
+        successors: vec![body.entry.index() + 1],
     };
     for (index, block) in body.blocks.iter().enumerate() {
         let mut b = Builder {
@@ -29,9 +42,6 @@ pub fn select(body: &Body) -> Result<Function, Error> {
             items: vec![],
             context: format!("{} block {index} entry", body.name),
         };
-        if index == body.entry.index() {
-            entry(body, &mut b)?;
-        }
         for site in block.instructions.clone() {
             let instruction = &body.instructions[site as usize];
             b.context = format!(
@@ -47,7 +57,7 @@ pub fn select(body: &Body) -> Result<Function, Error> {
         );
         let successors = terminator(body, &block.terminator, count, &mut b)
             .map_err(|e| Error(format!("{}: {e}", b.context)))?;
-        b.function.blocks[index] = Block {
+        b.function.blocks[index + 1] = Block {
             items: b.items,
             successors,
         };
@@ -67,10 +77,10 @@ pub fn select(body: &Body) -> Result<Function, Error> {
             context,
         };
         b.push(Item::Copies(pairs));
-        jump(&mut b, "b", vec![], edge.to.0)?;
-        b.function.blocks[count + index] = Block {
+        jump(&mut b, "b", vec![], edge.to.0 + 1)?;
+        b.function.blocks[count + index + 1] = Block {
             items: b.items,
-            successors: vec![edge.to.index()],
+            successors: vec![edge.to.index() + 1],
         };
     }
     Ok(function)
@@ -125,7 +135,7 @@ fn terminator(
     count: usize,
     b: &mut Builder<'_>,
 ) -> Result<Vec<usize>, Error> {
-    let edge = |id: crate::lir::body::EdgeId| count + id.index();
+    let edge = |id: crate::lir::body::EdgeId| count + id.index() + 1;
     match term {
         Terminator::Jump(to) => {
             jump(b, "b", vec![], edge(*to) as u32)?;
@@ -225,6 +235,7 @@ fn validate(body: &Body) -> Result<(), Error> {
             .blocks
             .len()
             .checked_add(body.edges.len())
+            .and_then(|count| count.checked_add(1))
             .is_none_or(|count| count > u32::MAX as usize)
     {
         return Err(super::error("invalid leaf schema/entry/CFG size"));

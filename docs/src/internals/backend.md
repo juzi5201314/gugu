@@ -488,6 +488,8 @@ poll、安全点或 managed/root 初始化义务的函数被拒绝，而不是�
 
 `alloc` 仅归一化事件，共享 `regalloc` 完成 CFG liveness、加权 scan、slot 复用与并行 copy
 调度，不做 rematerialization，没有第二套分配器。边拆为 copy block，支持同时赋值和环。
+ABI 参数的寄存器/栈搬运与窄值规范化只在独立入口 stub 执行一次；stub 转入 LIR 入口块，
+所有 CFG 边（含指向入口的回边）只指向 LIR 块，不重复读取调用方参数。
 `frame/rewrite` 在 x16/x17 内完成 spill/reload、MOVZ/MOVN/MOVK 常量、SP 地址合法化；
 copy 环用 x16，slot-to-slot 搬运用 x17，不借用活跃分配寄存器。
 `layout` 单调扩展越界 B.cond/CBZ/CBNZ/TBZ/TBNZ 为反条件跳过一条 B，再按最终 PC 回填；
