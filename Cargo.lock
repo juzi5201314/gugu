@@ -319,9 +319,11 @@ name = "gugu-cli"
 version = "0.1.0"
 dependencies = [
  "clap",
+ "flate2",
  "gugu-compiler",
  "serde",
  "serde_json",
+ "tar",
  "toml",
 ]
 

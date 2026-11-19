@@ -108,15 +108,15 @@ runtime 契约签名的记录目录不计入 executable mono/GIR/LIR body 数量
 
 ### `gugu run [target] [args...]`
 
-编译并运行 bin target。无 target 时按 `default-run` 或唯一 bin 选择；多个 bin 且无 `default-run` 是错误。`--` 之后的参数原样传给程序。
+编译并运行 bin target。无 target 时按 `default-run` 或唯一 bin 选择；多个 bin 且无 `default-run` 是错误。`--` 之后的参数原样传给程序。可执行镜像只能在宿主目标上运行：`--target` 不是宿主目标时按用法错误拒绝，退出码 `2`。进程透传子镜像的退出码。
 
 ### `gugu test`
 
-编译并运行 test target。支持 `--lib`、`--test <name>`、`--all-targets`。`-- <args>` 传给测试 harness。
+编译并运行 test target。默认收集全部 test target；`--test <name>` 只运行该 target；`--lib` 在 test 域下编译 lib target（`cfg(test)` 生效、生成测试 harness 入口）并运行其内部测试；`--all-targets` 编译所有 target 但只执行 test 产物。`-- <args>` 传给测试 harness。可执行镜像只能在宿主目标上运行，`--target` 非宿主时按用法错误拒绝。
 
 ### `gugu bench`
 
-编译并运行 bench target。target 选择规则同 `test`。
+编译并运行 bench target。target 选择规则同 `test`：`--bench <name>` 选择单个 bench target，`--lib` 在 bench 域下编译 lib target，`--all-targets` 只执行 bench 产物。
 
 ### `gugu fmt`
 
@@ -136,7 +136,7 @@ runtime 契约签名的记录目录不计入 executable mono/GIR/LIR body 数量
 
 ### `gugu add <package>`
 
-向 `gugu.toml` 添加依赖。`--dev` 加入 `[test-dependencies]`，`--build` 加入 `[build.dependencies]`。`--features`、`--default-features`、`--optional`、`--path`、`--git`、`--rev`、`--branch`、`--tag` 控制依赖属性。
+向 `gugu.toml` 添加依赖。`--dev` 加入 `[test-dependencies]`，`--build` 加入 `[build.dependencies]`，默认写入 `[dependencies]`。`<package>` 可带 `@version` 后缀拆分出版本约束，缺省为 `"*"`。`--path` 与 `--git` 互斥，`--rev`、`--branch`、`--tag` 最多设置一个；`--features`、`--default-features`、`--optional` 控制依赖属性。
 
 ### `gugu remove <package>`
 
@@ -144,7 +144,7 @@ runtime 契约签名的记录目录不计入 executable mono/GIR/LIR body 数量
 
 ### `gugu update`
 
-更新锁文件。`-p <owner/name>` 只更新指定 package；`--precise <version>` 指定精确版本。
+更新锁文件：按当前清单重新解析并写回 `gugu.lock`。`-p <owner/name>` 把解析根收窄到指定 package。`--precise <version>` 需要 registry 候选查询；在 registry 协议接入前按用法错误拒绝，退出码 `2`。
 
 ### `gugu tree`
 
@@ -156,7 +156,7 @@ runtime 契约签名的记录目录不计入 executable mono/GIR/LIR body 数量
 
 ### `gugu package`
 
-生成发布归档、文件清单和 package checksum，见[发布与生态](publishing-ecosystem.md)。不改变 registry 状态。
+生成发布归档、文件清单和 package checksum，见[发布与生态](publishing-ecosystem.md)。不改变 registry 状态。归档写到 `<target-dir>/package/<name>-<version>.tar.gz`；workspace 需要用 `-p` 选定唯一 package。
 
 ### `gugu publish`
 

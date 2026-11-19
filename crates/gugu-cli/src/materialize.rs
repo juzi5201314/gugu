@@ -67,7 +67,10 @@ pub(crate) fn materialize_target(
             .materialize(&target.to_string(), &[artifact])
             .map_err(|error| emit_cli_error(format, &error.to_string()))?;
         for path in paths {
-            make_executable(&path, package_target.kind(), format)?;
+            // 静态/动态库保持普通文件权限，其余可执行产物补执行位。
+            if !matches!(package_target.kind(), TargetKind::Lib) {
+                make_executable(&path, format)?;
+            }
         }
     }
     write_build_log(&target_root, package_target.name(), compilation, format)
@@ -197,10 +200,10 @@ fn write_build_log(
     })
 }
 
-/// 可执行目录的产物在 Unix 上补执行位；静态/动态库保持普通文件权限。
-fn make_executable(path: &Path, kind: TargetKind, format: OutputFormat) -> Result<(), ()> {
+/// Unix 上按 chmod a+x 语义补执行位（只在已有读位上加执行位）。
+pub(crate) fn make_executable(path: &Path, format: OutputFormat) -> Result<(), ()> {
     #[cfg(unix)]
-    if !matches!(kind, TargetKind::Lib) {
+    {
         use std::os::unix::fs::PermissionsExt;
         // chmod a+x 语义：只在已有读位上加执行位，不绕过用户 umask。
         let mode = fs::metadata(path)
@@ -226,6 +229,22 @@ fn make_executable(path: &Path, kind: TargetKind, format: OutputFormat) -> Resul
     #[cfg(not(unix))]
     let _ = (path, kind, format);
     Ok(())
+}
+
+/// 可执行产物在 `target/` 下的完整路径（run/test/bench 执行前定位镜像）。
+/// 只适用于可执行镜像的 target：bin/test/bench 以及 test/bench 域下的 lib。
+pub(crate) fn artifact_path(
+    target_root: &Path,
+    target: TargetName,
+    package_target: &Target,
+) -> Option<PathBuf> {
+    let extension = artifact_extension(target, "executable");
+    Some(
+        target_root
+            .join(target.to_string())
+            .join(target_dir_name(package_target.kind()))
+            .join(format!("{}{extension}", package_target.name())),
+    )
 }
 
 fn target_dir_name(kind: TargetKind) -> &'static str {

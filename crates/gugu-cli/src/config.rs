@@ -167,7 +167,7 @@ fn append_optional_config(paths: &mut Vec<PathBuf>, path: PathBuf) -> Result<(),
     Ok(())
 }
 
-fn user_config_file() -> Option<PathBuf> {
+pub(crate) fn user_config_file() -> Option<PathBuf> {
     let directory = env::var_os("GUGU_CONFIG_DIR").map(PathBuf::from);
     #[cfg(target_os = "windows")]
     let directory =

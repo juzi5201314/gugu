@@ -142,6 +142,31 @@ impl CompileRequest {
         }
         self
     }
+    /// 把 project 输入切到 test 解析域：`cfg(test)` 生效并生成测试 harness 入口。
+    ///
+    /// 用于 `gugu test --lib`：lib target 自身不是 `[[test]]`，但可以在 test 域下
+    /// 编译其内部 `#[test]` 项并生成可执行测试镜像。对非 project 输入无作用。
+    pub fn with_test_domain(mut self) -> Self {
+        if let CompileInput::Project { test, .. } = &mut self.input {
+            *test = true;
+        }
+        self
+    }
+    /// 把 project 输入切到 bench 解析域：`cfg(bench)` 生效并启用 bench harness。
+    ///
+    /// 用于 `gugu bench --lib`；对非 project 输入无作用。
+    pub fn with_bench_domain(mut self) -> Self {
+        if let CompileInput::Project {
+            bench,
+            bench_harness,
+            ..
+        } = &mut self.input
+        {
+            *bench = true;
+            *bench_harness = true;
+        }
+        self
+    }
     /// 创建空 package 请求。
     pub fn empty_package(target: TargetName) -> Self {
         Self {

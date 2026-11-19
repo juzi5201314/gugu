@@ -4,11 +4,13 @@
 
 mod build_task;
 mod cache;
+mod commands;
 mod config;
 mod doc;
 mod formatting;
 mod materialize;
 mod output;
+mod package_cmds;
 
 #[cfg(all(test, feature = "slow-tests"))]
 #[path = "main_tests.rs"]
@@ -16,9 +18,10 @@ mod tests;
 
 use clap::{ArgAction, Args, CommandFactory, Parser, Subcommand, error::ErrorKind};
 use gugu_compiler::{
-    CachePolicy, CompileRequest, Compiler, DependencyCache, DependencyDomain, EMBEDDED_ARTIFACTS,
-    LockGraph, Package, PackageSource, Project, ResolveOptions, TargetKind, TargetName,
-    TargetSelection, candidates_from_lock, default_cache_root, prepare_dependency_inputs,
+    CachePolicy, CompileRequest, Compiler, DependencyCache, DependencyDomain, DependencyInput,
+    EMBEDDED_ARTIFACTS, LockGraph, Package, PackageSource, Project, ResolveOptions, TargetKind,
+    TargetName, TargetSelection, candidates_from_lock, default_cache_root,
+    prepare_dependency_inputs,
 };
 use serde_json::json;
 use std::{
@@ -208,7 +211,7 @@ struct Cli {
 }
 
 #[derive(Debug, Subcommand)]
-enum Command {
+pub(crate) enum Command {
     /// 创建新 package 或 workspace。
     New { path: PathBuf },
     /// 在当前目录初始化 package 或 workspace。
@@ -220,7 +223,8 @@ enum Command {
     /// 编译并运行 bin target。
     #[command(trailing_var_arg = true)]
     Run {
-        target: Option<String>,
+        #[arg(value_name = "target")]
+        target_name: Option<String>,
         args: Vec<OsString>,
     },
     /// 编译并运行 test target。
@@ -254,7 +258,9 @@ enum Command {
     },
     /// 添加依赖。
     Add {
-        package: String,
+        /// 依赖名（位置参数；与全局 -p/--package 区分）。
+        #[arg(value_name = "package")]
+        package_name: String,
         #[arg(long)]
         dev: bool,
         #[arg(long)]
@@ -275,7 +281,10 @@ enum Command {
         tag: Option<String>,
     },
     /// 移除依赖。
-    Remove { package: String },
+    Remove {
+        #[arg(value_name = "package")]
+        package_name: String,
+    },
     /// 更新锁文件。
     Update {
         #[arg(long)]
@@ -305,7 +314,8 @@ enum Command {
     },
     /// 撤回 registry 中的精确版本。
     Yank {
-        package: String,
+        #[arg(value_name = "package")]
+        package_name: String,
         #[arg(long)]
         version: String,
         #[arg(long)]
@@ -328,7 +338,7 @@ enum Command {
 }
 
 #[derive(Debug, Subcommand)]
-enum CacheCommand {
+pub(crate) enum CacheCommand {
     /// 清空编译缓存。
     Clean,
     /// 按 LRU 回收编译缓存。
@@ -469,7 +479,7 @@ fn execute(cli: Cli, internal: bool) -> i32 {
         Command::Cache(command) => cache::run_cache(&options, &command),
         Command::Fmt { check, all } => formatting::run(check, all, &options),
         Command::Doc { open, no_deps } => doc::run(&options, open, no_deps),
-        command => run_registered_command(&command, options.format.unwrap_or_default()),
+        command => commands::dispatch(&command, &options),
     }
 }
 
@@ -690,7 +700,16 @@ fn single_file_mode_conflict(options: &GlobalArgs) -> Option<String> {
     (!names.is_empty()).then(|| format!("单文件编译模式不支持参数：{names}"))
 }
 
-fn target_selection(options: &GlobalArgs) -> TargetSelection {
+/// 执行子命令的解析域覆盖：`test --lib`/`bench --lib` 在对应域下编译 lib。
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub(crate) enum RunDomain {
+    #[default]
+    Default,
+    Test,
+    Bench,
+}
+
+pub(crate) fn target_selection(options: &GlobalArgs) -> TargetSelection {
     if options.all_targets {
         return TargetSelection::All;
     }
@@ -719,7 +738,7 @@ fn target_selection(options: &GlobalArgs) -> TargetSelection {
 ///
 /// 返回值按名称排序去重；`--all-features` 启用全部声明，
 /// `default` 在未禁用默认 feature 时启用，`--features` 追加显式名称。
-fn enabled_features(options: &GlobalArgs, package: &Package) -> Vec<String> {
+pub(crate) fn enabled_features(options: &GlobalArgs, package: &Package) -> Vec<String> {
     let mut features = if options.all_features {
         package.declared_features().to_vec()
     } else if options.no_default_features {
@@ -744,7 +763,7 @@ fn enabled_features(options: &GlobalArgs, package: &Package) -> Vec<String> {
     clippy::too_many_arguments,
     reason = "单包编译需要项目根、包、全局选项与共享编译器"
 )]
-fn compile_package(
+pub(crate) fn compile_package(
     project_root: &Path,
     package: &Package,
     options: &GlobalArgs,
@@ -754,9 +773,11 @@ fn compile_package(
     lock: &LockGraph,
     format: OutputFormat,
     written: &mut BTreeSet<PathBuf>,
+    selection: &TargetSelection,
+    domain: RunDomain,
 ) -> Result<i32, ()> {
     let features = enabled_features(options, package);
-    let selected = match package.select_targets_in(&target_selection(options), &features) {
+    let selected = match package.select_targets_in(selection, &features) {
         Ok(selected) => selected,
         Err(error) => {
             emit_cli_error(format, &error.to_string());
@@ -789,6 +810,13 @@ fn compile_package(
             features.clone(),
             external_packages,
         );
+        // test/bench 域覆盖：`gugu test --lib` / `gugu bench --lib` 在对应域下
+        // 编译 lib 内部 #[test]/#[bench] 项；对已是该域的 target 是幂等的。
+        request = match domain {
+            RunDomain::Test => request.with_test_domain(),
+            RunDomain::Bench => request.with_bench_domain(),
+            RunDomain::Default => request,
+        };
         if let Some(output) = &build_output {
             request = request
                 .with_custom_cfg(output.defines.clone())
@@ -825,13 +853,13 @@ fn compile_package(
     Ok(exit_code)
 }
 
-fn resolve_project_lock(
+pub(crate) fn resolve_project_lock(
     project: &Project,
     packages: &[&Package],
     options: &GlobalArgs,
     target: TargetName,
     format: OutputFormat,
-) -> Result<LockGraph, ()> {
+) -> Result<(LockGraph, Vec<DependencyInput>), ()> {
     let path = project.lock_path();
     let existing = if path.exists() {
         Some(LockGraph::read(&path).map_err(|error| {
@@ -903,7 +931,7 @@ fn resolve_project_lock(
         locked: options.locked,
         vendor: options.vendor,
     };
-    prepare_dependency_inputs(
+    let inputs = prepare_dependency_inputs(
         &graph,
         &cache,
         project.workspace().root(),
@@ -918,10 +946,10 @@ fn resolve_project_lock(
             emit_cli_error(format, &error.to_string());
         })?;
     }
-    Ok(graph)
+    Ok((graph, inputs))
 }
 
-fn package_resolution(
+pub(crate) fn package_resolution(
     lock: &LockGraph,
     project_root: &Path,
     package: &Package,
@@ -979,8 +1007,8 @@ fn run_project_compile(options: &GlobalArgs, target: TargetName, check_only: boo
             return 2;
         }
     };
-    let lock = match resolve_project_lock(&project, &packages, options, target, format) {
-        Ok(lock) => lock,
+    let (lock, _inputs) = match resolve_project_lock(&project, &packages, options, target, format) {
+        Ok(resolved) => resolved,
         Err(()) => return 2,
     };
     let compiler = Compiler::with_artifacts(&EMBEDDED_ARTIFACTS);
@@ -997,49 +1025,12 @@ fn run_project_compile(options: &GlobalArgs, target: TargetName, check_only: boo
             &lock,
             format,
             &mut written,
+            &target_selection(options),
+            RunDomain::Default,
         ) {
             Ok(package_exit_code) => exit_code = exit_code.max(package_exit_code),
             Err(()) => return 2,
         }
     }
     exit_code
-}
-
-fn run_registered_command(command: &Command, format: OutputFormat) -> i32 {
-    emit_cli_error(
-        format,
-        &format!(
-            "命令 `{}` 已注册，但 bootstrap 尚未接入其执行 action",
-            command_name(command)
-        ),
-    );
-    1
-}
-
-fn command_name(command: &Command) -> &'static str {
-    match command {
-        Command::New { .. } => "new",
-        Command::Init => "init",
-        Command::Build { .. } => "build",
-        Command::Check { .. } => "check",
-        Command::Run { .. } => "run",
-        Command::Test { .. } => "test",
-        Command::Bench { .. } => "bench",
-        Command::Fmt { .. } => "fmt",
-        Command::Doc { .. } => "doc",
-        Command::Clean { .. } => "clean",
-        Command::Add { .. } => "add",
-        Command::Remove { .. } => "remove",
-        Command::Update { .. } => "update",
-        Command::Tree { .. } => "tree",
-        Command::Vendor => "vendor",
-        Command::Package => "package",
-        Command::Publish { .. } => "publish",
-        Command::Yank { .. } => "yank",
-        Command::Login { .. } => "login",
-        Command::Cache(..) => "cache",
-        Command::Explain { .. } => "explain",
-        Command::Version => "version",
-        Command::Help { .. } => "help",
-    }
 }
