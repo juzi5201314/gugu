@@ -8,16 +8,50 @@ use crate::lir::body::{Op, Terminator, Type};
 use crate::{CompileRequest, Compiler, TargetName};
 
 fn verify(target: TargetName) {
-    let compilation = Compiler::shared().compile(CompileRequest::single_file(
-        "main.gg",
-        include_str!("fixtures/foreign_abi.gg"),
-        target,
-    ));
-    assert!(
-        compilation.is_success(),
-        "{:?}",
-        compilation.diagnostics().items()
-    );
+    let mut request =
+        CompileRequest::single_file("main.gg", include_str!("fixtures/foreign_abi.gg"), target);
+    if target == TargetName::X86_64Macos {
+        request = request.with_native_link(crate::NativeLink {
+            imports: [
+                "floats",
+                "mixed",
+                "large",
+                "small",
+                "transparent",
+                "nested",
+                "too_many",
+                "narrow",
+                "empty",
+                "unions",
+                "enums",
+                "array",
+            ]
+            .map(|name| crate::NativeImport::function("/fixture/libabi.dylib", name))
+            .to_vec(),
+            interpreter: None,
+        });
+    }
+    let compilation = Compiler::shared().compile(request);
+    if target == TargetName::X86_64Macos {
+        let errors: Vec<_> = compilation
+            .diagnostics()
+            .items()
+            .iter()
+            .filter(|diagnostic| diagnostic.severity() == crate::Severity::Error)
+            .collect();
+        assert_eq!(errors.len(), 1, "{errors:?}");
+        assert_eq!(errors[0].code(), crate::DiagnosticCode::BackendInvariant);
+        assert_eq!(
+            errors[0].message(),
+            "Mach-O executable does not support C exports"
+        );
+    } else {
+        assert!(
+            compilation.is_success(),
+            "{:?}",
+            compilation.diagnostics().items()
+        );
+    }
     let mut calls = std::collections::BTreeMap::new();
     for body in compilation.lir.as_ref().unwrap().bodies() {
         for instruction in &body.instructions {
@@ -36,7 +70,7 @@ fn verify(target: TargetName) {
     let large = calls["large"];
     let small = calls["small"];
     let transparent = calls["transparent"];
-    if target == TargetName::X86_64Linux {
+    if target != TargetName::X86_64Windows {
         assert_eq!(
             floats.parameters.iter().map(|ty| ty.ty).collect::<Vec<_>>(),
             [Type::F64, Type::F64]
@@ -73,6 +107,121 @@ fn verify(target: TargetName) {
     assert!(large.sret.is_some());
     assert_eq!(transparent.parameters[0].ty, Type::F32);
     assert_eq!(transparent.results[0].ty, Type::F32);
+    verify_metadata(&calls);
+    let export = compilation
+        .lir
+        .as_ref()
+        .unwrap()
+        .exports()
+        .iter()
+        .find(|export| export.name == "abi_metadata_export")
+        .unwrap();
+    let signature = export.call.foreign_signature.as_ref().unwrap();
+    assert!(signature.matches(&export.call));
+    assert_eq!(
+        signature.arguments[0].kind,
+        crate::lir::foreign::Kind::Integer { signed: true }
+    );
+    assert_eq!(signature.result.kind, signature.arguments[0].kind);
+}
+
+fn verify_metadata(calls: &std::collections::BTreeMap<&str, &Call>) {
+    use crate::lir::foreign::{Hfa, Kind};
+    for call in calls.values() {
+        let signature = call
+            .foreign_signature
+            .as_ref()
+            .expect("original C signature");
+        assert!(signature.valid());
+        assert_eq!(signature.variadic, None);
+    }
+    let signature = |name| calls[name].foreign_signature.as_ref().unwrap();
+    assert_eq!(
+        signature("array").result.kind,
+        Kind::Aggregate {
+            hfa: Some(Hfa {
+                bits: 32,
+                offsets: vec![0, 4, 8, 12]
+            })
+        }
+    );
+    assert_eq!(
+        signature("floats").arguments,
+        [signature("floats").result.clone()]
+    );
+    assert_eq!(
+        signature("floats").result.kind,
+        Kind::Aggregate {
+            hfa: Some(Hfa {
+                bits: 64,
+                offsets: vec![0, 8]
+            })
+        }
+    );
+    assert_eq!(
+        signature("small").result.kind,
+        Kind::Aggregate {
+            hfa: Some(Hfa {
+                bits: 32,
+                offsets: vec![0]
+            })
+        }
+    );
+    assert_eq!(
+        signature("nested").result.kind,
+        Kind::Aggregate {
+            hfa: Some(Hfa {
+                bits: 32,
+                offsets: vec![0, 4, 8]
+            })
+        }
+    );
+    for name in ["mixed", "large", "too_many"] {
+        assert_eq!(signature(name).result.kind, Kind::Aggregate { hfa: None });
+    }
+    assert_eq!(
+        signature("transparent").result.kind,
+        Kind::Float { bits: 32 }
+    );
+    assert_eq!(
+        signature("narrow").arguments[0].kind,
+        Kind::Integer { signed: true }
+    );
+    assert_eq!(
+        signature("narrow").arguments[1].kind,
+        Kind::Integer { signed: false }
+    );
+    assert_eq!(
+        signature("narrow").result.kind,
+        Kind::Integer { signed: true }
+    );
+    assert_eq!(
+        signature("unions").arguments[0].kind,
+        Kind::Aggregate {
+            hfa: Some(Hfa {
+                bits: 32,
+                offsets: vec![0, 4, 8]
+            })
+        }
+    );
+    assert_eq!(
+        signature("unions").arguments[1].kind,
+        Kind::Aggregate { hfa: None }
+    );
+    assert_eq!(
+        signature("enums").arguments[0].kind,
+        Kind::Integer { signed: true }
+    );
+    assert_eq!(
+        signature("enums").arguments[1].kind,
+        Kind::Integer { signed: false }
+    );
+    assert_eq!(
+        signature("enums").result.kind,
+        Kind::Integer { signed: true }
+    );
+    assert!(signature("empty").arguments.is_empty());
+    assert_eq!(signature("empty").result.kind, Kind::Unit);
 }
 
 fn record<'a>(calls: &mut std::collections::BTreeMap<&'a str, &'a Call>, call: &'a Call) {
@@ -88,4 +237,9 @@ fn foreign_aggregates_follow_sysv_abi() {
 #[test]
 fn foreign_aggregates_follow_win64_abi() {
     verify(TargetName::X86_64Windows);
+}
+
+#[test]
+fn foreign_aggregates_preserve_c_metadata_on_darwin() {
+    verify(TargetName::X86_64Macos);
 }

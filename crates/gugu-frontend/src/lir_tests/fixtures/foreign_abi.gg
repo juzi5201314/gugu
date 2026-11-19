@@ -1,17 +1,42 @@
+//! Original C descriptions and target-specific physical lanes.
 #[repr(C)] struct Floats { a: f64, b: f64 }
 #[repr(C)] struct Mixed { a: uint, b: f64 }
 #[repr(C)] struct Large { a: uint, b: uint, c: uint }
 #[repr(C)] struct Small { a: f32 }
 #[repr(transparent)] struct Transparent { a: f32 }
+#[repr(C)] struct Nested { a: Small, b: Small, c: Small }
+#[repr(C)] struct ArrayHfa { elements: [f32; 4] }
+#[repr(C)] struct TooMany { a: f32, b: f32, c: f32, d: f32, e: f32 }
+#[repr(C)] union FloatUnion { a: f32, b: Nested }
+#[repr(C)] union MixedUnion { a: f32, b: uint }
+#[repr(i8)] enum Signed { Low, Zero }
+#[repr(u8)] enum Unsigned { High }
 #[ffi(leaf, stack = 128)] unsafe extern "C" fn floats(value: Floats) Floats
 #[ffi(leaf, stack = 128)] unsafe extern "C" fn mixed(a: uint, b: uint, c: uint, d: uint, e: uint, f: uint, value: Mixed, last: f64) Mixed
 #[ffi(leaf, stack = 128)] unsafe extern "C" fn large(value: Large) Large
 #[ffi(leaf, stack = 128)] unsafe extern "C" fn small(value: Small) Small
 #[ffi(leaf, stack = 128)] unsafe extern "C" fn transparent(value: Transparent) Transparent
+#[ffi(leaf, stack = 128)] unsafe extern "C" fn nested(value: Nested) Nested
+#[ffi(leaf, stack = 128)] unsafe extern "C" fn too_many(value: TooMany) TooMany
+#[ffi(leaf)] unsafe extern "C" fn narrow(a: i8, b: u8) i8
+#[ffi(leaf)] unsafe extern "C" fn empty()
+#[ffi(leaf)] unsafe extern "C" fn unions(a: FloatUnion, b: MixedUnion)
+#[ffi(leaf)] unsafe extern "C" fn enums(a: Signed, b: Unsigned) Signed
+#[ffi(leaf)] unsafe extern "C" fn array(value: ArrayHfa) ArrayHfa
+#[export_name = "abi_metadata_export"]
+/// Exported narrow integer metadata.
+pub unsafe extern "C" fn abi_metadata_body(value: i8) i8 { value }
 fn main() { unsafe {
     let _ = floats(Floats { a: 1.0, b: 2.0 })
     let _ = mixed(1, 2, 3, 4, 5, 6, Mixed { a: 7, b: 8.0 }, 9.0)
     let _ = large(Large { a: 1, b: 2, c: 3 })
     let _ = small(Small { a: 1.0 })
     let _ = transparent(Transparent { a: 2.0 })
+    let _ = nested(Nested { a: Small { a: 1.0 }, b: Small { a: 2.0 }, c: Small { a: 3.0 } })
+    let _ = too_many(TooMany { a: 1.0, b: 2.0, c: 3.0, d: 4.0, e: 5.0 })
+    let _ = narrow(-1, 255)
+    empty()
+    unions(FloatUnion { a: 1.0 }, MixedUnion { b: 1 })
+    let _ = enums(Signed.Low, Unsigned.High)
+    let _ = array(ArrayHfa { elements: [1.0; 4] })
 } }

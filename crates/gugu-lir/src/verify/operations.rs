@@ -837,6 +837,13 @@ fn call_valid(call: &Call, args: &[ValueType], results: &[ValueType]) -> bool {
         }
     }
     let mut end = 0;
+    let foreign = call.kind != CallKind::Managed && !matches!(call.target, CallTarget::Runtime(_));
+    if match &call.foreign_signature {
+        Some(signature) => !foreign || !signature.matches(call),
+        None => foreign,
+    } {
+        return false;
+    }
     if call.kind == CallKind::Managed && !call.foreign_arguments.is_empty() {
         return false;
     }

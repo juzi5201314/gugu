@@ -88,6 +88,11 @@ fn layout(
         may_allocate: false,
         captures_arguments: false,
         by_value: Vec::new(),
+        foreign_signature: Some(crate::foreign::Signature {
+            arguments: Vec::new(),
+            result: crate::build::foreign::describe(&input.types, result_ty),
+            variadic: None,
+        }),
         foreign_arguments: Vec::new(),
         sret: None,
         poll_free_leaf: false,
@@ -109,6 +114,11 @@ fn layout(
             continue;
         }
         let ty = local.ty.0;
+        call.foreign_signature
+            .as_mut()
+            .unwrap()
+            .arguments
+            .push(crate::build::foreign::describe(&input.types, ty));
         let value = &input.types[ty as usize];
         let physical = value.layout.expect("具体参数布局");
         cursor = cursor.next_multiple_of(physical.align.max(16));

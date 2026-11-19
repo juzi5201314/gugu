@@ -12,7 +12,7 @@ use crate::{Diagnostic, DiagnosticCode};
 use serde::{Deserialize, Serialize};
 use std::collections::BTreeMap;
 
-pub const SCHEMA: u32 = 4;
+pub const SCHEMA: u32 = 5;
 
 #[derive(Clone, Debug, Eq, PartialEq, Serialize, Deserialize)]
 pub struct Field {
@@ -68,6 +68,13 @@ pub struct TypeLayout {
     pub kind: TypeKind,
     pub passing: PassingClass,
     pub transparent: bool,
+    pub c_repr: Option<CRepresentation>,
+}
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq, Serialize, Deserialize)]
+pub enum CRepresentation {
+    Integer { signed: bool, bits: u16 },
+    Union,
 }
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq, Serialize, Deserialize)]

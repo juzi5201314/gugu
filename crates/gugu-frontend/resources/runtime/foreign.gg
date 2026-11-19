@@ -73,3 +73,12 @@ fn dispatch(frame: uint, bytes: uint, fixups: uint, count: uint, dirty: uint) { 
     }
     bridge.raw_free(packet, total)
 } }
+
+// A64 packet contract: the common 176-byte prefix and [128,168) result/error
+// copy-back window stay unchanged. x6/x7 occupy 176/184; x8/sret occupies 192;
+// offset 200 holds a FIXUP_OUTPUT pointer for the extra HFA d2/d3 results (16 bytes).
+// Native stack arguments start at 208, are rounded to 16 bytes, then come fixups.
+// sret and extra-result destinations use the existing raw-copy/fixup transaction;
+// no coroutine-stack address is retained by native. Admission, pinning, cleanup,
+// errno copy-back and dirty/ordinary credit ownership are unchanged. The A64
+// worker/lowering remains unbound until the next stage; this is not target selection.

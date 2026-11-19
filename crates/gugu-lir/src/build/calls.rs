@@ -78,6 +78,7 @@ impl Builder<'_> {
             captures_arguments,
             by_value: Vec::new(),
             sret: None,
+            foreign_signature: None,
             foreign_arguments: Vec::new(),
             poll_free_leaf: false,
         };
@@ -264,6 +265,7 @@ impl Builder<'_> {
                     captures_arguments: false,
                     by_value: Vec::new(),
                     sret: None,
+                    foreign_signature: None,
                     foreign_arguments: Vec::new(),
                     poll_free_leaf: false,
                 };
@@ -336,6 +338,7 @@ impl Builder<'_> {
         let mut arguments = Vec::new();
         let mut by_value = Vec::new();
         let mut foreign_arguments = Vec::new();
+        let mut foreign_types = Vec::new();
         let indirect_result = if foreign {
             self.c_layout(result_ty).memory
         } else {
@@ -352,6 +355,7 @@ impl Builder<'_> {
         for operand in operands {
             let value = self.operand(operand)?;
             if foreign {
+                foreign_types.push(super::foreign::describe(&self.concrete.types, value.ty()));
                 self.c_argument(value, &mut arguments, &mut foreign_arguments, &mut by_value)?;
                 continue;
             }
@@ -397,6 +401,11 @@ impl Builder<'_> {
             by_value,
             sret,
             foreign_arguments,
+            foreign_signature: foreign.then(|| crate::foreign::Signature {
+                arguments: foreign_types,
+                result: super::foreign::describe(&self.concrete.types, result_ty),
+                variadic: None,
+            }),
             poll_free_leaf: false,
         };
         let values = if let Some(unwind) = unwind {
