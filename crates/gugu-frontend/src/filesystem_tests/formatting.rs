@@ -274,6 +274,34 @@ fn heterogeneous_pack_wildcard_pattern() {
 }
 
 #[test]
+fn heterogeneous_pack_escaping_iteration_captures() {
+    assert_eq!(
+        render(
+            r#"
+        use std.fmt.{Formatter}
+        fn collect[Ts: Print...](...args: Ts) string {
+            let out = Formatter::new()
+            let saved: [fn(); 3] = [fn() {}, fn() {}, fn() {}]
+            let index = 0
+            for a in args {
+                let text = f"[{a}]"
+                let write = fn() { a.print(&out); out.write_str(text) }
+                write()
+                saved[index] = write
+                index = index + 1
+            }
+            out.write_str("|")
+            for i in 0..index { saved[i]() }
+            out.finish()
+        }
+        fn render() string = collect(1, true, "x") + collect()
+    "#
+        ),
+        "1[1]true[true]x[x]|1[1]true[true]x[x]|"
+    );
+}
+
+#[test]
 fn heterogeneous_pack_callable_bound() {
     assert_eq!(
         render(
