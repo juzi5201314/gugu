@@ -1,5 +1,6 @@
 //! 具体 GIR 到 LIR；变量读取由 block 参数封口，不引入 phi 或平行语义 IR。
 mod calls;
+mod comparison;
 pub(crate) mod foreign;
 mod intrinsics;
 mod memory;
@@ -788,7 +789,21 @@ impl Builder<'_> {
             if std::mem::replace(&mut reachable[block.index()], true) {
                 continue;
             }
-            work.extend(self.gir.blocks[block.index()].terminator.successors());
+            let terminator = &self.gir.blocks[block.index()].terminator;
+            if let gir::body::Terminator::Call { site, normal, .. } = terminator
+                && self.concrete.calls.iter().any(|call| {
+                    call.site == *site
+                        && call.target.is_none()
+                        && matches!(
+                            call.protocol,
+                            Some(gir::concrete::Protocol::Eq | gir::concrete::Protocol::Cmp)
+                        )
+                })
+            {
+                work.push(*normal);
+            } else {
+                work.extend(terminator.successors());
+            }
         }
         for (index, reachable) in reachable.into_iter().enumerate() {
             if reachable {

@@ -6,6 +6,7 @@
 
 ## `trait`
 
+<!-- docs-example: parse -->
 ```gugu
 trait Add[Rhs] {
     type Output
@@ -60,6 +61,7 @@ trait Print {
 
 ### `IntoIter` / `Iter`
 
+<!-- docs-example: parse -->
 ```gugu
 trait IntoIter {
     type Item
@@ -79,6 +81,7 @@ trait Iter {
 
 ### `Try` {#try}
 
+<!-- docs-example: parse -->
 ```gugu
 trait Try {
     type Value
@@ -97,6 +100,7 @@ trait Try {
 
 ### `Index`
 
+<!-- docs-example: parse -->
 ```gugu
 trait Index {
     type Output
@@ -111,6 +115,7 @@ trait Index {
 
 `Fn(T) U` 见 [函数](functions.md)，不能用户 `impl`。`Any` 见下，同样不能用户 `impl`。
 
+<!-- docs-example: parse -->
 ```gugu
 trait Eq {
     fn eq(self: &Self, other: &Self) bool
@@ -120,6 +125,10 @@ trait Ord {
     fn cmp(self: &Self, other: &Self) int // <0 / 0 / >0
 }
 ```
+
+泛型 `K: Eq` / `K: Ord` 的比较同样派发到具体 K 的实现，而不是比较存储位。`a != b` 是 `eq` 的逻辑取反；`<`、`<=`、`>`、`>=` 分别测试 `cmp` 结果相对零的关系。内建标量与 string 的显式 `eq` / `cmp` 调用与对应运算符一致。
+
+内建元组和数组比较递归比较元素：Eq 要求所有元素相等，Ord 按元素顺序作词典序比较，以第一个不等元素决定结果；空元组和空数组相等。Option、Result 先按变体声明顺序比较变体，同变体再按载荷字段顺序比较。嵌套 string 比较文本内容，而非 backing 地址。上述规则同样适用于泛型 trait 调用和集合键，不依赖聚合的大小、ABI 车道或存储地址。
 
 `Hash` 把值的语义字段馈送给调用方选择的 hasher；相等值必须产生相同输入。`Hasher` 与 `Formatter` 都是预导入的标准库名义类型，写入方法随 `std.hash` 与 `std.fmt` 提供。`Hasher::with_seed(uint)` 创建确定性 FoldHash-fast 状态；`write_int`、`write_uint`、`write_bool`、`write_char`、`write_str`、`write_bytes` 追加规范字节流，`finish() uint` 可重复读取且不封闭后续写入。具体编码见[标准库](standard-library.md#collections-and-hash)。用户 `impl Hash` 可调用这些方法，也可通过 `self.field.hash(hasher)` 递归馈送。
 
@@ -143,6 +152,7 @@ trait Default {
 
 ### `Any`
 
+<!-- docs-example: parse -->
 ```gugu
 trait Any {
     fn type_of(self: &Self) TypeId

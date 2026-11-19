@@ -154,6 +154,11 @@ const SOURCES: &[RuntimeSourceInput<'static>] = &[
         RuntimeSourceRole::StandardLibrary,
     ),
     source(
+        "std/fmt_float.gg",
+        include_str!("../../gugu-frontend/resources/std/fmt_float.gg"),
+        RuntimeSourceRole::StandardLibrary,
+    ),
+    source(
         "std/hash.gg",
         include_str!("../../gugu-frontend/resources/std/hash.gg"),
         RuntimeSourceRole::StandardLibrary,
@@ -166,6 +171,21 @@ const SOURCES: &[RuntimeSourceInput<'static>] = &[
     source(
         "std/collections.gg",
         include_str!("../../gugu-frontend/resources/std/collections.gg"),
+        RuntimeSourceRole::StandardLibrary,
+    ),
+    source(
+        "std/collections/hashmap.gg",
+        include_str!("../../gugu-frontend/resources/std/collections/hashmap.gg"),
+        RuntimeSourceRole::StandardLibrary,
+    ),
+    source(
+        "std/collections/btreemap.gg",
+        include_str!("../../gugu-frontend/resources/std/collections/btreemap.gg"),
+        RuntimeSourceRole::StandardLibrary,
+    ),
+    source(
+        "std/collections/set.gg",
+        include_str!("../../gugu-frontend/resources/std/collections/set.gg"),
         RuntimeSourceRole::StandardLibrary,
     ),
     source(

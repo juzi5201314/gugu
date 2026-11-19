@@ -1,0 +1,273 @@
+use std.text.{alloc_bytes, Bytes}
+
+// Little-endian base-2^32 limbs in a growable, managed byte array.
+struct Big { data: &[byte], length: int }
+impl Big {
+    fn new(value: uint) Self {
+        let result = Self { data: unsafe { alloc_bytes(16) }, length: 2 }
+        for i in 0..result.data.len() { result.data[i] = 0 }
+        result.put(0, value & 4294967295)
+        result.put(1, value >> 32)
+        result.trim()
+        result
+    }
+    fn get(self: &Self, index: int) uint {
+        if index >= self.length { return 0 }
+        unsafe { uint(std.ptr.read_unaligned[u32](std.mem.transmute[*byte, *u32](std.ptr.addr_of(self.data[index * 4])))) }
+    }
+    fn put(self: &Self, index: int, value: uint) {
+        if index >= self.data.len() / 4 {
+            let data = unsafe { alloc_bytes(self.data.len() * 2) }
+            for i in 0..data.len() { data[i] = 0 }
+            for i in 0..self.data.len() { data[i] = self.data[i] }
+            self.data = data
+        }
+        unsafe { std.ptr.write_unaligned[u32](std.mem.transmute[*byte, *u32](std.ptr.addr_of(self.data[index * 4])), u32(value)) }
+    }
+    fn trim(self: &Self) {
+        while self.length > 0 && self.get(self.length - 1) == 0 { self.length = self.length - 1 }
+    }
+    fn copy(self: &Self) Self {
+        let result = Self::new(0)
+        for i in 0..self.length {
+            result.put(i, self.get(i))
+            result.length = i + 1
+        }
+        result
+    }
+    fn cmp(self: &Self, other: &Self) int {
+        if self.length != other.length { return if self.length < other.length { -1 } else { 1 } }
+        let i = self.length
+        while i > 0 {
+            i = i - 1
+            let a = self.get(i)
+            let b = other.get(i)
+            if a != b { return if a < b { -1 } else { 1 } }
+        }
+        0
+    }
+    fn mul(self: &Self, factor: uint) {
+        let carry = uint(0)
+        for i in 0..self.length {
+            let value = self.get(i) * factor + carry
+            self.put(i, value & 4294967295)
+            carry = value >> 32
+        }
+        if carry != 0 {
+            self.put(self.length, carry)
+            self.length = self.length + 1
+        }
+    }
+    fn power(self: &Self, exponent: int, binary: bool) {
+        let remaining = exponent
+        let step = if binary { 29 } else { 9 }
+        let base = if binary { uint(536870912) } else { uint(1000000000) }
+        while remaining >= step {
+            self.mul(base)
+            remaining = remaining - step
+        }
+        let factor = uint(1)
+        for _ in 0..remaining { factor = factor * (if binary { uint(2) } else { uint(10) }) }
+        self.mul(factor)
+    }
+    fn sub(self: &Self, other: &Self) {
+        let borrow = uint(0)
+        for i in 0..self.length {
+            let a = self.get(i)
+            let b = other.get(i) + borrow
+            self.put(i, (a - b) & 4294967295)
+            borrow = if a < b { uint(1) } else { uint(0) }
+        }
+        self.trim()
+    }
+    fn add(self: &Self, other: &Self) {
+        let length = if self.length > other.length { self.length } else { other.length }
+        let carry = uint(0)
+        for i in 0..length {
+            let value = self.get(i) + other.get(i) + carry
+            self.put(i, value & 4294967295)
+            carry = value >> 32
+        }
+        self.length = length
+        if carry != 0 {
+            self.put(length, carry)
+            self.length = length + 1
+        }
+    }
+}
+
+struct Ratio { r: &Big, s: &Big, lower: &Big, upper: &Big, exponent: int, even: bool }
+struct Decimal { data: &[byte], length: int, exponent: int }
+
+fn ratio(bits: uint, fraction_bits: int, exponent_bits: int) Ratio {
+    let hidden = uint(1) << fraction_bits
+    let fraction = bits & (hidden - 1)
+    let encoded = int(bits >> fraction_bits)
+    let significand = fraction + (if encoded == 0 { uint(0) } else { hidden })
+    let bias = (1 << (exponent_bits - 1)) - 1
+    let binary = (if encoded == 0 { 1 } else { encoded }) - bias - fraction_bits
+    let r = Big::new(significand * 4)
+    let s = Big::new(4)
+    // Normal powers of two have half as much space below as above.
+    let lower = Big::new(if fraction == 0 && encoded > 1 { uint(1) } else { uint(2) })
+    let upper = Big::new(2)
+    if binary >= 0 {
+        r.power(binary, true)
+        lower.power(binary, true)
+        upper.power(binary, true)
+    } else { s.power(-binary, true) }
+    let top = significand
+    let log2 = binary
+    while top > 1 {
+        top = top >> 1
+        log2 = log2 + 1
+    }
+    // 78913 / 2^18 approximates log10(2); exact comparisons correct the estimate.
+    let exponent = (log2 * 78913) >> 18
+    if exponent >= 0 { s.power(exponent, false) }
+    else {
+        r.power(-exponent, false)
+        lower.power(-exponent, false)
+        upper.power(-exponent, false)
+    }
+    if r.cmp(&s) < 0 {
+        r.mul(10)
+        lower.mul(10)
+        upper.mul(10)
+        exponent = exponent - 1
+    } else {
+        let ten = s.copy()
+        ten.mul(10)
+        if r.cmp(&ten) >= 0 {
+            s.mul(10)
+            exponent = exponent + 1
+        }
+    }
+    Ratio { r: &r, s: &s, lower: &lower, upper: &upper, exponent, even: significand & 1 == 0 }
+}
+
+fn rounded(data: &[byte], length: int, exponent: int, up: bool) Decimal {
+    if up {
+        let i = length
+        while i > 0 && data[i - 1] == 57 {
+            i = i - 1
+            data[i] = 48
+        }
+        if i == 0 {
+            data[0] = 49
+            return Decimal { data, length: 1, exponent: exponent + 1 }
+        }
+        data[i - 1] = data[i - 1] + 1
+    }
+    Decimal { data, length, exponent }
+}
+
+fn next_digit(value: &Ratio) byte {
+    let digit = byte(0)
+    while value.r.cmp(value.s) >= 0 {
+        value.r.sub(value.s)
+        digit = digit + 1
+    }
+    digit
+}
+
+fn nearer_up(value: &Ratio, digit: byte) bool {
+    let twice = value.r.copy()
+    twice.mul(2)
+    let half = twice.cmp(value.s)
+    half > 0 || (half == 0 && digit & 1 != 0)
+}
+
+fn generate(value: &Ratio, precision: int, scientific: bool) Decimal {
+    let shortest = precision < 0
+    let count = if scientific { precision + 1 } else { precision + value.exponent + 1 }
+    // Even binary64 subnormals terminate within 1100 significant decimal digits.
+    let data = unsafe { alloc_bytes(if shortest { 32 } else { 1100 }) }
+    if !shortest && count <= 0 {
+        let limit = value.s.copy()
+        limit.mul(5)
+        let up = count == 0 && value.r.cmp(&limit) > 0
+        data[0] = if up { byte(49) } else { byte(48) }
+        return Decimal { data, length: 1, exponent: if up { -precision } else { 0 } }
+    }
+    let length = 0
+    loop {
+        let digit = next_digit(value)
+        data[length] = digit + 48
+        length = length + 1
+        if shortest {
+            let low = value.r.cmp(value.lower)
+            let sum = value.r.copy()
+            sum.add(value.upper)
+            let high = sum.cmp(value.s)
+            let down = low < 0 || (value.even && low == 0)
+            let up = high > 0 || (value.even && high == 0)
+            if down || up { return rounded(data, length, value.exponent, up && (!down || nearer_up(value, digit))) }
+        } else if length == count || value.r.length == 0 {
+            return rounded(data, length, value.exponent, length == count && nearer_up(value, digit))
+        }
+        value.r.mul(10)
+        if shortest {
+            value.lower.mul(10)
+            value.upper.mul(10)
+        }
+    }
+}
+
+fn decimal_text(value: &Decimal, mode: int, precision: int) string {
+    let scientific = mode >= 2 || (mode == 1 && precision < 0 && (value.exponent < -4 || value.exponent >= 16))
+    let places = if precision >= 0 { precision } else if scientific { value.length - 1 }
+        else {
+            let n = value.length - value.exponent - 1
+            if n > 0 { n } else if mode == 1 { 1 } else { 0 }
+        }
+    let integer = if scientific || value.exponent < 0 { 1 } else { value.exponent + 1 }
+    let data = unsafe { alloc_bytes(integer + places + 16) }
+    for i in 0..integer { data[i] = if !scientific && value.exponent < 0 { byte(48) } else if i < value.length { value.data[i] } else { byte(48) } }
+    let length = integer
+    if places > 0 {
+        data[length] = 46
+        length = length + 1
+        for i in 0..places {
+            let at = if scientific { i + 1 } else { value.exponent + 1 + i }
+            data[length] = if at >= 0 && at < value.length { value.data[at] } else { byte(48) }
+            length = length + 1
+        }
+    }
+    if scientific {
+        data[length] = if mode == 3 { byte(69) } else { byte(101) }
+        length = length + 1
+        let exponent = value.exponent
+        if exponent < 0 {
+            data[length] = 45
+            length = length + 1
+            exponent = -exponent
+        }
+        let hundreds = exponent / 100
+        let tens = exponent / 10 % 10
+        if hundreds > 0 {
+            data[length] = byte(hundreds) + 48
+            length = length + 1
+        }
+        if exponent >= 10 {
+            data[length] = byte(tens) + 48
+            length = length + 1
+        }
+        data[length] = byte(exponent % 10) + 48
+        length = length + 1
+    }
+    unsafe { Bytes::from_owned(data[..length]) }.to_string_lossy()
+}
+
+pub fn format(bits: uint, fraction_bits: int, exponent_bits: int, mode: int, precision: int) string {
+    if precision > 9223372036854775807 - 1100 { panic("float precision overflow") }
+    if bits == 0 {
+        let data = unsafe { alloc_bytes(1) }
+        data[0] = 48
+        let value = Decimal { data, length: 1, exponent: 0 }
+        return decimal_text(&value, mode, precision)
+    }
+    let value = ratio(bits, fraction_bits, exponent_bits)
+    let digits = generate(&value, precision, mode >= 2)
+    decimal_text(&digits, mode, precision)
+}

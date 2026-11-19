@@ -5,7 +5,7 @@
 
 use super::eval::ConstantValue;
 use crate::string::fmt::{
-    Formatter, ResolvedSpec, format_bool, format_float, format_int, format_str,
+    Formatter, ResolvedSpec, format_bool, format_float, format_float32, format_int, format_str,
 };
 use crate::string::{FormatKind, ValueClass, flag_conflict};
 
@@ -13,7 +13,7 @@ use crate::string::{FormatKind, ValueClass, flag_conflict};
 pub(super) fn value_class(value: &ConstantValue) -> ValueClass {
     match value {
         ConstantValue::Int(_) => ValueClass::Int,
-        ConstantValue::Float(_) => ValueClass::Float,
+        ConstantValue::Float(_) | ConstantValue::Float32(_) => ValueClass::Float,
         ConstantValue::String(_) => ValueClass::Str,
         _ => ValueClass::Other,
     }
@@ -41,7 +41,7 @@ fn kind_applies(value: &ConstantValue, kind: FormatKind) -> bool {
             matches!(value, ConstantValue::Int(_))
         }
         FormatKind::LowerExponent | FormatKind::UpperExponent => {
-            matches!(value, ConstantValue::Float(_))
+            matches!(value, ConstantValue::Float(_) | ConstantValue::Float32(_))
         }
     }
 }
@@ -51,6 +51,7 @@ fn printable(value: &ConstantValue) -> bool {
         ConstantValue::Unit
         | ConstantValue::Int(_)
         | ConstantValue::Float(_)
+        | ConstantValue::Float32(_)
         | ConstantValue::Bool(_)
         | ConstantValue::String(_) => true,
         ConstantValue::Array(items) | ConstantValue::Tuple(items) => items.iter().all(printable),
@@ -75,6 +76,7 @@ fn write_value(out: &mut Formatter, value: &ConstantValue) -> Result<(), &'stati
             format_int(out, value);
         }
         ConstantValue::Float(bits) => format_float(out, f64::from_bits(*bits)),
+        ConstantValue::Float32(bits) => format_float32(out, f32::from_bits(*bits)),
         ConstantValue::Bool(value) => format_bool(out, *value),
         ConstantValue::String(text) => format_str(out, text),
         ConstantValue::Array(items) => write_sequence(out, items, None)?,

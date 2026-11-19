@@ -417,7 +417,7 @@ impl Builder<'_> {
         };
         self.emit_check_ops(id)?;
         if let Some(dispatch) = dispatch {
-            return self.emit_dispatch_op(id, dispatch, left_local, right_local);
+            return self.emit_dispatch_op(id, operation, dispatch, left_local, right_local);
         }
         let dest = self.temp(self.expr_ty(id));
         let rvalue = binary_rvalue(operation, copy_of(left_local), copy_of(right_local));
@@ -429,6 +429,7 @@ impl Builder<'_> {
     fn emit_dispatch_op(
         &mut self,
         id: ExprId,
+        operation: BinOp,
         dispatch: u32,
         left: LocalId,
         right: LocalId,
@@ -457,6 +458,27 @@ impl Builder<'_> {
             });
         }
         let dest = self.call_dispatch(id, dispatch, args)?;
+        let member = self.owner.dispatches[dispatch as usize]
+            .member_name
+            .as_deref();
+        let value = match member {
+            Some("cmp") => {
+                let zero = self.const_operand(self.int_ty(), ConstValue::Integer(0));
+                Some(binary_rvalue(operation, copy_of(dest), zero))
+            }
+            Some("eq") if operation == BinOp::Ne => Some(Rvalue::UnaryOp {
+                op: UnaryOp::Not,
+                operand: copy_of(dest),
+            }),
+            _ => None,
+        };
+        let dest = if let Some(value) = value {
+            let result = self.temp(self.expr_ty(id));
+            self.assign(Place::local(result), value);
+            result
+        } else {
+            dest
+        };
         self.set_value(id, dest);
         Ok(Some(dest))
     }
