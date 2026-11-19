@@ -1,7 +1,7 @@
 use super::{CompileRequest, Compiler, TargetName, harness::Harness};
 use gugu_sema::string::{FormatSpec, ParsedCount, fmt, parse_format};
 
-fn oracle(spec: &str, value: impl FnOnce(&mut fmt::Formatter)) -> String {
+pub(super) fn oracle(spec: &str, value: impl FnOnce(&mut fmt::Formatter)) -> String {
     let spec: FormatSpec<u64> = parse_format(spec)
         .unwrap()
         .try_map(|count| {
@@ -16,7 +16,7 @@ fn oracle(spec: &str, value: impl FnOnce(&mut fmt::Formatter)) -> String {
     formatter.finish()
 }
 
-fn render(source: &str) -> String {
+pub(super) fn render(source: &str) -> String {
     render_with_heap(source).0
 }
 

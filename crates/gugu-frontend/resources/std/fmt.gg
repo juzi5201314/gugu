@@ -20,6 +20,16 @@ impl Formatter {
     pub fn finish(self: &Self) string = self.text.freeze().to_string_lossy()
     pub fn write_str(self: &Self, value: string) { self.text.append(Bytes::from_string(value)) }
     pub fn write_char(self: &Self, value: char) { self.write_str(character(value)) }
+    pub fn debug_struct(self: &Self, name: string) DebugStruct = DebugStruct { inner: self.builder(name, 0) }
+    pub fn debug_tuple(self: &Self, name: string) DebugTuple = DebugTuple { inner: self.builder(name, 1) }
+    pub fn debug_list(self: &Self) DebugList = DebugList { inner: self.builder("", 2) }
+    pub fn debug_set(self: &Self) DebugSet = DebugSet { inner: self.builder("", 3) }
+    pub fn debug_map(self: &Self) DebugMap = DebugMap { inner: self.builder("", 4) }
+    fn builder(self: &Self, name: string, kind: int) DebugBuilder {
+        self.write_str(name)
+        if kind != 0 { self.write_str(if kind == 1 { "(" } else if kind == 2 { "[" } else { "{" }) }
+        DebugBuilder { out: self, kind, entries: 0, finished: false }
+    }
     pub fn pad(self: &Self, value: string) {
         let bytes = unsafe { Bytes::from_string(value).as_slice() }
         let end = 0
@@ -67,6 +77,98 @@ impl Formatter {
             self.pad_integral(!negative, "", float_format.format(magnitude, fraction, exponent, mode, self.precision))
         }
     }
+}
+
+struct DebugBuilder { out: &Formatter, kind: int, entries: int, finished: bool }
+impl DebugBuilder {
+    fn separator(self: &Self) {
+        if self.finished { panic("debug builder already finished") }
+        let first = self.entries == 0
+        self.entries = self.entries + 1
+        if self.kind == 0 && first {
+            self.out.write_str(if self.out.alternate { " {\n    " } else { " { " })
+        } else if self.out.alternate {
+            self.out.write_str(if first { "\n    " } else { ",\n    " })
+        } else if !first { self.out.write_str(", ") } else {}
+    }
+    fn child(self: &Self) Formatter {
+        let child = Formatter::new()
+        child.alternate = self.out.alternate
+        child
+    }
+    fn rendered(self: &Self, text: string) {
+        if !self.out.alternate { self.out.write_str(text); return }
+        let bytes = unsafe { Bytes::from_string(text).as_slice() }
+        let start = 0
+        for i in 0..bytes.len() {
+            if bytes[i] == 10 {
+                self.out.write_str(text[start..i + 1])
+                self.out.write_str("    ")
+                start = i + 1
+            }
+        }
+        self.out.write_str(text[start..])
+    }
+    fn entry[T: Debug](self: &Self, value: &T) {
+        self.separator()
+        let child = self.child()
+        value.debug(&child)
+        self.rendered(child.finish())
+    }
+    fn finish(self: &Self) {
+        if self.finished { return }
+        self.finished = true
+        if self.kind == 0 && self.entries == 0 { return }
+        if self.entries > 0 {
+            if self.out.alternate { self.out.write_str(",\n") }
+            else if self.kind == 0 { self.out.write_str(" ") } else {}
+        }
+        self.out.write_str(if self.kind == 1 { ")" } else if self.kind == 2 { "]" } else { "}" })
+    }
+}
+
+pub struct DebugStruct { inner: DebugBuilder }
+impl DebugStruct {
+    pub fn field[T: Debug](self: &Self, name: string, value: &T) &Self {
+        self.inner.separator()
+        self.inner.rendered(name)
+        self.inner.out.write_str(": ")
+        let child = self.inner.child()
+        value.debug(&child)
+        self.inner.rendered(child.finish())
+        self
+    }
+    pub fn finish(self: &Self) { self.inner.finish() }
+}
+pub struct DebugTuple { inner: DebugBuilder }
+impl DebugTuple {
+    pub fn entry[T: Debug](self: &Self, value: &T) &Self { self.inner.entry(value); self }
+    pub fn finish(self: &Self) { self.inner.finish() }
+}
+pub struct DebugList { inner: DebugBuilder }
+impl DebugList {
+    pub fn entry[T: Debug](self: &Self, value: &T) &Self { self.inner.entry(value); self }
+    pub fn finish(self: &Self) { self.inner.finish() }
+}
+pub struct DebugSet { inner: DebugBuilder }
+impl DebugSet {
+    pub fn entry[T: Debug](self: &Self, value: &T) &Self { self.inner.entry(value); self }
+    pub fn finish(self: &Self) { self.inner.finish() }
+}
+pub struct DebugMap { inner: DebugBuilder }
+impl DebugMap {
+    pub fn entry[K: Debug, V: Debug](self: &Self, key: &K, value: &V) &Self {
+        self.inner.separator()
+        let child = self.inner.child()
+        key.debug(&child)
+        self.inner.rendered(child.finish())
+        self.inner.out.write_str(": ")
+        let child_value = self.inner.child()
+        value.debug(&child_value)
+        self.inner.rendered(child_value.finish())
+        self
+    }
+    pub fn finish(self: &Self) { self.inner.finish() }
 }
 
 impl Print for f64 { fn print(self: &Self, out: &Formatter) { out.float(unsafe { std.mem.transmute[f64, uint](*self) }, 52, 11, 0) } }

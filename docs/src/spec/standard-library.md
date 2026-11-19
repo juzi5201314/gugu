@@ -311,7 +311,26 @@ trait UpperExp  { fn upper_exp(self: &Self, out: &Formatter) }
 
 `std.fmt.Formatter` 只写入当前构建中的 string，不执行 I/O。格式 trait 实现可以调用 Formatter 的文本（`write_str` / `write_char`）、padding（`pad` 用于文本、`pad_integral` 用于带符号与前缀的数字）和结构化 debug（`debug_tuple` / `debug_list` / `debug_map` / `debug_struct`）方法，但不能读取或改变已解析的格式说明；`#` 是否生效由这些方法自行体现。f-string 构建失败只可能是 panic（例如内存耗尽或负的动态计数），不返回领域错误。comptime 域中的 f-string 使用同一套解析、兼容规则与内建实现，见[comptime capability registry](#comptime-capability-registry)。
 
-运行时 f-string 通过普通 trait 调用构建字符串；用户定义的 `Print` 实现与标准库实现使用相同的 `&Formatter` 目标。每个插值先求值一次，再读取该插值的动态 width / precision。`Formatter::new()` 建立空目标，`finish()` 返回当前字符串；每个插值的说明由编译器设置，不由用户格式 trait 修改。当前运行时标准库提供 string、char、bool 与全部整数类型的格式实现，以及 f32 / f64 的 `Print`、`Debug`、`LowerExp`、`UpperExp`；浮点值可直接传给 `print` / `println` 等输出函数。上述文本和 padding 方法已实现；结构化 debug builder 尚未提供运行时实现，comptime 格式化不受此限制。
+运行时 f-string 通过普通 trait 调用构建字符串；用户定义的 `Print` 实现与标准库实现使用相同的 `&Formatter` 目标。每个插值先求值一次，再读取该插值的动态 width / precision。`Formatter::new()` 建立空目标，`finish()` 返回当前字符串；每个插值的说明由编译器设置，不由用户格式 trait 修改。当前运行时标准库提供 string、char、bool 与全部整数类型的格式实现，以及 f32 / f64 的 `Print`、`Debug`、`LowerExp`、`UpperExp`；浮点值可直接传给 `print` / `println` 等输出函数。上述文本、padding 和结构化 debug builder 方法均已实现。
+
+结构化 debug API 的签名如下（类型均在 `std.fmt` 中）：
+
+```text
+Formatter.debug_struct(self: &Self, name: string) DebugStruct
+Formatter.debug_tuple(self: &Self, name: string) DebugTuple
+Formatter.debug_list(self: &Self) DebugList
+Formatter.debug_set(self: &Self) DebugSet
+Formatter.debug_map(self: &Self) DebugMap
+DebugStruct.field[T: Debug](self: &Self, name: string, value: &T) &Self
+DebugTuple.entry[T: Debug](self: &Self, value: &T) &Self
+DebugList.entry[T: Debug](self: &Self, value: &T) &Self
+DebugSet.entry[T: Debug](self: &Self, value: &T) &Self
+DebugMap.entry[K: Debug, V: Debug](self: &Self, key: &K, value: &V) &Self
+```
+
+每种 builder 都有 `pub fn finish(self: &Self)`，返回 unit；`field` / `entry` 返回同一 builder 引用，可链式调用。`finish()` 追加结束定界符，重复调用不再追加；结束后追加条目会 panic。空 struct 只输出名字；空 tuple、list、set、map 分别输出 `Name()`、`[]`、`{}`、`{}`。非空 compact 输出依次为 `Name { field: value }`、`Name(a, b)`、`[a, b]`、`{a, b}`、`{key: value}`，按调用顺序排列；struct 字段名原样输出，map 键经 Debug 格式化。
+
+`{:#?}` 的 `#` 传给用户 `impl Debug` 的目标 Formatter。builder 逐行输出、每层缩进四个空格，非空末条目保留逗号；嵌套子项每个换行后的内容再缩进四个空格。子 Formatter 仅继承 `#` 并以 Debug 格式调用值，不继承父级 width、precision、sign、zero、fill 或 alignment。builder 不对整个结构做 padding。
 
 Formatter 追加文本不复制已有输出；累计追加 n 字节的存储量为 O(n)，`finish()` 线性物化当前内容的独立快照。
 

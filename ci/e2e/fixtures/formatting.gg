@@ -1,0 +1,40 @@
+//! Runtime formatting exercised by the Linux executable fixture.
+use std.io.{println}
+
+struct Widget { value: int }
+impl Print for Widget {
+    fn print(self: &Self, out: &Formatter) {
+        out.write_str("Widget(")
+        self.value.print(out)
+        out.write_str(")")
+    }
+}
+struct Record { number: f64, text: string }
+impl Debug for Record {
+    fn debug(self: &Self, out: &Formatter) {
+        out.debug_struct("Record").field("number", &self.number).field("text", &self.text).finish()
+    }
+}
+fn main() {
+    println("values: ", 42, " ", -7, " ", true, " ", 'Z', " ", "hello")
+    let text = "line\n\"\\\t"
+    println(f"strings: {text:?}")
+    let n = 42
+    println(f"padding: {n:*>6}|{n:<6}|{n:^7}|{n:#x}")
+    let value = 0.1
+    let large = 1e21
+    let zero = unsafe { std.mem.transmute[uint, f64](9223372036854775808) }
+    let nan = unsafe { std.mem.transmute[uint, f64](9221120237041090560) }
+    let inf = unsafe { std.mem.transmute[uint, f64](9218868437227405312) }
+    println(f"f64: {value}|{large}|{zero}|{nan}|{inf}|{value:.3}|{value:e}")
+    let single: f32 = 0.1
+    let large_single: f32 = 1e21
+    let zero_single = unsafe { std.mem.transmute[u32, f32](2147483648) }
+    let nan_single = unsafe { std.mem.transmute[u32, f32](2143289344) }
+    let inf_single = unsafe { std.mem.transmute[u32, f32](2139095040) }
+    println(f"f32: {single}|{large_single}|{zero_single}|{nan_single}|{inf_single}|{single:.3}|{single:e}")
+    println("print: ", Widget { value: 7 })
+    let record = Record { number: 0.1, text: "field\n" }
+    println(f"debug: {record:?}")
+    println(f"pretty: {record:#?}")
+}

@@ -94,6 +94,10 @@ impl Formatter {
         DebugBuilder::new(self, "", DebugStyle::List)
     }
 
+    pub fn debug_set(&mut self) -> DebugBuilder<'_> {
+        DebugBuilder::new(self, "", DebugStyle::Set)
+    }
+
     /// 结构化 debug：`{k: v, ...}`。
     pub fn debug_map(&mut self) -> DebugBuilder<'_> {
         DebugBuilder::new(self, "", DebugStyle::Map)
@@ -133,6 +137,7 @@ enum DebugStyle {
     List,
     Map,
     Struct,
+    Set,
 }
 
 impl DebugStyle {
@@ -141,7 +146,7 @@ impl DebugStyle {
         match self {
             Self::Tuple => ("(", ")"),
             Self::List => ("[", "]"),
-            Self::Map => ("{", "}"),
+            Self::Map | Self::Set => ("{", "}"),
             Self::Struct => (" { ", " }"),
         }
     }
@@ -152,6 +157,7 @@ pub struct DebugBuilder<'a> {
     formatter: &'a mut Formatter,
     style: DebugStyle,
     entries: usize,
+    finished: bool,
 }
 
 impl<'a> DebugBuilder<'a> {
@@ -164,6 +170,7 @@ impl<'a> DebugBuilder<'a> {
             formatter,
             style,
             entries: 0,
+            finished: false,
         }
     }
 
@@ -192,6 +199,10 @@ impl<'a> DebugBuilder<'a> {
 
     /// 写入结束定界符。
     pub fn finish(&mut self) {
+        if self.finished {
+            return;
+        }
+        self.finished = true;
         let pretty = self.formatter.spec.alternate;
         let close = self.style.delimiters().1;
         if self.style == DebugStyle::Struct && self.entries == 0 {
@@ -206,6 +217,7 @@ impl<'a> DebugBuilder<'a> {
     }
 
     fn separator(&mut self) {
+        assert!(!self.finished, "debug builder already finished");
         let pretty = self.formatter.spec.alternate;
         let first = self.entries == 0;
         self.entries += 1;

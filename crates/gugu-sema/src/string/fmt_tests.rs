@@ -155,3 +155,19 @@ fn negative_dynamic_counts_are_faults() {
     let negative = spec.try_map(|_| Ok::<i64, ()>(-1)).expect("映射成功");
     assert_eq!(resolve_counts(negative), Err(FormatFault::NegativeCount));
 }
+
+#[test]
+fn debug_set_resets_child_flags_and_finishes_once() {
+    let mut flags = spec("#?");
+    flags.width = Some(100);
+    flags.precision = Some(0);
+    flags.sign = Some(crate::string::Sign::Plus);
+    let mut out = Formatter::new(flags);
+    let mut set = out.debug_set();
+    set.entry(|f| format_float(f, 0.1))
+        .entry(|f| format_str(f, "x"));
+    set.finish();
+    set.finish();
+    assert_eq!(out.finish(), "{\n    0.1,\n    \"x\",\n}");
+    assert_eq!(render("?", |f| f.debug_set().finish()), "{}");
+}

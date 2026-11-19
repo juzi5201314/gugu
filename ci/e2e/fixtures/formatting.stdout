@@ -1,0 +1,11 @@
+values: 42 -7 true Z hello
+strings: "line\n\"\\\t"
+padding: ****42|42    |  42   |0x2a
+f64: 0.1|1000000000000000000000|-0|NaN|inf|0.100|1e-1
+f32: 0.1|1000000000000000000000|-0|NaN|inf|0.100|1e-1
+print: Widget(7)
+debug: Record { number: 0.1, text: "field\n" }
+pretty: Record {
+    number: 0.1,
+    text: "field\n",
+}
