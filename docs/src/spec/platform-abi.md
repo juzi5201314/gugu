@@ -70,6 +70,8 @@ Linux 目标在没有动态 FFI、系统 Resolver 或可达环境 API 需求时�
 
 `host` 是执行 `build.gg` 和工具链辅助程序的平台；`target` 是普通程序、测试或 bench 镜像的平台。二者可以不同。目标相关的 `cfg` 和 `[target.'cfg(...)']` 依赖按 target 求值，`build.gg` 的宿主条件按 host 求值。host 不能改变 target 的数据模型、ABI 或镜像格式。
 
+Gugu 源码仓库的 Rust workspace 全目标构建不要求宿主为 `x86_64`。直接在宿主 CPU 上执行 x86_64 机器码的 `coroutine_context`、`morestack_entry`、`x64_encoding` 和 `x64_frame` 基准只在 Rust 的 `target_arch = "x86_64"` 时执行；其它构建架构保留空入口。这不新增 Gugu 编译目标。
+
 ## 目标键与条件编译
 
 本版本提供两个内建平台键：

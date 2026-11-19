@@ -4,17 +4,24 @@
 //! 修补点自行给片段打补丁后执行，`context_switch` 位置用宿主 stub 顶替：stub 记录四个参数
 //! 并故意破坏九个整数参数寄存器与八个浮点参数寄存器，续点必须从 cold scratch 完整恢复。
 
+#[cfg(target_arch = "x86_64")]
 use gugu_compiler::{CompileRequest, Compiler, EMBEDDED_ARTIFACTS, TargetName};
+#[cfg(target_arch = "x86_64")]
 use std::arch::naked_asm;
+#[cfg(target_arch = "x86_64")]
 use std::mem::offset_of;
 
 /// 邮箱 104 字节，观测区紧跟其后；stub 的 rbx 指向 mailbox + 40，因此相对偏移是 64。
+#[cfg(target_arch = "x86_64")]
 const LOG_OFFSET: usize = 104;
 /// 观测区字数：交接次数与四个交接参数。
+#[cfg(target_arch = "x86_64")]
 const LOG_WORDS: usize = 5;
 /// 冷记录区字数（含 `morestack_scratch`），远大于契约声明字节数。
+#[cfg(target_arch = "x86_64")]
 const COLD_WORDS: usize = 192;
 /// 九个整数参数寄存器的哨兵，顺序与 `INTERNAL_INTEGER` 一致：`rax rbx rcx rdx rdi rsi r8 r9 r10`。
+#[cfg(target_arch = "x86_64")]
 const SENTINELS: [u64; 9] = [
     0x1111_1111_1111_1111,
     0x2222_2222_2222_2222,
@@ -27,6 +34,7 @@ const SENTINELS: [u64; 9] = [
     0xaaaa_aaaa_aaaa_aaaa,
 ];
 
+#[cfg(target_arch = "x86_64")]
 #[repr(C, align(16))]
 struct State {
     /// 片段入口地址（`call [r12 + entry]`）。
@@ -48,11 +56,16 @@ struct State {
 }
 
 /// 片段、mailbox、冷记录、`context_switch` 替身都放进同一映射：RIP 相对修补只有 ±2GiB 窗口。
+#[cfg(target_arch = "x86_64")]
 const CODE_PAGE: usize = 0x0000;
+#[cfg(target_arch = "x86_64")]
 const MAILBOX_PAGE: usize = 0x2000;
+#[cfg(target_arch = "x86_64")]
 const STUB_PAGE: usize = 0x3000;
+#[cfg(target_arch = "x86_64")]
 const COLD_PAGE: usize = 0x4000;
 /// 替身被整体搬进映射，按上限复制字节（其后紧跟 `ret`，多余字节不会执行）。
+#[cfg(target_arch = "x86_64")]
 const STUB_COPY_BYTES: usize = 256;
 
 /// 裸适配器：设置 sentinel/`r14`/`r15`/`r11`，调用片段，再把九个整数参数寄存器与八个浮点
@@ -61,6 +74,7 @@ const STUB_COPY_BYTES: usize = 256;
 /// # Safety
 /// `state` 必须是按本文件修补后、当前契约的可执行片段所在的独占 State；宿主栈充足
 /// （片段只在 `rsp` 以下 8 字节写 return PC，由 stub 的 `ret` 回收）。
+#[cfg(target_arch = "x86_64")]
 #[unsafe(naked)]
 unsafe extern "sysv64" fn run_morestack(_state: *mut State) {
     naked_asm!(
@@ -136,6 +150,7 @@ unsafe extern "sysv64" fn run_morestack(_state: *mut State) {
 ///
 /// # Safety
 /// 只由片段在 `rbx = mailbox + 40` 时调用；观测区已映射。
+#[cfg(target_arch = "x86_64")]
 #[unsafe(naked)]
 unsafe extern "sysv64" fn switch_stub() {
     naked_asm!(
@@ -166,9 +181,14 @@ unsafe extern "sysv64" fn switch_stub() {
 }
 
 /// 宿主 VM 映射与裸适配器；与 x64_encoding bench 共用同一份实现。
+#[cfg(target_arch = "x86_64")]
 #[path = "support/vm.rs"]
 mod vm;
 
+#[cfg(not(target_arch = "x86_64"))]
+fn main() {}
+
+#[cfg(target_arch = "x86_64")]
 fn main() {
     let target = if cfg!(target_os = "windows") {
         TargetName::X86_64Windows
