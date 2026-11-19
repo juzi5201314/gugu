@@ -383,6 +383,8 @@ fragment relocation 封闭为：
 
 ### 内部 AArch64 Linux ELF64
 
+`DynamicLink`/`Import` 为同一 writer 增加显式 interpreter 和 Function/Data 的命名库及 GOT 槽；`link_dynamic`、`link_entry_dynamic` 复用原有布局、指令修补和启动数据路径。动态形式增加 PT_INTERP/PT_DYNAMIC、DT_NEEDED、dynstr/dynsym、单 bucket SysV hash 与 eager R_AARCH64_GLOB_DAT（1025）；动态表只读，导入槽在有文件内容的 RW 段。共享 RELA 表按 RELATIVE、GLOB_DAT 顺序写出，DT_RELASZ 覆盖全部记录，启动参数的 RELOC_COUNT 仅计 RELATIVE 前缀。符号名全局唯一、库依声明顺序去重，不支持 Library-only 项、符号版本、导出或 lazy PLT；interpreter/libc 来自调用方而非宿主探测。下面的无 PT_INTERP/自重定位描述指默认静态路径。
+
 `a64::elf` 是不依赖目标注册的纯库 static-PIE writer。`ElfRequest` 给出节、入口、指令重定位和绝对指针槽；复用 `macho` 的 `Section`、`SectionContent`、`Segment` 与 `Location` 容器，但 `DataConst` 在这里从装载开始就只读，RELATIVE 槽只能位于有文件内容的 `Data`。`layout` 按节大小和请求形状计算链接期虚址（同时是文件偏移），`link` 写出确定性的 `ET_DYN`、`EM_AARCH64 = 183` 镜像与 BLAKE3 指纹。此层不接入 target registry、CLI 或闭世界 image planner。
 
 程序头依次为 `PT_PHDR`、RX/R/RW 三个 `PT_LOAD` 与不可执行的 `PT_GNU_STACK`；不写 `PT_INTERP`。三个装载段按 64 KiB 对齐，RX 包含 ELF 和程序头，R 包含 `.rela.dyn` 与节表，RW 的零填充节排在有文件内容的节之后且不增加文件大小。`.rela.dyn` 每项为标准 ELF64 RELA（24 字节）：槽虚址、符号索引为零的 `R_AARCH64_RELATIVE = 1027`、目标链接期地址加 addend；没有重定位时仍保留零长度的表。重复槽、非可写或未对齐的指针槽、越界位置、布局溢出和不支持的指令重定位在写出前报错。
@@ -407,7 +409,7 @@ epoll_ctl 将调用方的打包 12 字节事件展开到原生栈，DEL 不解�
 
 `linux_signal_dispatch` 和 `linux_fd_dispatch` 共享同一信号分派生成器；前者单独处理信号 NativeRequest，后者也路由现有运行时的 14/289。13/14/289 分别调用 134/135/74；39/62/186/200/234 分别调用 172/129/178/130/131。rt_sigaction 将输入复制到 32 字节栈缓冲，清除 SA_RESTORER 位并清零 restorer；成功时才复制旧 action。文件/信号保留原始负 VALUE 并写正 ERROR，与网络 packet 的错误归零约定不同。`linux_syscall` 共享原生栈保存、比较分支、svc 和取负辅助生成器。`signal.gg::arm` 修正 signalfd4 的参数：原先把 524288 放到 sigsetsize、flags 留零；现为 size = 8、flags = 524288，避免 x64 与 arm64 内核返回 EINVAL。
 
-Linux DNS 的 `net_resolver.gg` 经 `resolver_symbol` 获得 getaddrinfo/freeaddrinfo，再使用 foreign packet 调用 libc；Linux addrinfo 的 sockaddr 在 +24、next 在 +40。取消不提前释放仍被原生调用读取的 host/hints/result；迟到结果仍须 freeaddrinfo。此路径依赖 libc 导入、foreign-call worker，内部 A64 raw-syscall 层暂不实现 resolver_symbol，也不增加另一套 UDP DNS。FP/原子片段不是当前 socket/信号系统调用的依赖；完整 worker 启动、调度、foreign 调用和目标登记仍未接通。
+Linux DNS 的 `net_resolver.gg` 经 `resolver_symbol` 获得 getaddrinfo/freeaddrinfo，再使用 foreign packet 调用 libc；Linux addrinfo 的 sockaddr 在 +24、next 在 +40。取消不提前释放仍被原生调用读取的 host/hints/result；迟到结果仍须 freeaddrinfo。内部 `linux_resolver_imports(library)` 声明两个 C 名字，`linux_resolver_symbol` 将 x0 的 0/1 映射到同名导入桩，越界陷阱；`linux_import_stub` 以 ADRP/ADD 指向 `linux_import_slot_symbol(name)` 的 GOT 槽，LDR 后 BR x16。它与 `foreign_native_worker(Platform::Linux)` 共用同名 C 桩解析；worker 还需 gettid、__errno_location 导入。`examples/a64_linux_resolver_image.rs` 通过真实 A64 packet worker 调用 musl，验证 localhost、/etc/hosts 的 resolver.test、成功结果的 freeaddrinfo 及 AI_NUMERICHOST 错误的空结果，不进入 nextest。完整 worker 线程启动、调度和目标登记仍未接通；没有另一套 UDP DNS，也未改动取消/迟到结果所有权。
 
 `examples/a64_linux_net_signal_image.rs` 手工生成通过适配器在 loopback 上 bind/listen/connect/accept、sendto/epoll/recvfrom，以及 block SIGUSR1、kill 自身、signalfd 读取的镜像；另外通过 sigaction 忽略 SIGUSR2、自发信号并恢复旧 action，同时检查网络 EINVAL/EBADF。默认 nextest 只运行解码/编码往返和确定性 syscall 替身，覆盖布局、完整 data、成功/零事件/错误、信号 action 转换和 signalfd 的运行时参数回归，不运行真实网络或子进程。
 

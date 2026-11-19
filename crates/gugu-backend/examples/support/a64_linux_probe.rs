@@ -26,6 +26,7 @@ pub struct Probe {
     request: ElfRequest,
     code: Vec<u8>,
     failures: Vec<usize>,
+    dynamic: Option<elf::DynamicLink>,
 }
 
 impl Default for Probe {
@@ -56,6 +57,7 @@ impl Probe {
             },
             code: vec![],
             failures: vec![],
+            dynamic: None,
         };
         p.emit("sub.X.imm", vec![sp(), sp(), immediate(64)]);
         for (i, n) in [21, 22, 23, 24, 25, 26, 29, 30].into_iter().enumerate() {
@@ -65,8 +67,30 @@ impl Probe {
     }
 
     pub fn fragment(&mut self, fragment: Fragment) -> Location {
-        assert!(fragment.relocations.is_empty());
+        self.symbolic_fragment(fragment, &std::collections::BTreeMap::new())
+    }
+
+    pub fn dynamic(&mut self, dynamic: elf::DynamicLink) {
+        self.dynamic = Some(dynamic);
+    }
+
+    pub fn symbolic_fragment(
+        &mut self,
+        fragment: Fragment,
+        symbols: &std::collections::BTreeMap<String, Location>,
+    ) -> Location {
         let location = at(self.request.sections.len());
+        for site in fragment.relocations {
+            self.request.relocations.push(Relocation {
+                at: Location {
+                    section: location.section,
+                    offset: u64::from(site.offset),
+                },
+                target: symbols[&site.relocation.target],
+                kind: site.relocation.kind,
+                addend: site.relocation.addend,
+            });
+        }
         self.request
             .sections
             .push(section(Segment::Text, SectionContent::Code(fragment.bytes)));
@@ -133,6 +157,12 @@ impl Probe {
     }
     pub fn load(&mut self, dst: u8, base: u8, offset: usize) {
         self.emit("ldr.X.Unsigned", vec![reg(dst), memory(base, offset)]);
+    }
+    pub fn load32(&mut self, dst: u8, base: u8, offset: usize) {
+        self.emit(
+            "ldr.W.Unsigned",
+            vec![Operand::Reg(Reg::w(dst)), memory(base, offset)],
+        );
     }
     pub fn store(&mut self, src: u8, base: u8, offset: usize) {
         self.emit("str.X.Unsigned", vec![reg(src), memory(base, offset)]);
@@ -252,18 +282,20 @@ impl Probe {
             ));
         }
         self.request.sections[0].content = SectionContent::Code(self.code);
-        let image = elf::link_entry(
-            self.request,
-            LinuxEntry {
-                rt0_start: at(0),
-                payload: at(1),
-                initial_slot: at(2),
-                processor: Location {
-                    section: 2,
-                    offset: INITIAL_SLOT_BYTES,
-                },
+        let entry = LinuxEntry {
+            rt0_start: at(0),
+            payload: at(1),
+            initial_slot: at(2),
+            processor: Location {
+                section: 2,
+                offset: INITIAL_SLOT_BYTES,
             },
-        )?;
+        };
+        let image = if let Some(dynamic) = self.dynamic {
+            elf::link_entry_dynamic(self.request, entry, &dynamic)?
+        } else {
+            elf::link_entry(self.request, entry)?
+        };
         std::fs::write(path, image.bytes)?;
         println!("wrote verification image to {path}");
         Ok(())
