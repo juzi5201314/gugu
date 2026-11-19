@@ -1,0 +1,30 @@
+//! Shared maps, sets and ordered snapshot iteration.
+use std.io.{println}
+use std.collections.{HashMap, HashSet, BTreeMap}
+fn value(item: Option[int]) int { match item { None => -1, Some(value) => value } }
+fn main() {
+    let map = HashMap[string, int]::new()
+    let one = "one"
+    let two = "two"
+    let missing = "missing"
+    println(map.is_empty())
+    _ = map.insert("one", 1)
+    println(value(map.insert("one", 11)))
+    let alias = map
+    _ = alias.insert("two", 2)
+    let saved = map.iter()
+    _ = alias.remove(&one)
+    println(map.len(), " ", value(map.get(&two)), " ", value(map.get(&missing)))
+    let sum = 0
+    while let Some((key, value)) = saved.next() { sum = sum + value }
+    println("snapshot ", sum)
+    let set = HashSet[int]::new()
+    let seven = 7
+    println(set.insert(7), " ", set.insert(7), " ", set.contains(&seven))
+    println(set.remove(&seven), " ", set.is_empty())
+    let tree = BTreeMap[int, string]::new()
+    _ = tree.insert(3, "three")
+    _ = tree.insert(1, "one")
+    _ = tree.insert(2, "two")
+    for (key, value) in tree { println(key, "=", value) }
+}

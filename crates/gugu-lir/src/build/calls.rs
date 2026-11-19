@@ -318,6 +318,20 @@ impl Builder<'_> {
         } else {
             self.address(destination)?.1
         };
+        if let Some(
+            protocol @ (crate::gir::concrete::Protocol::Eq | crate::gir::concrete::Protocol::Cmp),
+        ) = self
+            .concrete
+            .calls
+            .iter()
+            .find(|call| call.site == site && call.target.is_none())
+            .and_then(|call| call.protocol)
+        {
+            let value = self.comparison_protocol(protocol, operands, result_ty)?;
+            self.write_place(destination, value)?;
+            self.jump(self.target(normal));
+            return Ok(());
+        }
         let foreign = kind != g::CallKind::Managed;
         let mut arguments = Vec::new();
         let mut by_value = Vec::new();

@@ -6,8 +6,8 @@ use super::{ModuleBindings, ModuleId, ModuleTarget, ParsedModule, PendingImport}
 /// 直接解析，不经导入表。
 const SOURCE_PRELUDE: [(&str, &str); 8] = [
     ("Vec", "std.vec"),
-    ("HashMap", "std.collections"),
-    ("HashSet", "std.collections"),
+    ("HashMap", "std.collections.hashmap"),
+    ("HashSet", "std.collections.set"),
     ("Hasher", "std.hash"),
     ("Path", "std.path"),
     ("Duration", "std.time"),

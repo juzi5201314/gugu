@@ -1,0 +1,194 @@
+struct Node[K, V] {
+    key: K, value: V, left: Option[&Node[K, V]], right: Option[&Node[K, V]], height: int,
+}
+struct State[K, V] { root: Option[&Node[K, V]], length: int, views: int }
+pub struct BTreeMap[K, V] { state: &State[K, V] }
+pub struct BTreeEntry[K, V] { map: BTreeMap[K, V], key: K }
+struct Frame[K, V] { node: &Node[K, V], next: Option[&Frame[K, V]] }
+pub struct BTreeMapIter[K, V] { pending: Option[&Node[K, V]], stack: Option[&Frame[K, V]] }
+
+fn new_frame[K, V](node: &Node[K, V], next: Option[&Frame[K, V]]) &Frame[K, V] {
+    let result = Frame { node: node, next: next }
+    &result
+}
+fn height[K, V](root: Option[&Node[K, V]]) int {
+    match root { None => 0, Some(node) => node.height }
+}
+fn make[K, V](key: K, value: V, left: Option[&Node[K, V]], right: Option[&Node[K, V]]) &Node[K, V] {
+    let lh = height(left)
+    let rh = height(right)
+    let top = if lh > rh { lh } else { rh }
+    let node = Node { key: key, value: value, left: left, right: right,
+        height: 1 + top }
+    &node
+}
+fn rotate_left[K, V](node: &Node[K, V]) &Node[K, V] {
+    match node.right {
+        None => node,
+        Some(right) => make(right.key, right.value,
+            Some(make(node.key, node.value, node.left, right.left)), right.right),
+    }
+}
+fn rotate_right[K, V](node: &Node[K, V]) &Node[K, V] {
+    match node.left {
+        None => node,
+        Some(left) => make(left.key, left.value, left.left,
+            Some(make(node.key, node.value, left.right, node.right))),
+    }
+}
+fn balance[K, V](node: &Node[K, V]) &Node[K, V] {
+    if height(node.left) - height(node.right) > 1 {
+        if let Some(left) = node.left {
+            if height(left.left) < height(left.right) {
+                return rotate_right(make(node.key, node.value, Some(rotate_left(left)), node.right))
+            }
+        }
+        return rotate_right(node)
+    }
+    if height(node.right) - height(node.left) > 1 {
+        if let Some(right) = node.right {
+            if height(right.right) < height(right.left) {
+                return rotate_left(make(node.key, node.value, node.left, Some(rotate_right(right))))
+            }
+        }
+        return rotate_left(node)
+    }
+    node
+}
+fn find[K: Ord, V](root: Option[&Node[K, V]], key: &K) Option[&Node[K, V]] {
+    let cursor = root
+    while let Some(node) = cursor {
+        if *key < node.key { cursor = node.left }
+        else if node.key < *key { cursor = node.right }
+        else { return Some(node) }
+    }
+    None
+}
+fn put[K: Ord, V](root: Option[&Node[K, V]], key: K, value: V) &Node[K, V] {
+    let node = match root { None => return make(key, value, None, None), Some(node) => node }
+    if key < node.key {
+        balance(make(node.key, node.value, Some(put(node.left, key, value)), node.right))
+    } else if node.key < key {
+        balance(make(node.key, node.value, node.left, Some(put(node.right, key, value))))
+    } else {
+        make(node.key, value, node.left, node.right)
+    }
+}
+fn minimum[K, V](root: &Node[K, V]) &Node[K, V] {
+    let node = root
+    while let Some(left) = node.left { node = left }
+    node
+}
+fn erase[K: Ord, V](root: Option[&Node[K, V]], key: &K) Option[&Node[K, V]] {
+    let node = match root { None => return None, Some(node) => node }
+    if !(node.key < *key) && !(*key < node.key) {
+        if let None = node.left { return node.right }
+        let right = match node.right { None => return node.left, Some(right) => right }
+        let successor = minimum(right)
+        return Some(balance(make(successor.key, successor.value, node.left,
+            erase(node.right, &successor.key))))
+    }
+    if *key < node.key {
+        Some(balance(make(node.key, node.value, erase(node.left, key), node.right)))
+    } else {
+        Some(balance(make(node.key, node.value, node.left, erase(node.right, key))))
+    }
+}
+fn visit[K, V, F: Fn(&K, &V)](root: Option[&Node[K, V]], f: F) {
+    if let Some(node) = root {
+        visit(node.left, f)
+        f(&node.key, &node.value)
+        visit(node.right, f)
+    }
+}
+impl[K: Ord + StableOrd, V] BTreeMap[K, V] {
+    pub fn new() Self {
+        let state: State[K, V] = State { root: None, length: 0, views: 0 }
+        Self { state: &state }
+    }
+    pub fn len(self: &Self) int = self.state.length
+    pub fn is_empty(self: &Self) bool = self.len() == 0
+    fn writable(self: &Self) { if self.state.views != 0 { panic("map write during scoped view") } }
+    pub fn get(self: &Self, key: &K) Option[V] {
+        match find(self.state.root, key) { None => None, Some(node) => Some(node.value) }
+    }
+    pub fn contains_key(self: &Self, key: &K) bool {
+        match find(self.state.root, key) { None => false, Some(node) => true }
+    }
+    pub fn with_ref[R, F: Fn(&V) R](self: &Self, key: &K, f: F) Option[R] {
+        let node = match find(self.state.root, key) { None => return None, Some(node) => node }
+        self.state.views = self.state.views + 1
+        defer { self.state.views = self.state.views - 1 }
+        Some(f(&node.value))
+    }
+    pub fn for_each_ref[F: Fn(&K, &V)](self: &Self, f: F) {
+        self.state.views = self.state.views + 1
+        defer { self.state.views = self.state.views - 1 }
+        visit(self.state.root, f)
+    }
+    pub fn insert(self: &Self, key: K, value: V) Option[V] {
+        self.writable()
+        let old = self.get(&key)
+        if let None = old {
+            if self.state.length == 9223372036854775807 { panic("map length overflow") }
+            self.state.length = self.state.length + 1
+        }
+        self.state.root = Some(put(self.state.root, key, value))
+        old
+    }
+    pub fn remove(self: &Self, key: &K) Option[V] {
+        self.writable()
+        let old = self.get(key)
+        if let Some(value) = old {
+            self.state.root = erase(self.state.root, key)
+            self.state.length = self.state.length - 1
+        }
+        old
+    }
+    pub fn update[F: Fn(V) V](self: &Self, key: &K, f: F) bool {
+        self.writable()
+        match self.get(key) {
+            None => false,
+            Some(value) => { _ = self.insert(*key, f(value))
+                true },
+        }
+    }
+    pub fn entry(self: &Self, key: K) BTreeEntry[K, V] = BTreeEntry { map: *self, key: key }
+    pub fn iter(self: &Self) BTreeMapIter[K, V] = BTreeMapIter { pending: self.state.root, stack: None }
+}
+impl[K: Ord + StableOrd, V] BTreeEntry[K, V] {
+    pub fn and_modify[F: Fn(V) V](self: &Self, f: F) Self {
+        _ = self.map.update(&self.key, f)
+        *self
+    }
+    pub fn or_insert(self: &Self, value: V) V {
+        self.map.writable()
+        match self.map.get(&self.key) {
+            Some(old) => old,
+            None => { _ = self.map.insert(self.key, value)
+                value },
+        }
+    }
+    pub fn or_insert_with[F: Fn() V](self: &Self, f: F) V {
+        self.map.writable()
+        match self.map.get(&self.key) { Some(old) => old, None => self.or_insert(f()) }
+    }
+}
+impl[K, V] Iter for BTreeMapIter[K, V] {
+    type Item = (K, V)
+    fn next(self: &Self) Option[(K, V)] {
+        while let Some(node) = self.pending {
+            self.stack = Some(new_frame(node, self.stack))
+            self.pending = node.left
+        }
+        let frame = match self.stack { None => return None, Some(frame) => frame }
+        self.stack = frame.next
+        self.pending = frame.node.right
+        Some((frame.node.key, frame.node.value))
+    }
+}
+impl[K: Ord + StableOrd, V] IntoIter for BTreeMap[K, V] {
+    type Item = (K, V)
+    type Iter = BTreeMapIter[K, V]
+    fn into_iter(self: Self) BTreeMapIter[K, V] = self.iter()
+}
