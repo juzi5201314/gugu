@@ -277,7 +277,7 @@ fn rvalue_text(module: &hir::Module, body: &GirBody, rvalue: &Rvalue) -> String 
         Rvalue::Aggregate { kind, operands } => {
             format!("{kind:?} x{}", operands.len())
         }
-        Rvalue::Repeat { count, .. } => format!("repeat {count}"),
+        Rvalue::Repeat { count, .. } => format!("repeat {count:?}"),
         Rvalue::Discriminant(place) => format!("disc {}", place_text(module, body, *place)),
         Rvalue::Len(place) => format!("len {}", place_text(module, body, *place)),
         Rvalue::Ref(place) => format!("&{}", place_text(module, body, *place)),

@@ -175,14 +175,7 @@ impl Model<'_> {
         generics
             .as_slice(&self.modules[module].arena.generic_params)
             .iter()
-            .filter_map(|g| {
-                if let GenericParamKind::Type { name, .. } = g.kind {
-                    let name = self.name(module, name).to_owned();
-                    Some((name.clone(), Ty::Param(name)))
-                } else {
-                    None
-                }
-            })
+            .map(|g| self.generic_binding(module, &g.kind))
             .collect()
     }
     pub(super) fn generic_obligations(

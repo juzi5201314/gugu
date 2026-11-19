@@ -159,7 +159,12 @@ fn classify_size(
         hir::Type::TrySendErr | hir::Type::TryRecvErr => (PassingClass::BITS, Some(1)),
         hir::Type::Function { .. } | hir::Type::Dyn(_) => (PassingClass::IDENTITY, Some(16)),
         hir::Type::Callable { .. } => (PassingClass::IDENTITY, Some(8)),
-        hir::Type::Array(elem, count) => array_class(table, module, *elem, *count),
+        hir::Type::Array(elem, count) => count
+            .known()
+            .map_or((PassingClass::UNKNOWN, None), |count| {
+                array_class(table, module, *elem, count)
+            }),
+        hir::Type::Const(_) => (PassingClass::UNKNOWN, None),
         hir::Type::Tuple(fields) => tuple_class(table, module, fields),
         hir::Type::Option(inner) => option_class(table, module, *inner),
         hir::Type::Result(ok, err) => result_class(table, module, *ok, *err),

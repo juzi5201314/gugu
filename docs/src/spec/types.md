@@ -43,12 +43,39 @@
 
 `[]` 参数表可以混写类型参数与 `comptime` 参数，适用于 `fn`、`struct`、`enum`、`union`、`trait`、`impl`、`type`：
 
-<!-- docs-example: gap 未解析的编译期名称 -->
 ```gugu
+use std.io.{println}
+
 struct Block[T, comptime N: int] {
     data: [T; N]
 }
+
+const M: int = 4
+
+fn main() {
+    let a = Block[int, 2] { data: [0; 2] }
+    let b = Block[int, M] { data: [0; 4] }
+    println(a.data.len())
+    println(b.data.len())
+}
 ```
+<!-- docs-example: output -->
+```text
+2
+4
+```
+
+当前实现支持 `struct`、`enum`、`union` 与 `fn` 的 `int` comptime 泛型参数，
+以及 const 泛型名义类型的固有 impl。
+泛型参数在数组类型和重复字面量中均遮蔽同名模块常量。
+符号长度数组的数组模式只允许无前缀、无后缀的 rest；精确长度和最小长度模式必须等长度已知后使用。
+数组长度可直接引用参数，尚不支持 `N + 1`
+等参数算术。具体实参必须是非负整数编译期常量；类型实参与值实参不能混用。
+函数可从数组实参的长度推断 comptime 泛型参数，也可通过 `f::[int, 3](...)`
+显式指定。参数名在函数体中是 `int` 值，可用于重复数组字面量与局部数组类型。
+不同长度是不同的类型与单态化实例。数组上的 comptime 泛型 trait impl 及
+逐元素循环初始化证明仍待实现；trait 参数列表和 trait impl 的 comptime 泛型参数
+暂不支持并会报错。下面展示数组 Clone impl 的目标语义。
 
 <!-- docs-example: gap 未解析的编译期名称 -->
 ```gugu

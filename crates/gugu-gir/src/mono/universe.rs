@@ -1,7 +1,7 @@
 //! 在实例闭合期间收集类型及布局；冻结后不再访问可变语义环境。
 use super::instantiate::WalkEntry;
 use super::keys::{MonoContext, StableTypeKey};
-use crate::Diagnostic;
+use crate::{Diagnostic, DiagnosticCode};
 use crate::{
     gir::passing::PassingClass,
     hir,
@@ -11,6 +11,10 @@ use crate::{
 };
 use std::borrow::Cow;
 use std::collections::{BTreeMap, BTreeSet};
+
+fn invalid(message: &str) -> Diagnostic {
+    Diagnostic::error(DiagnosticCode::InvalidType, message, None)
+}
 
 /// 实例闭合收集结果：类型记录表与稳定键分配表。
 pub type CollectedTypes = (Vec<TypeRecord>, Vec<(u32, StableTypeKey)>);
@@ -242,6 +246,9 @@ struct Collector<'a, 'm> {
 
 impl Collector<'_, '_> {
     fn visit(&mut self, ty: &Ty) -> Result<Option<StableTypeKey>, Diagnostic> {
+        if matches!(ty, Ty::Const(_)) {
+            return Ok(None);
+        }
         let reduced = concrete(self.context, ty)?;
         let ty: &Ty = &reduced;
         let canonical = self.context.encode_type(ty)?;
@@ -270,10 +277,15 @@ impl Collector<'_, '_> {
             Ty::Float(bits) => Shape::Float(*bits),
             Ty::TypeId => Shape::TypeId,
             Ty::Tuple(ts) => Shape::Tuple(ts.iter().map(&mut add).collect::<Result<_, _>>()?),
-            Ty::Array(t, n) => Shape::Array(add(t)?, *n),
+            Ty::Array(t, n) => Shape::Array(
+                add(t)?,
+                n.known().ok_or_else(|| invalid("数组长度尚未实例化"))?,
+            ),
             Ty::Named(_, arguments) => {
                 for t in arguments {
-                    add(t)?;
+                    if !matches!(t, Ty::Const(_)) {
+                        add(t)?;
+                    }
                 }
                 let variants = context.model.variants(ty).expect("已形成名义类型");
                 let mut fields = Vec::new();
@@ -365,7 +377,7 @@ impl Collector<'_, '_> {
             Ty::String => MetadataShape::String,
             Ty::Array(inner, count) => MetadataShape::Array {
                 element: self.child_key(inner)?,
-                count: *count,
+                count: count.known().ok_or_else(|| invalid("数组长度尚未实例化"))?,
             },
             Ty::Tuple(_)
             | Ty::Named(..)
@@ -409,6 +421,7 @@ impl Collector<'_, '_> {
             | Ty::Error
             | Ty::Var(_)
             | Ty::Param(_)
+            | Ty::Const(_)
             | Ty::Projection(..)
             | Ty::Opaque(..) => MetadataShape::None,
         })

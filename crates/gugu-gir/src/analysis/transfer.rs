@@ -446,7 +446,7 @@ pub fn array_len(module: &Module, owner: &Owner, id: ExprId) -> Option<u64> {
         ty = &module.types[inner.index()];
     }
     match ty {
-        Type::Array(_, length) => Some(*length),
+        Type::Array(_, length) => length.known(),
         _ => None,
     }
 }

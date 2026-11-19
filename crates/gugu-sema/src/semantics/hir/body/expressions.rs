@@ -5,7 +5,18 @@ mod literals;
 mod paths;
 
 impl BodyBuilder<'_, '_, '_, '_> {
-    fn repeat_count(&self, count: ast::ExprId) -> Result<u64, Diagnostic> {
+    fn repeat_count(&self, count: ast::ExprId) -> Result<hir::ArrayLength, Diagnostic> {
+        let span = &self.arena().exprs[count.0 as usize].span;
+        if let ast::ExprKind::Path(path) = self.arena().exprs[count.0 as usize].kind
+            && let parts = self.compiler.model.path(self.module, path)
+            && parts.len() == 1
+            && let Some(Ty::Const(length)) =
+                self.compiler
+                    .model
+                    .const_parameter_at(self.module, span, parts[0])
+        {
+            return self.compiler.array_length(&length, self.output.definition);
+        }
         let value = match self
             .compiler
             .checked
@@ -15,7 +26,9 @@ impl BodyBuilder<'_, '_, '_, '_> {
             Some(crate::semantics::comptime::eval::ConstantValue::Int(value)) => Ok(*value),
             _ => self.compiler.model.constant_int(self.module, count),
         };
-        u64::try_from(value?).map_err(|_| self.error("已检查重复长度不在 u64 范围"))
+        u64::try_from(value?)
+            .map(hir::ArrayLength::Known)
+            .map_err(|_| self.error("已检查重复长度不在 u64 范围"))
     }
 
     pub(super) fn expression(&mut self, source: ast::ExprId) -> Result<hir::ExprId, Diagnostic> {

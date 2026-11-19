@@ -58,7 +58,7 @@ pub enum ExprKind {
     Array(Range<u32>),
     Repeat {
         value: ExprId,
-        count: u64,
+        count: super::ArrayLength,
     },
     Construct {
         variant: u32,
@@ -184,6 +184,7 @@ pub enum Res {
     Def(DefId),
     Local(LocalId),
     Primitive(TypeId),
+    ConstParameter(TypeId),
     Builtin(Builtin),
     Associated {
         definition: DefId,
@@ -241,6 +242,7 @@ pub enum CallTarget {
 #[derive(Clone, Debug, Eq, PartialEq, Serialize, Deserialize)]
 pub struct Dispatch {
     pub function: Option<DefId>,
+    pub arguments: Vec<TypeId>,
     pub implementation: Option<DefId>,
     pub interface: Option<TraitRef>,
     pub member: Option<u32>,

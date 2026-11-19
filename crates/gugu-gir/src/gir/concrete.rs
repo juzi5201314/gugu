@@ -218,7 +218,7 @@ impl ConcreteBody {
 
 fn unresolved(value: &ConstValue) -> bool {
     match value {
-        ConstValue::Definition(_) => true,
+        ConstValue::Definition(_) | ConstValue::Parameter(_) => true,
         ConstValue::Aggregate(values) => values.iter().any(unresolved),
         _ => false,
     }

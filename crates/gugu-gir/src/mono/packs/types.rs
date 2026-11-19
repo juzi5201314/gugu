@@ -1,6 +1,29 @@
 use super::*;
 
 impl Expander<'_, '_> {
+    fn length(
+        &self,
+        length: &crate::semantics::model::ArrayLength,
+    ) -> Result<hir::ArrayLength, Diagnostic> {
+        use crate::semantics::model::ArrayLength;
+        match length {
+            ArrayLength::Known(value) => Ok(hir::ArrayLength::Known(*value)),
+            ArrayLength::Param(_) => self
+                .module
+                .types
+                .iter()
+                .enumerate()
+                .find_map(|(index, ty)| {
+                    let hir::Type::Const(value) = ty else {
+                        return None;
+                    };
+                    (self.context.semantic_type(hir::TypeId(index as u32)).ok()
+                        == Some(&Ty::Const(length.clone())))
+                    .then_some(*value)
+                })
+                .ok_or_else(|| invalid("comptime 参数没有 HIR 身份")),
+        }
+    }
     pub(super) fn intern(&mut self, ty: hir::Type) -> hir::TypeId {
         if let Some(id) = self.intern.get(&ty) {
             return *id;
@@ -40,7 +63,8 @@ impl Expander<'_, '_> {
             Ty::Ref(t) => T::Ref(self.ty(t)?),
             Ty::Ptr(t) => T::Ptr(self.ty(t)?),
             Ty::Slice(t) => T::Slice(self.ty(t)?),
-            Ty::Array(t, n) => T::Array(self.ty(t)?, *n),
+            Ty::Array(t, n) => T::Array(self.ty(t)?, self.length(n)?),
+            Ty::Const(n) => T::Const(self.length(n)?),
             Ty::Tuple(ts) => T::Tuple(self.types(ts)?),
             Ty::Function(ps, r) => T::Function {
                 parameters: self.types(ps)?,

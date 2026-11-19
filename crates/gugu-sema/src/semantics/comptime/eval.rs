@@ -17,6 +17,8 @@ use crate::query::{QueryEngine, QueryKey, QueryKind};
 use crate::source::{ExpansionId, SourceMap, SourceSlot, SourceSnapshot};
 use crate::string;
 use crate::{Diagnostic, DiagnosticCode};
+mod arguments;
+mod generics;
 
 /// ParseSource query 的 schema 版本。
 pub const PARSE_SOURCE_SCHEMA_VERSION: u32 = 1;
@@ -160,6 +162,9 @@ pub(super) struct EvalState<'a> {
     frames: Vec<Vec<(String, ConstantValue)>>,
     /// 函数与常量初始化只访问自身词法帧，不可读取调用者局部槽。
     frame_bases: Vec<usize>,
+    const_arguments: Vec<BTreeMap<String, Option<ConstantValue>>>,
+    runtime_parameters: Vec<Vec<usize>>,
+    masked_runtime_base: Option<usize>,
     /// SourceExpand 域的插入上下文与 query 访问；其它域为空。
     expand: Option<ExpandState<'a>>,
     /// `embed_file` 的编译输入根；无文件系统边界的输入为空。
@@ -186,6 +191,9 @@ impl<'a> EvalState<'a> {
             const_stack: Vec::new(),
             frames: Vec::new(),
             frame_bases: Vec::new(),
+            const_arguments: Vec::new(),
+            runtime_parameters: Vec::new(),
+            masked_runtime_base: None,
             expand: None,
             embed: None,
         }
@@ -234,6 +242,8 @@ impl<'a> EvalState<'a> {
         self.calls.push(name.to_owned());
         self.frame_bases.push(self.frames.len());
         self.frames.push(Vec::new());
+        self.const_arguments.push(BTreeMap::new());
+        self.runtime_parameters.push(Vec::new());
         Ok(())
     }
 
@@ -242,6 +252,8 @@ impl<'a> EvalState<'a> {
         self.calls.pop();
         self.frames.pop();
         self.frame_bases.pop();
+        self.const_arguments.pop();
+        self.runtime_parameters.pop();
     }
 
     fn bind(&mut self, name: String, value: ConstantValue) {
@@ -256,18 +268,17 @@ impl<'a> EvalState<'a> {
         name: &str,
         span: &crate::Span,
     ) -> Result<Option<ConstantValue>, Diagnostic> {
-        let base = self.frame_bases.last().copied().unwrap_or(0);
-        let slot = self.frames[base..]
-            .iter()
-            .enumerate()
-            .rev()
-            .find_map(|(frame, values)| {
-                values
-                    .iter()
-                    .rposition(|(bound, _)| bound == name)
-                    .map(|slot| (base + frame, slot))
-            });
-        let Some((frame, slot)) = slot else {
+        let Some((frame, slot)) = self.slot(name) else {
+            if self
+                .const_arguments
+                .last()
+                .is_some_and(|arguments| matches!(arguments.get(name), Some(None)))
+            {
+                return Err(capability_error(
+                    span,
+                    "早期求值 const 泛型调用需要显式 ::[...] const 实参".to_owned(),
+                ));
+            }
             return Ok(None);
         };
         self.alloc(self.frames[frame][slot].1.heap_bytes(), span)?;
@@ -275,13 +286,30 @@ impl<'a> EvalState<'a> {
     }
 
     fn slot_mut(&mut self, name: &str) -> Option<&mut ConstantValue> {
+        let (frame, slot) = self.slot(name)?;
+        Some(&mut self.frames[frame][slot].1)
+    }
+
+    fn slot(&self, name: &str) -> Option<(usize, usize)> {
         let base = self.frame_bases.last().copied().unwrap_or(0);
+        let excluded = self
+            .runtime_parameters
+            .last()
+            .filter(|_| self.masked_runtime_base == Some(base));
         self.frames[base..]
-            .iter_mut()
+            .iter()
+            .enumerate()
             .rev()
-            .flat_map(|frame| frame.iter_mut().rev())
-            .find(|(bound, _)| bound == name)
-            .map(|(_, value)| value)
+            .find_map(|(frame, values)| {
+                values
+                    .iter()
+                    .enumerate()
+                    .rfind(|(slot, (bound, _))| {
+                        bound == name
+                            && (frame != 0 || !excluded.is_some_and(|slots| slots.contains(slot)))
+                    })
+                    .map(|(slot, _)| (base + frame, slot))
+            })
     }
 
     fn with_scope<T, E>(&mut self, run: impl FnOnce(&mut Self) -> Result<T, E>) -> Result<T, E> {
@@ -1209,10 +1237,34 @@ impl Model<'_> {
         if segments == ["panic"] {
             return self.comptime_panic(module, args, &span, state);
         }
+        if state.domain == Domain::SOURCE_EXPAND && matches!(segments.as_slice(), ["Ok"] | ["Err"])
+        {
+            let arguments = self.value_list(module, args, state)?;
+            if arguments.len() != 1 {
+                return Err(self.fail(module, expression, "构造器实参数量不符"));
+            }
+            state.alloc(64u64.saturating_add(arguments[0].heap_bytes()), &span)?;
+            let payload = Box::new(arguments[0].clone());
+            return Ok(if segments == ["Ok"] {
+                ConstantValue::ResultOk(payload)
+            } else {
+                ConstantValue::ResultErr(payload)
+            });
+        }
         self.check_capability(module, &segments, &span, state)?;
         if let Some(value) = self.src_builtin(module, expression, &segments, args, &span)? {
             return Ok(value);
         }
+        let definition = self.resolve(module, &segments);
+        let generics = if let Ok(def) = &definition
+            && matches!(
+                self.modules[def.module].arena.items[def.item.0 as usize].kind,
+                ItemKind::Function(_)
+            ) {
+            self.call_const_arguments(module, expression, *def, state)?
+        } else {
+            BTreeMap::new()
+        };
         let arguments = self.value_list(module, args, state)?;
         if let Some(value) =
             self.embed_builtin(module, expression, &segments, &arguments, &span, state)?
@@ -1225,16 +1277,16 @@ impl Model<'_> {
         {
             return Ok(value);
         }
-        let def = self
-            .resolve(module, &segments)
-            .map_err(|_| self.fail(module, expression, "无法在编译期解析被调函数"))?;
+        let def =
+            definition.map_err(|_| self.fail(module, expression, "无法在编译期解析被调函数"))?;
         if !matches!(
             self.modules[def.module].arena.items[def.item.0 as usize].kind,
             ItemKind::Function(_)
         ) {
             return Err(self.fail(module, expression, "被调端点不是函数"));
         }
-        self.interpret_function(def, &arguments, &span, state)
+        self.check_const_array_arguments(def, &arguments, &generics, &span)?;
+        self.interpret_function(def, &arguments, &generics, &span, state)
     }
 
     /// `std.src.file`/`line`/`column` 的内建求值：折叠为调用表达式的
@@ -1310,7 +1362,7 @@ impl Model<'_> {
         )))
     }
 
-    /// SourceExpand 域的内建调用：`std.syntax.parse_*` 解析闸门与 `Ok`/`Err` 构造。
+    /// SourceExpand 域的内建调用：`std.syntax.parse_*` 解析闸门。
     ///
     /// 返回 `None` 表示不是内建，沿普通调用路径继续。解析闸门把生成文本经
     /// `ParseSource` query 送入主 lexer/parser；失败返回 `Err(SyntaxError)`
@@ -1324,18 +1376,6 @@ impl Model<'_> {
         span: &crate::Span,
         state: &mut EvalState,
     ) -> EvalResult<Option<ConstantValue>> {
-        match segments {
-            ["Ok"] | ["Err"] if arguments.len() == 1 => {
-                state.alloc(64u64.saturating_add(arguments[0].heap_bytes()), span)?;
-                let payload = Box::new(arguments[0].clone());
-                return Ok(Some(if segments == ["Ok"] {
-                    ConstantValue::ResultOk(payload)
-                } else {
-                    ConstantValue::ResultErr(payload)
-                }));
-            }
-            _ => {}
-        }
         let canonical = self.external_path(module, segments);
         let Some(canonical) = canonical else {
             return Ok(None);
@@ -1465,6 +1505,7 @@ impl Model<'_> {
         &self,
         def: DefRef,
         arguments: &[ConstantValue],
+        generics: &BTreeMap<String, Option<ConstantValue>>,
         span: &crate::Span,
         state: &mut EvalState,
     ) -> EvalResult<ConstantValue> {
@@ -1489,6 +1530,12 @@ impl Model<'_> {
             FnBody::Eq(body) | FnBody::Block(body) => body,
         };
         state.enter(&name, span)?;
+        *state.const_arguments.last_mut().expect("函数帧已进入") = generics.clone();
+        for (name, value) in generics {
+            if let Some(value) = value {
+                state.bind(name.clone(), value.clone());
+            }
+        }
         let result = self
             .bind_parameters(def.module, function, arguments, state)
             .map_err(EvalError::from)
@@ -1529,7 +1576,16 @@ impl Model<'_> {
             let Some(pat) = param.pat else {
                 return Err(self.error(module, "comptime 调用的参数缺少绑定模式"));
             };
+            let start = state.frames.last().expect("函数参数帧").len();
             self.bind_pattern(module, pat, value, state)?;
+            if !param.comptime {
+                let end = state.frames.last().expect("函数参数帧").len();
+                state
+                    .runtime_parameters
+                    .last_mut()
+                    .expect("函数参数帧")
+                    .extend(start..end);
+            }
         }
         if bound != arguments.len() {
             return Err(self.error(module, "comptime 调用实参数量不符"));

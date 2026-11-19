@@ -319,8 +319,30 @@ impl<'a> MonoContext<'a> {
             }
             Ty::Array(inner, length) => {
                 out.extend_from_slice(&13u16.to_le_bytes());
-                encode_u64(out, *length);
+                encode_u64(
+                    out,
+                    length.known().ok_or_else(|| {
+                        crate::Diagnostic::error(
+                            crate::DiagnosticCode::InvalidType,
+                            "数组长度尚未实例化",
+                            None,
+                        )
+                    })?,
+                );
                 self.encode_type_into(inner, out)?;
+            }
+            Ty::Const(length) => {
+                out.extend_from_slice(&40u16.to_le_bytes());
+                encode_u64(
+                    out,
+                    length.known().ok_or_else(|| {
+                        Diagnostic::error(
+                            DiagnosticCode::InvalidType,
+                            "comptime 参数尚未实例化",
+                            None,
+                        )
+                    })?,
+                );
             }
             Ty::Tuple(parts) => {
                 out.extend_from_slice(&14u16.to_le_bytes());

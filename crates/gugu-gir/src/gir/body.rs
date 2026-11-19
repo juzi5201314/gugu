@@ -8,7 +8,7 @@ use serde::{Deserialize, Serialize};
 use std::ops::Range;
 
 /// GIR schema revision（见 gir-lir.md「共同表示规则」）。
-pub const GIR_REVISION: u32 = 7;
+pub const GIR_REVISION: u32 = 8;
 
 macro_rules! ids {
     ($($name:ident),* $(,)?) => { $(
@@ -241,6 +241,7 @@ pub enum ConstValue {
     Type([u8; 32]),
     /// 模块级常量或关联常量项；单态化物化其规范值。
     Definition(DefId),
+    Parameter(TypeId),
     /// 非法但类型正确的占位不存在：`Never` 只用于 `!` 类型槽的初始化标记。
     Never,
 }
@@ -347,7 +348,7 @@ pub enum Rvalue {
     },
     Repeat {
         operand: Operand,
-        count: u64,
+        count: hir::ArrayLength,
     },
     Discriminant(Place),
     Len(Place),

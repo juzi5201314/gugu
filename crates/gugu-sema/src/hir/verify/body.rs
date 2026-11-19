@@ -145,6 +145,9 @@ impl Module {
                 Res::Def(id) => self.definition(*id),
                 Res::Local(id) => id.index() < owner.locals.len(),
                 Res::Primitive(id) => self.ty(*id),
+                Res::ConstParameter(id) => {
+                    matches!(self.types.get(id.index()), Some(Type::Const(_)))
+                }
                 Res::Builtin(_) => true,
                 Res::Associated {
                     definition,
@@ -162,7 +165,7 @@ impl Module {
             ExprKind::Tuple(list) | ExprKind::Array(list) => {
                 ids(list) && expressions(list).iter().copied().all(&mut edge)
             }
-            ExprKind::Repeat { value, .. } => edge(*value),
+            ExprKind::Repeat { value, count } => edge(*value) && self.array_length(count),
             ExprKind::Construct { fields, .. } => {
                 range(fields, owner.fields.len())
                     && owner.fields[fields.start as usize..fields.end as usize]
@@ -489,6 +492,7 @@ impl Module {
                     .is_some_and(|interface| !self.trait_ref(interface))
                 || !self.ty(dispatch.self_ty)
                 || !self.ty(dispatch.signature)
+                || dispatch.arguments.iter().any(|ty| !self.ty(*ty))
                 || dispatch.dynamic
                     && (dispatch.function.is_some()
                         || dispatch.interface.is_none()

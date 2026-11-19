@@ -337,7 +337,13 @@ fn type_references(module: &hir::Module, id: hir::TypeId) -> (Vec<hir::TypeId>, 
         | Type::Chan(inner)
         | Type::Join(inner)
         | Type::MaybeUninit(inner) => types.push(*inner),
-        Type::Array(inner, _) => types.push(*inner),
+        Type::Array(inner, length) => {
+            types.push(*inner);
+            if let hir::ArrayLength::Param((owner, _)) = length {
+                definitions.push(*owner);
+            }
+        }
+        Type::Const(hir::ArrayLength::Param((owner, _))) => definitions.push(*owner),
         Type::Tuple(items) => types.extend(items.iter().copied()),
         Type::Function { parameters, result } => {
             types.extend(parameters.iter().copied());
@@ -404,6 +410,7 @@ pub fn owner_dependency_fingerprint(module: &hir::Module, owner: &hir::Owner) ->
     for dispatch in &owner.dispatches {
         types.insert(dispatch.self_ty);
         types.insert(dispatch.signature);
+        types.extend(dispatch.arguments.iter().copied());
         definitions.extend(dispatch.function);
         definitions.extend(dispatch.implementation);
     }

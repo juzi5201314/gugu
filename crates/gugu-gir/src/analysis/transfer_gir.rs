@@ -468,10 +468,12 @@ fn seed_local_array_len(
     if let hir::Type::Ref(inner) = ty {
         ty = &module.types[inner.index()];
     }
-    if let hir::Type::Array(_, length) = ty {
+    if let hir::Type::Array(_, length) = ty
+        && let Some(length) = length.known()
+    {
         state.set_range(
             ValueKey::LocalLen(local),
-            Interval::point(i128::from(*length)),
+            Interval::point(i128::from(length)),
         );
     }
 }

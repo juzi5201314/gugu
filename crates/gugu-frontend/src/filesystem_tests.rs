@@ -1,6 +1,7 @@
 //! 执行真实文件/资源函数的 LIR；地址是 Vec 下标，外部操作通过显式钩子注入。
 mod a64_binding;
 mod collections;
+mod const_generics;
 mod copy;
 mod debug_builders;
 mod docs_examples;

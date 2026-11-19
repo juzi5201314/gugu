@@ -342,12 +342,13 @@ impl Builder<'_> {
             } => self.closure(*definition, ty, true, None),
             Rvalue::Aggregate { kind, operands } => self.aggregate(kind, operands, ty),
             Rvalue::Repeat { operand, count } => {
+                let count = count.known().expect("具体 GIR 的数组长度已实例化");
                 let address = self.temporary(ty)?;
-                if *count != 0 {
+                if count != 0 {
                     let value = self.operand(operand)?;
                     let source = self.computed_address(value)?;
                     let descriptor = self.descriptor(ty);
-                    let count = self.constant(*count, Type::I64);
+                    let count = self.constant(count, Type::I64);
                     self.runtime(
                         RuntimeCall::ValueRepeat,
                         &[address, source, count, descriptor],

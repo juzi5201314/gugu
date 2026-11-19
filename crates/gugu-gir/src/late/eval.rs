@@ -103,11 +103,18 @@ impl<'p, 'a> Evaluator<'p, 'a> {
                         .collect::<Result<_, _>>()?,
                 ))
             }
-            ExprKind::Repeat { value, count } => {
-                self.allocate(usize::try_from(*count).map_err(|_| budget())?)?;
+            ExprKind::Repeat { value, .. } => {
+                let key = self
+                    .program
+                    .ty(frame.instance, owner.expression_types[id.index()])?;
+                let count = match &self.program.world.universe.record(&key)?.shape {
+                    Shape::Array(_, count) => *count,
+                    _ => return Err(invalid("late repeat 缺少实例化数组类型")),
+                };
+                self.allocate(usize::try_from(count).map_err(|_| budget())?)?;
                 Ok(Value::Aggregate(vec![
                     self.value(frame, *value)?;
-                    *count as usize
+                    count as usize
                 ]))
             }
             ExprKind::Construct { fields, .. } => {

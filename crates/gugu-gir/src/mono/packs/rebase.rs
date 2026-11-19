@@ -121,7 +121,7 @@ impl Expander<'_, '_> {
         match kind {
             E::Resolved(r) => match r {
                 hir::Res::Local(l) => m.local(l),
-                hir::Res::Primitive(t) => self.rebind(t, bindings)?,
+                hir::Res::Primitive(t) | hir::Res::ConstParameter(t) => self.rebind(t, bindings)?,
                 hir::Res::Associated {
                     self_ty, interface, ..
                 } => {
