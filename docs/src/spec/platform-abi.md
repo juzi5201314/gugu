@@ -359,6 +359,14 @@ macOS 的 C 导入声明使用 C 名字，由写出器加一个前导下划线�
 
 Linux 文件请求中的 stat 输出缓冲为调用方提供的至少 144 字节有效可写原生内存，使用 x86_64 kernel stat 布局；arm64 适配器在系统调用成功后规范化原生 stat，失败不改写调用方缓冲。mode/size 与修改时间秒/纳秒分别位于 +24/+48/+88/+96，运行时由这些偏移构造文件元数据；内核目录项沿用 Linux dirent64 布局，无需转换。内部片段不登记公开目标或接通完整编译路径。
 
+内部 aarch64 Linux 网络适配器沿用 `net_call` 协议：x0 = 操作号，x1 = 128 字节网络请求地址，九个参数槽后接 +72 的 value 和 +80 的 error；这不是 `NativeRequest` 布局。操作 0–10、21–25 分别为 socket、setsockopt、bind、listen、accept4、getsockname、getpeername、close、epoll_create1、epoll_ctl、epoll_wait、connect、shutdown、getsockopt、recvfrom、sendto，参数顺序保持 Linux runtime 原样。操作 19 返回同一片段内的 C ABI 关闭回调，接收 x0 = fd、返回正 errno 或 0。网络调用成功返回并存储 value，失败 value = 0、error = 正 errno，未支持操作返回 EINVAL。所有系统调用经 x8 和 `svc #0`，不引入 C 导入。
+
+网络请求维持 x86_64 打包 epoll_event 协议（12 字节，events +0、data +4）；适配器在原生栈上转换为 arm64 的 16 字节布局（data +8），epoll_wait 经 epoll_pwait 且不临时改动信号掩码。每次至多返回 128 个事件（不超过请求 maxevents）；非正 maxevents 返回 EINVAL。超时、EINTR 和其他错误保持现有 Linux 语义。sockaddr、socket flags、选项和 Linux errno 沿用现有协议；所有被读取或写入的非空原生缓冲由调用方保证有效。
+
+内部 aarch64 Linux 信号适配器接收 `NativeRequest*`，支持 x86_64 请求号 13/14/289 的 rt_sigaction/rt_sigprocmask/signalfd4，以及 39/62/186/200/234 的 getpid/kill/gettid/tkill/tgkill。文件 worker 同样接受并分派这组请求，使现有 signal runtime 的 mask/signalfd 请求无需改变路由。signalfd4 参数为 fd、mask、sigsetsize（8）、flags；rt_sigaction 的 32 字节 kernel action 为 handler、flags、restorer、mask，arm64 不需要 x86_64 的 SA_RESTORER，适配器清除此输入位并使用 arm64 内核返回路径。新 action 和旧 action 缓冲由调用方保证有效；失败不复制旧 action。信号编号和 signalfd_siginfo 与 Linux runtime 一致；订阅、投递队列和 worker 线程管理仍由 runtime 负责。
+
+Linux resolver 当前不是运行时 UDP DNS：它使用 resolver_symbol(0/1) 的 libc getaddrinfo/freeaddrinfo 地址，通过 operation = ~uint(0) 的 foreign worker 调用，保留系统地址顺序和取消后释放迟到结果的契约。内部 aarch64 raw-syscall 镜像尚无 libc 导入和 foreign-call worker，因此此阶段不接通 resolver，也不以自建 DNS 或静默返回空结果替代；不新增 resolver 占位入口或公开目标。
+
 static PIE自重定位、PE header字段、section排序和 archive编码见[后端内部规范](../internals/backend.md)，不得在该文档扩展本节公开镜像面。
 
 ### 入口、重定位与 TLS {#entry-relocation-tls}
