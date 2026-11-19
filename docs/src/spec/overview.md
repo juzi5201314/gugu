@@ -66,6 +66,13 @@ fn inc(i: int) int = i + 1
 pub fn bar() string = "bar"
 ```
 
+输出：
+
+<!-- docs-example: output -->
+```text
+i = 0i + 1 = 1bar
+```
+
 `use green` 只引入模块名；要打散写 `use green.{bar}`。插值必须写 `f"value={name}"`。`println` 的多参数各类型可以不同，在调用点单态化（异构参数包）。
 
 ## 源文件

@@ -8,6 +8,9 @@
 控制流头部的最外层 `{` 开始其 body，因此直接在 `if`/`while` 条件、`match` 被匹配值或 `for` 迭代值中使用记录构造时，需要用括号消歧，例如 `for x in (Counter {}) { ... }`。括号、调用实参和下标等嵌套分隔范围内没有这一歧义，允许正常书写记录构造。
 
 ```gugu
+use std.io.{print}
+use std.io as io2
+
 fn demo(i: int) {
     let x = if i <= 1 {
         print(f"i = {i}")
@@ -79,6 +82,7 @@ fn demo(
 
 `try { ... }` 是表达式。块里的 `?` 把失败交给这个块，而不是 `return` 出函数。
 
+<!-- docs-example: parse -->
 ```gugu
 fn demo() {
     let r = try {
@@ -135,6 +139,7 @@ while let Some(x) = it.next() { ... }
 
 ## `defer` {#defer}
 
+<!-- docs-example: parse -->
 ```gugu
 fn demo(f: File) {
     defer f.close()
@@ -229,6 +234,7 @@ fn println[Ts: Print...](...args: Ts)
 
 操作数必须实现 `Try`。出口是最内层 `try`，否则最内层函数/闭包，见 [接口 · Try](traits.md)。
 
+<!-- docs-example: parse -->
 ```gugu
 fn load() Result[int, IoError] {
     let f = open("a")?
@@ -240,6 +246,7 @@ fn load() Result[int, IoError] {
 
 `async` **不是** Rust/JS 那种把函数变成 Future、需要 `.await` 传染的关键字。任意普通 `fn` 里都可以 `recv` / `wait`。`async` 只表示：**把后面这块工作放到新协程上跑**。
 
+<!-- docs-example: parse -->
 ```gugu
 fn demo(i: int) {
     async f(i)
@@ -261,6 +268,8 @@ fn demo(i: int) {
 `chan[T]` 的发送/接收是编译器认识的方法，不能由用户重载：
 
 ```gugu
+use std.io.{print}
+
 fn demo(ch: chan[int], h: Join[int], x: int) {
     ch.send(x)
     let r = ch.recv()
