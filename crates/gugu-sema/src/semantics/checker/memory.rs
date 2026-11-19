@@ -73,6 +73,9 @@ impl Checker<'_, '_> {
             }
             let actual = self.place(args[0], false);
             self.unify(&actual, &value, span);
+            if !self.require_mutable_binding(self.place_root(args[0]), span) {
+                return Some(Ty::Error);
+            }
             self.address_taken(args[0]);
             let result = Ty::Ptr(Box::new(value.clone()));
             self.memory_operations.push(MemoryOperation {

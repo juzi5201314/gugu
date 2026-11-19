@@ -44,11 +44,15 @@ comptime 宏则运行一段编译期脚本，生成源码文本，再把文本�
 只有单段裸名引用才视为 comptime 泛型参数；`Mod.C` 这样的限定常量路径不因首段与泛型参数同名而改变含义。
 方法调用 `value.method::[3]()` 也保留显式 comptime 泛型实参，即使参数只在方法体中使用。
 延后常量求值中的重复数组使用当前具体实例的数组长度，包括零长度实例。
-普通参数表中的 `comptime n` 在调用处接收常量；将它用于 `[T; n]` 等依赖类型仍待实现。
+普通参数表中的 `comptime n: int` 在调用处接收常量，并可在同一签名和函数体的数组长度中使用。
+用于类型的值参数按声明身份区分，不能赋值、借用（包括方法接收者的隐式借用），也不能用 `addr_of` 取其原始地址；
+数组长度仍须为非负整数，不能在类型中对参数做算术。
+方法的值参数遵循相同规则，返回数组的长度由每次调用绑定的常量决定。
+转发值实参或独立长度名外的括号不改变常量绑定，也不允许在类型中进行参数算术。
 它与泛型参数列表中的 `comptime N` 不同，后者通过泛型实参或数组长度推断绑定。
 
-<!-- docs-example: gap 未解析的编译期名称 -->
 ```gugu
+use std.io.{println}
 fn repeat[T](comptime n: int, x: T) [T; n] {
     let a: [T; n]
     for i in 0..n {
@@ -59,10 +63,15 @@ fn repeat[T](comptime n: int, x: T) [T; n] {
 
 const N: int = 4
 
-fn demo() {
+fn main() {
     let xs = repeat(N, 1)
-    _ = xs
+    println(xs[3])
 }
+```
+
+<!-- docs-example: output -->
+```text
+1
 ```
 
 `repeat(N, 1)` 靠实参推断 `T`。要显式写类型实参时用 `repeat::[int](N, 1)`，禁止

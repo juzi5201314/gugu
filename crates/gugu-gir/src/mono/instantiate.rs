@@ -9,7 +9,7 @@ use crate::{ast, hir};
 use serde::{Deserialize, Serialize};
 use std::collections::{BTreeMap, BTreeSet};
 
-pub const INSTANCE_SCHEMA: u32 = 9;
+pub const INSTANCE_SCHEMA: u32 = 10;
 
 /// 调用位点使用 owner 内的确定性编号，不把定义级 callee 当作实例身份。
 #[derive(Clone, Copy, Debug, Eq, PartialEq, Ord, PartialOrd, Serialize, Deserialize)]
@@ -716,10 +716,12 @@ fn instance_key(
             let value = length
                 .known()
                 .ok_or_else(|| inconsistency("comptime 泛型参数尚未实例化"))?;
-            const_arguments.push(super::types::encode_constant(
-                context,
-                &crate::semantics::comptime::eval::ConstantValue::Int(i128::from(value)),
-            )?);
+            if !name.starts_with("$value-const:") {
+                const_arguments.push(super::types::encode_constant(
+                    context,
+                    &crate::semantics::comptime::eval::ConstantValue::Int(i128::from(value)),
+                )?);
+            }
         } else {
             type_arguments.push(interner.intern_type(context.encode_type(&argument)?)?);
         }
@@ -893,11 +895,16 @@ fn constant_arguments(
         let ty = signature
             .get(position)
             .ok_or_else(|| inconsistency("comptime 实参缺少签名类型"))?;
-        let value = context.model.eval_early_const(
-            module,
-            ast::ExprId(u32::try_from(index).expect("AST 编号不超过 u32")),
-            ty,
-        )?;
+        let expression = ast::ExprId(u32::try_from(index).expect("AST 编号不超过 u32"));
+        let symbolic = context.model.scoped_array_length(module, expression).ok();
+        let bound = symbolic
+            .map(|length| length.substitute(&entry.bindings))
+            .and_then(|length| length.known());
+        let value = if let Some(value) = bound {
+            crate::semantics::comptime::eval::ConstantValue::Int(i128::from(value))
+        } else {
+            context.model.eval_early_const(module, expression, ty)?
+        };
         constants.push(super::types::encode_constant(context, &value)?);
     }
     Ok(constants)

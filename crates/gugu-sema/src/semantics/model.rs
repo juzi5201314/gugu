@@ -493,6 +493,12 @@ impl<'a> Model<'a> {
                 let (name, ty) = self.generic_binding(module, &param.kind);
                 params.insert(name, ty);
             }
+            for (_, name, identity) in self.value_const_parameters(CallableId {
+                module,
+                function: index as u32,
+            }) {
+                params.insert(name, Ty::Const(ArrayLength::Param(identity)));
+            }
         }
         params
     }
@@ -503,6 +509,19 @@ impl<'a> Model<'a> {
         // 关联类型路径是由 Self 推导的查找缓存，不构成独立实例参数。
         context.retain(|name, _| !name.starts_with("Self::"));
         context
+            .into_iter()
+            .map(|(name, ty)| {
+                let name = match &ty {
+                    Ty::Const(ArrayLength::Param(identity))
+                        if identity.starts_with("$value-const:") =>
+                    {
+                        identity.clone()
+                    }
+                    _ => name,
+                };
+                (name, ty)
+            })
+            .collect()
     }
 
     pub(super) fn form_argument(

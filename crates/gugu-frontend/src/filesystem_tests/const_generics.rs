@@ -1,6 +1,227 @@
 use super::{CompileRequest, Compiler, TargetName, printing::output};
 
 #[test]
+fn dependent_value_parameters_forward_parenthesized_constants() {
+    let bytes: Vec<_> = output(
+        r#"
+use std.io.{println}
+fn g(comptime n: int) [int; n] { [9; n] }
+fn f(comptime n: int) [int; n] { g(((n))) }
+const EARLY: [int; 2] = f(2)
+fn main() {
+    let a = f(3)
+    let empty: [int; 0] = f(0)
+    _ = empty
+    println(EARLY[1])
+    println(a[2])
+}
+"#,
+        &[],
+    )
+    .into_iter()
+    .flat_map(|(_, bytes)| bytes)
+    .collect();
+    assert_eq!(bytes, b"9\n9\n");
+}
+
+#[test]
+fn early_dependent_array_arguments_check_parenthesized_lengths() {
+    let compiled = Compiler::shared().compile(CompileRequest::single_file(
+        "main.gg",
+        r#"
+fn take(comptime n: int, a: [int; ((n))]) int { a[0] }
+const VALUE: int = comptime source {
+    let value = take(2, [1, 2, 3])
+    std.syntax.parse_source(f"{value}")
+}
+fn main() { _ = VALUE }
+"#,
+        TargetName::X86_64Linux,
+    ));
+    assert!(!compiled.is_success());
+    assert!(
+        compiled
+            .diagnostics()
+            .items()
+            .iter()
+            .any(|diagnostic| diagnostic
+                .message()
+                .contains("数组实参长度与参数长度不一致")),
+        "{:?}",
+        compiled.diagnostics().items()
+    );
+}
+
+#[test]
+fn dependent_value_parameter_method_dispatch_uses_bound_signature() {
+    let bytes: Vec<_> = output(
+        r#"
+use std.io.{println}
+struct S {}
+impl S { fn f(self: &Self, comptime n: int) [int; n] { [7; n] } }
+fn main() { let s = S {}
+    let a = s.f(2)
+    let b = s.f(3)
+    let empty: [int; 0] = s.f(0)
+    _ = empty
+    println(a[1])
+    println(b[2]) }
+"#,
+        &[],
+    )
+    .into_iter()
+    .flat_map(|(_, bytes)| bytes)
+    .collect();
+    assert_eq!(bytes, b"7\n7\n");
+}
+
+#[test]
+fn dependent_value_parameters_reject_implicit_receiver_borrows() {
+    let compiled = Compiler::shared().compile(CompileRequest::single_file(
+        "main.gg",
+        r#"
+trait Change { fn change(self: &Self) }
+impl Change for int { fn change(self: &Self) { *self = 1 } }
+fn f(comptime n: int) [int; n] { n.change()
+    [0; n] }
+fn main() { _ = f(2) }
+"#,
+        TargetName::X86_64Linux,
+    ));
+    assert!(!compiled.is_success());
+    assert!(
+        compiled
+            .diagnostics()
+            .items()
+            .iter()
+            .any(|diagnostic| diagnostic.message().contains("不能赋值或借用")),
+        "{:?}",
+        compiled.diagnostics().items()
+    );
+}
+
+#[test]
+fn dependent_value_parameter_instances_use_values_and_survive_cache_hits() {
+    let compile = |n| {
+        let source = format!(
+            "fn f(comptime n: int) [int; n] {{ [0; n] }}\nfn main() {{ _ = f(2)\n _ = f({n}) }}"
+        );
+        let compiled = Compiler::shared().compile(CompileRequest::single_file(
+            "main.gg",
+            source,
+            TargetName::X86_64Linux,
+        ));
+        assert!(
+            compiled.is_success(),
+            "{:?}",
+            compiled.diagnostics().items()
+        );
+        compiled
+    };
+    let same = compile(2);
+    let distinct = compile(3);
+    let warm = compile(3);
+    assert_eq!(
+        same.image_plan().unwrap().mono_instance_count() + 1,
+        distinct.image_plan().unwrap().mono_instance_count()
+    );
+    assert_eq!(
+        distinct.image_plan().unwrap().mono_graph_fingerprint(),
+        warm.image_plan().unwrap().mono_graph_fingerprint()
+    );
+}
+
+#[test]
+fn dependent_value_parameter_cannot_be_mutated_or_borrowed() {
+    for statement in ["n = 1", "_ = &n", "_ = std.ptr.addr_of((n))"] {
+        let source = format!(
+            "fn f(comptime n: int) [int; n] {{ {statement}\n [0; n] }}\nfn main() {{ _ = f(2) }}"
+        );
+        let compiled = Compiler::shared().compile(CompileRequest::single_file(
+            "main.gg",
+            source,
+            TargetName::X86_64Linux,
+        ));
+        assert!(!compiled.is_success());
+        assert!(
+            compiled
+                .diagnostics()
+                .items()
+                .iter()
+                .any(|diagnostic| diagnostic.message().contains("不能赋值或借用")),
+            "{:?}",
+            compiled.diagnostics().items()
+        );
+    }
+}
+
+#[test]
+fn dependent_value_parameters_execute_runtime_and_early_arrays() {
+    let bytes: Vec<_> = output(
+        r#"
+use std.io.{println}
+fn repeat[T](comptime n: int, x: T) [T; n] {
+    let a: [T; n]
+    for i in 0..n { a[i] = x }
+    a
+}
+const A: [int; 2] = repeat(2, 7)
+const B: [int; 3] = repeat::[int](3, 8)
+fn main() {
+    let a = repeat(2, 5)
+    let b = repeat::[int](3, 6)
+    let empty: [int; 0] = repeat(0, 9)
+    _ = empty
+    println(a[1])
+    println(b[2])
+    println(A[1])
+    println(B[2])
+}
+"#,
+        &[],
+    )
+    .into_iter()
+    .flat_map(|(_, bytes)| bytes)
+    .collect();
+    assert_eq!(bytes, b"5\n6\n7\n8\n");
+}
+
+#[test]
+fn dependent_value_parameters_reject_nonconstant_arguments() {
+    let compiled = Compiler::shared().compile(CompileRequest::single_file("main.gg",
+        "fn repeat(comptime n: int) [int; n] { [0; n] }\nfn f(n: int) { _ = repeat(n) }\nfn main() {}", TargetName::X86_64Linux));
+    assert!(!compiled.is_success());
+    assert!(
+        compiled
+            .diagnostics()
+            .items()
+            .iter()
+            .any(|diagnostic| diagnostic.message().contains("需要编译期已知值")),
+        "{:?}",
+        compiled.diagnostics().items()
+    );
+}
+
+#[test]
+fn dependent_value_parameters_reject_type_arithmetic() {
+    let compiled = Compiler::shared().compile(CompileRequest::single_file(
+        "main.gg",
+        "fn f(comptime n: int) [int; n + 1] { [0; n + 1] }\nfn main() { _ = f(2) }",
+        TargetName::X86_64Linux,
+    ));
+    assert!(!compiled.is_success());
+    assert!(
+        compiled
+            .diagnostics()
+            .items()
+            .iter()
+            .any(|diagnostic| diagnostic.message().contains("算术")),
+        "{:?}",
+        compiled.diagnostics().items()
+    );
+}
+
+#[test]
 fn imported_result_constructor_names_do_not_evaluate_function_const_arguments() {
     let compiled = compile_imported_result_constructors(
         r#"

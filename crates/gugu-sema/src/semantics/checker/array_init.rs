@@ -44,6 +44,9 @@ impl Checker<'_, '_> {
     }
 
     fn init_length(&self, expression: ExprId) -> Option<ArrayLength> {
+        if let Some(length) = self.symbolic_comptime_argument(expression) {
+            return Some(length);
+        }
         match self.arena().exprs[expression.0 as usize].kind {
             ExprKind::Paren(inner) => return self.init_length(inner),
             ExprKind::Path(path) => {

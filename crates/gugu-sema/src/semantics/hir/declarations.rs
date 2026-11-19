@@ -31,6 +31,30 @@ impl Builder<'_, '_> {
                                 [definition.item.0 as usize]
                                 .kind
                     {
+                        let callable = CallableId {
+                            module: definition.module,
+                            function: function.0,
+                        };
+                        for (position, _, identity) in self.model.value_const_parameters(callable) {
+                            let ty = self.model.modules[definition.module].arena.params[self
+                                .model
+                                .modules[definition.module]
+                                .arena
+                                .fns[function.0 as usize]
+                                .params
+                                .start
+                                as usize
+                                + position]
+                                .ty
+                                .expect("comptime int 参数已有类型");
+                            parameters.push(PendingParameter {
+                                name: identity,
+                                kind: PendingParameterKind::Comptime {
+                                    module: definition.module,
+                                    ty,
+                                },
+                            });
+                        }
                         parameters.extend(
                             self.model
                                 .apits(CallableId {
