@@ -325,6 +325,29 @@ fn runtime_format_specs_and_dynamic_counts() {
 }
 
 #[test]
+fn runtime_format_never_hole_returns() {
+    assert_eq!(
+        render(
+            r#"
+        use std.fmt.{Formatter}
+        fn render() string {
+            let out = Formatter::new()
+            let text = f"prefix{ { out.write_str("evaluated"); return out.finish() } }suffix"
+            text
+        }
+    "#
+        ),
+        "evaluated"
+    );
+}
+
+#[test]
+#[should_panic(expected = "Runtime(Panic)")]
+fn runtime_format_never_hole_panics() {
+    render(r#"fn render() string = f"prefix{panic("test")}suffix""#);
+}
+
+#[test]
 fn runtime_format_integer_boundaries() {
     let expected = format!(
         "-128|-32768|-2147483648|{}|255|65535|4294967295|{}|{}",

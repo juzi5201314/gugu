@@ -46,6 +46,13 @@ impl BodyBuilder<'_, '_, '_, '_> {
                         .ty(expr)
                         .ok_or_else(|| self.error("格式值缺少类型"))?
                         .clone();
+                    if ty == Ty::Never {
+                        statements.push(self.format_statement(
+                            hir::StatementKind::Expression(expression),
+                            &hole_span,
+                        )?);
+                        continue;
+                    }
                     let (value, statement) = self.format_binding(&ty, expression, &hole_span)?;
                     statements.push(statement);
                     let plan = self
