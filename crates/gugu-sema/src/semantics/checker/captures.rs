@@ -1,6 +1,6 @@
 //! 捕获记录引用原槽；构造闭包与执行其 body 使用分离的数据流状态。
 use super::super::{
-    model::CallableId,
+    model::{CallableId, substitute},
     output::{ADDRESS_TAKEN, CAPTURED, CROSS_COROUTINE, CapturePlan, CapturedSlot},
 };
 use super::*;
@@ -56,7 +56,20 @@ impl Checker<'_, '_> {
         signature: Ty,
     ) {
         let frame = self.capture_frames.pop().expect("捕获 frame 成对进入退出");
-        let captures = frame.slots.into_iter().flatten().collect();
+        let captures: Vec<_> = frame.slots.into_iter().flatten().collect();
+        let type_parameters = self
+            .pack_elements
+            .keys()
+            .filter(|name| {
+                let binding = BTreeMap::from([((*name).clone(), Ty::Unit)]);
+                substitute(&signature, &binding) != signature
+                    || captures.iter().any(|capture| {
+                        let ty = self.resolve(&self.slots[capture.slot].ty);
+                        substitute(&ty, &binding) != ty
+                    })
+            })
+            .cloned()
+            .collect();
         let mut dependencies = std::mem::replace(&mut self.dependencies, saved.dependencies);
         dependencies.sort_by_key(|def| (def.module, def.item.0));
         dependencies.dedup();
@@ -64,6 +77,7 @@ impl Checker<'_, '_> {
             expression,
             function,
             signature,
+            type_parameters,
             captures,
             coroutine: frame.coroutine,
             dependencies,
@@ -92,7 +106,16 @@ impl Checker<'_, '_> {
             function: function.0,
         };
         self.leave_capture(saved, expression, Some(id), signature.clone());
-        let arguments = self.model.callable_context(id).into_values().collect();
+        let mut arguments = self.model.callable_context(id);
+        for name in &self
+            .capture_plans
+            .last()
+            .expect("closure capture plan")
+            .type_parameters
+        {
+            arguments.insert(name.clone(), Ty::Param(name.clone()));
+        }
+        let arguments = arguments.into_values().collect();
         Ty::Callable(id, arguments, Box::new(signature))
     }
 

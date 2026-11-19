@@ -216,6 +216,13 @@ impl Checker<'_, '_> {
                 Ty::Never
             }
             ExprKind::Break(value) => {
+                if self.loops.last().is_some_and(|state| state.pack) {
+                    self.error(
+                        DiagnosticCode::InvalidExpression,
+                        "break cannot target a heterogeneous pack loop",
+                        expr.span.clone(),
+                    );
+                }
                 let ty = value.map_or(Ty::Unit, |v| self.expression(v, None));
                 if let Some(context) = self.loops.last() {
                     self.run_cleanups(context.cleanup_floor, false);
@@ -244,6 +251,13 @@ impl Checker<'_, '_> {
                 Ty::Never
             }
             ExprKind::Continue => {
+                if self.loops.last().is_some_and(|state| state.pack) {
+                    self.error(
+                        DiagnosticCode::InvalidExpression,
+                        "continue cannot target a heterogeneous pack loop",
+                        expr.span.clone(),
+                    );
+                }
                 if self.loops.is_empty() {
                     self.error(
                         DiagnosticCode::InvalidExpression,

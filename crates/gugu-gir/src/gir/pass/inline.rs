@@ -18,7 +18,7 @@ const INLINE_MAX_COST: u32 = 32;
 
 pub fn run(
     editor: &mut Editor,
-    _module: &hir::Module,
+    module: &hir::Module,
     callees: &BTreeMap<[u8; 32], &crate::gir::concrete::ConcreteBody>,
     calls: &[ConcreteCall],
     types: &[crate::gir::concrete::TypeLayout],
@@ -54,6 +54,13 @@ pub fn run(
         let Some(callee) = callees.get(&target) else {
             continue;
         };
+        if module
+            .owners
+            .iter()
+            .any(|owner| owner.definition == callee.body.owner && !owner.captures.is_empty())
+        {
+            continue;
+        }
         if cost(&callee.body) > INLINE_MAX_COST {
             continue;
         }

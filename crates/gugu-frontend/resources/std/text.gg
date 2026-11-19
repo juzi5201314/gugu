@@ -3,6 +3,40 @@ pub struct Bytes {
     data: &[byte],
 }
 
+// 不可变块链让追加为 O(1)，复制缓冲只共享已封存节点；freeze 线性物化一次。
+struct BufferChunk {
+    previous: Option[&BufferChunk],
+    data: Bytes,
+}
+
+pub struct ByteBuffer {
+    head: Option[&BufferChunk],
+    length: int,
+}
+
+impl ByteBuffer {
+    pub fn new() ByteBuffer = ByteBuffer { head: None, length: 0 }
+    pub fn len(self: &Self) int = self.length
+    pub fn freeze(self: &Self) Bytes {
+        let data = unsafe { alloc_bytes(self.length) }
+        let end = self.length
+        let cursor = self.head
+        while let Some(chunk) = cursor {
+            end = end - chunk.data.len()
+            _ = chunk.data.copy_to(data[end..])
+            cursor = chunk.previous
+        }
+        unsafe { Bytes::from_owned(data) }
+    }
+    pub fn append(self: &Self, source: Bytes) {
+        if source.len() == 0 { return }
+        if source.len() > 9223372036854775807 - self.length { panic("byte buffer overflow") }
+        let chunk = BufferChunk { previous: self.head, data: source }
+        self.head = Some(&chunk)
+        self.length = self.length + source.len()
+    }
+}
+
 #[used]
 pub fn concat(left: &[byte], right: &[byte]) string {
     let data = unsafe { alloc_bytes(left.len() + right.len()) }

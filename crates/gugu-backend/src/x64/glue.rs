@@ -198,9 +198,6 @@ impl RuntimeGlueBindings {
         "platform_set_dump_policy",
         "platform_low_memory_hint",
         "platform_huge_page_hint",
-        // `format` 的调用形状随实参数变化（metadata 词 + 每实参 (addr,descriptor) 车道对），
-        // 固定签名的 Gugu 条目装不下它，需要参数打包与 std.fmt 运行时的实现阶段交付。
-        "format",
         // `wide_div` 的 signed/remainder 语义烘在 `RuntimeCall` 标志位里，不在调用车道上；
         // 单一 glue 名无法区分四种语义，由后续实现阶段拆名或改为参数化调用。
         "wide_div",

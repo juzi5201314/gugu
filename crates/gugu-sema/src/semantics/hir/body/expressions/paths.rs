@@ -121,7 +121,8 @@ impl BodyBuilder<'_, '_, '_, '_> {
         let (root, mut ty, fields) = if let Some(&local) = self.names.get(first_name) {
             (
                 hir::Res::Local(local),
-                self.facts.body.slots[self.local_sources[local.index()]].clone(),
+                self.facts.body.slots[self.local_sources[local.index()].expect("source local")]
+                    .clone(),
                 &segments[1..],
             )
         } else {

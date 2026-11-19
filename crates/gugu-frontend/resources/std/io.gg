@@ -1,38 +1,42 @@
-pub use std.text.{Bytes}
+pub use std.text.{Bytes, ByteBuffer}
 use std.text.{alloc_bytes}
+use std.fmt.{Formatter}
 pub use std.sync.{CancelToken}
 
-// 不可变块链让追加为 O(1)，复制缓冲只共享已封存节点；freeze 线性物化一次。
-struct BufferChunk {
-    previous: Option[&BufferChunk],
-    data: Bytes,
+pub fn print[Ts: Print...](...args: Ts) {
+    let out = Formatter::new()
+    for a in args { a.print(&out) }
+    write_output(1, out.finish())
 }
 
-pub struct ByteBuffer {
-    head: Option[&BufferChunk],
-    length: int,
+pub fn println[Ts: Print...](...args: Ts) {
+    let out = Formatter::new()
+    for a in args { a.print(&out) }
+    out.write_str("\n")
+    write_output(1, out.finish())
 }
 
-impl ByteBuffer {
-    pub fn new() ByteBuffer = ByteBuffer { head: None, length: 0 }
-    pub fn len(self: &Self) int = self.length
-    pub fn freeze(self: &Self) Bytes {
-        let data = unsafe { alloc_bytes(self.length) }
-        let end = self.length
-        let cursor = self.head
-        while let Some(chunk) = cursor {
-            end = end - chunk.data.len()
-            _ = chunk.data.copy_to(data[end..])
-            cursor = chunk.previous
-        }
-        unsafe { Bytes::from_owned(data) }
-    }
-    pub fn append(self: &Self, source: Bytes) {
-        if source.len() == 0 { return }
-        if source.len() > 9223372036854775807 - self.length { panic("byte buffer overflow") }
-        let chunk = BufferChunk { previous: self.head, data: source }
-        self.head = Some(&chunk)
-        self.length = self.length + source.len()
+pub fn eprint[Ts: Print...](...args: Ts) {
+    let out = Formatter::new()
+    for a in args { a.print(&out) }
+    write_output(2, out.finish())
+}
+
+pub fn eprintln[Ts: Print...](...args: Ts) {
+    let out = Formatter::new()
+    for a in args { a.print(&out) }
+    out.write_str("\n")
+    write_output(2, out.finish())
+}
+
+fn write_output(fd: uint, value: string) {
+    let bytes = unsafe { Bytes::from_string(value).as_slice() }
+    let offset = 0
+    while offset < bytes.len() {
+        let remaining = uint(bytes.len() - offset)
+        let written = unsafe { std.runtime.report_write(fd, std.ptr.addr_of(bytes[offset]), remaining) }
+        if written == uint(0) || written > remaining { return }
+        offset = offset + int(written)
     }
 }
 
