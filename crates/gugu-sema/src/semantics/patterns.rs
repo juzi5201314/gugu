@@ -240,8 +240,14 @@ impl C<'_, '_> {
                 rest,
                 suffix,
             } => {
+                if matches!(ty, Ty::Array(_, super::model::ArrayLength::Param(_)))
+                    && (rest.is_none() || prefix.len != 0 || suffix.len != 0)
+                {
+                    self.error("符号长度数组模式只支持无前后缀的 rest", &pat.span);
+                    return P::Any;
+                }
                 let (elem, len) = match ty {
-                    Ty::Array(t, n) => (t.as_ref(), Some(*n)),
+                    Ty::Array(t, n) => (t.as_ref(), n.known()),
                     Ty::Slice(t) => (t.as_ref(), None),
                     _ => {
                         self.error("数组模式要求数组或切片", &pat.span);
@@ -258,7 +264,10 @@ impl C<'_, '_> {
                     && let Some(name) = rest.name
                 {
                     let rest_ty = match len {
-                        Some(len) => Ty::Array(Box::new(elem.clone()), len.saturating_sub(n)),
+                        Some(len) => Ty::Array(
+                            Box::new(elem.clone()),
+                            super::model::ArrayLength::Known(len.saturating_sub(n)),
+                        ),
                         None => Ty::Ref(Box::new(Ty::Slice(Box::new(elem.clone())))),
                     };
                     self.bind(name, &rest_ty, &rest.span);
@@ -423,7 +432,7 @@ fn covered(model: &Model<'_>, types: &[Ty], rows: &[Vec<P>]) -> bool {
         Ty::Unit => return specialize("tuple", &[]),
         Ty::Array(elem, _) | Ty::Slice(elem) => {
             let fixed = if let Ty::Array(_, n) = ty {
-                Some(*n)
+                n.known()
             } else {
                 None
             };
@@ -528,7 +537,7 @@ fn uninhabited(model: &Model<'_>, ty: &Ty, active: &mut Vec<Ty>) -> bool {
         Ty::Never => true,
         Ty::Ref(t) => uninhabited(model, t, active),
         Ty::Tuple(ts) => ts.iter().any(|t| uninhabited(model, t, active)),
-        Ty::Array(t, n) => *n != 0 && uninhabited(model, t, active),
+        Ty::Array(t, n) => n.known().is_some_and(|n| n != 0) && uninhabited(model, t, active),
         _ => model.variants(ty).is_some_and(|vs| {
             vs.iter()
                 .all(|v| v.fields.iter().any(|f| uninhabited(model, &f.ty, active)))

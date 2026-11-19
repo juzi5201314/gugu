@@ -1,6 +1,20 @@
 use super::*;
 
 impl Builder<'_, '_> {
+    pub(super) fn array_length(
+        &self,
+        length: &super::super::model::ArrayLength,
+        owner: hir::DefId,
+    ) -> Result<hir::ArrayLength, Diagnostic> {
+        use super::super::model::ArrayLength;
+        match length {
+            ArrayLength::Known(value) => Ok(hir::ArrayLength::Known(*value)),
+            ArrayLength::Param(name) => self
+                .parameter(owner, name)
+                .map(hir::ArrayLength::Param)
+                .ok_or_else(|| self.error(owner, "comptime 参数没有稳定声明身份")),
+        }
+    }
     pub(super) fn type_id(
         &mut self,
         ty: &Ty,
@@ -26,7 +40,11 @@ impl Builder<'_, '_> {
             Ty::Ref(inner) => hir::Type::Ref(self.type_id(inner, owner)?),
             Ty::Ptr(inner) => hir::Type::Ptr(self.type_id(inner, owner)?),
             Ty::Slice(inner) => hir::Type::Slice(self.type_id(inner, owner)?),
-            Ty::Array(inner, count) => hir::Type::Array(self.type_id(inner, owner)?, *count),
+            Ty::Array(inner, count) => hir::Type::Array(
+                self.type_id(inner, owner)?,
+                self.array_length(count, owner)?,
+            ),
+            Ty::Const(count) => hir::Type::Const(self.array_length(count, owner)?),
             Ty::Tuple(types) => hir::Type::Tuple(self.type_ids(types, owner)?),
             Ty::Function(parameters, result) => hir::Type::Function {
                 parameters: self.type_ids(parameters, owner)?,

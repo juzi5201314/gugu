@@ -90,7 +90,7 @@ pub(super) fn run(
         let input =
             crate::canonical::to_vec(&(&key, world.universe.fingerprint, registry::summary()))
                 .expect("late query 身份编码");
-        let query_key = QueryKey::new(QueryKind::EvaluateLateComptime, 1, input);
+        let query_key = QueryKey::new(QueryKind::EvaluateLateComptime, 2, input);
         let mut fresh_value = None;
         let outcome = queries
             .compute(query_key, |query| {

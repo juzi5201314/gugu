@@ -9,7 +9,7 @@ use crate::{ast, hir};
 use serde::{Deserialize, Serialize};
 use std::collections::{BTreeMap, BTreeSet};
 
-pub const INSTANCE_SCHEMA: u32 = 8;
+pub const INSTANCE_SCHEMA: u32 = 9;
 
 /// 调用位点使用 owner 内的确定性编号，不把定义级 callee 当作实例身份。
 #[derive(Clone, Copy, Debug, Eq, PartialEq, Ord, PartialOrd, Serialize, Deserialize)]
@@ -30,6 +30,7 @@ pub struct CalleeSeed {
     pub key: MonoKey,
     pub definition: hir::DefId,
     pub arguments: Vec<Ty>,
+    pub value_arguments: Vec<Vec<u8>>,
 }
 
 #[derive(Clone, Debug, Eq, PartialEq, Serialize, Deserialize)]
@@ -152,7 +153,7 @@ pub fn instantiate(
             interner,
             seed.definition,
             &seed.arguments,
-            seed.key.const_arguments.clone(),
+            seed.value_arguments.clone(),
         )
         .map_err(|error| vec![error])?;
         if rebuilt != seed.key {
@@ -509,7 +510,12 @@ fn resolve_dispatch(
         };
         return Ok(Some(ResolvedCallee {
             definition: context.identities.function(callable),
-            arguments,
+            arguments: context.dispatch_arguments(
+                &entry.bindings,
+                dispatch,
+                context.identities.function(callable),
+                arguments,
+            )?,
             signature,
         }));
     }
@@ -532,10 +538,15 @@ fn resolve_dispatch(
     unify(declared_signature, &signature, &mut bindings)?;
     Ok(Some(ResolvedCallee {
         definition,
-        arguments: arguments
-            .iter()
-            .map(|ty| context.model.normalize(&substitute(ty, &bindings), &[]))
-            .collect::<Result<_, _>>()?,
+        arguments: context.dispatch_arguments(
+            &entry.bindings,
+            dispatch,
+            definition,
+            arguments
+                .iter()
+                .map(|ty| context.model.normalize(&substitute(ty, &bindings), &[]))
+                .collect::<Result<_, _>>()?,
+        )?,
         signature,
     }))
 }
@@ -691,7 +702,7 @@ fn instance_key(
     interner: &mut MonoInterner,
     definition: hir::DefId,
     arguments: &[Ty],
-    const_arguments: Vec<Vec<u8>>,
+    mut const_arguments: Vec<Vec<u8>>,
 ) -> Result<MonoKey, Diagnostic> {
     let declared = context.parameter_context(definition);
     if declared.len() != arguments.len() {
@@ -701,7 +712,17 @@ fn instance_key(
     let mut bindings = BTreeMap::new();
     for (name, argument) in declared.into_keys().zip(arguments) {
         let argument = context.model.normalize(argument, &[])?;
-        type_arguments.push(interner.intern_type(context.encode_type(&argument)?)?);
+        if let Ty::Const(length) = &argument {
+            let value = length
+                .known()
+                .ok_or_else(|| inconsistency("comptime 泛型参数尚未实例化"))?;
+            const_arguments.push(super::types::encode_constant(
+                context,
+                &crate::semantics::comptime::eval::ConstantValue::Int(i128::from(value)),
+            )?);
+        } else {
+            type_arguments.push(interner.intern_type(context.encode_type(&argument)?)?);
+        }
         bindings.insert(name, argument);
     }
     let key = MonoKey {
@@ -747,7 +768,7 @@ fn add_callee(
         .iter()
         .map(|ty| context.model.normalize(ty, &[]))
         .collect::<Result<Vec<_>, _>>()?;
-    let key = instance_key(context, interner, definition, &arguments, constants)?;
+    let key = instance_key(context, interner, definition, &arguments, constants.clone())?;
     let digest = key.digest();
     if let Some(site) = site {
         edges.call_targets.insert(site, digest);
@@ -756,6 +777,7 @@ fn add_callee(
         key,
         definition,
         arguments,
+        value_arguments: constants,
     });
     Ok(())
 }

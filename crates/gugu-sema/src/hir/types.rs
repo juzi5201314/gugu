@@ -1,5 +1,6 @@
 use super::{DefId, TypeId};
 use serde::{Deserialize, Serialize};
+pub type ArrayLength = crate::array_length::ArrayLength<(DefId, u32)>;
 
 /// 复合类型仅引用驻留后的子类型；不在每个表达式复制递归 Ty 树。
 ///
@@ -21,7 +22,8 @@ pub enum Type {
     Ref(TypeId),
     Ptr(TypeId),
     Slice(TypeId),
-    Array(TypeId, u64),
+    Array(TypeId, ArrayLength),
+    Const(ArrayLength),
     Tuple(Vec<TypeId>),
     Function {
         parameters: Vec<TypeId>,

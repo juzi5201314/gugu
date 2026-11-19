@@ -186,7 +186,7 @@ impl Layouts<'_, '_> {
         let word = Layout { size: 8, align: 8 };
         Ok(Some(match ty {
             Ty::Error | Ty::Var(_) => return Err(invalid("布局类型尚未收敛")),
-            Ty::Param(_) | Ty::Projection(..) => return Ok(None),
+            Ty::Param(_) | Ty::Projection(..) | Ty::Const(_) => return Ok(None),
             Ty::Opaque(id, _) => {
                 if !self.model.opaque_requires_definition(*id) {
                     return Ok(None);
@@ -222,13 +222,16 @@ impl Layouts<'_, '_> {
                 }
             }
             Ty::Array(elem, n) => {
+                let Some(n) = n.known() else {
+                    return Ok(None);
+                };
                 let Some(elem) = self.layout(elem)? else {
                     return Ok(None);
                 };
                 Layout {
                     size: elem
                         .size
-                        .checked_mul(*n)
+                        .checked_mul(n)
                         .ok_or_else(|| invalid("数组布局溢出"))?,
                     align: elem.align,
                 }

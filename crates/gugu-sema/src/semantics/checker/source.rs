@@ -151,7 +151,10 @@ impl Checker<'_, '_> {
                         expression: callee,
                         bytes,
                     });
-                Some(Ty::Array(Box::new(byte), length))
+                Some(Ty::Array(
+                    Box::new(byte),
+                    super::super::model::ArrayLength::Known(length),
+                ))
             }
             Ok(_) => {
                 self.error(

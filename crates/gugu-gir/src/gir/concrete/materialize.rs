@@ -199,7 +199,30 @@ pub(super) fn constants(
     instance: &InstanceSummaryV1,
     body: &mut GirBody,
 ) -> Result<(), Diagnostic> {
+    for statement in &mut body.statements {
+        if let StatementKind::Assign(_, Rvalue::Repeat { count, .. }) = &mut statement.kind {
+            let length = context
+                .semantic_length(count)?
+                .substitute(&instance.substitutions);
+            *count = crate::hir::ArrayLength::Known(
+                length
+                    .known()
+                    .ok_or_else(|| invalid("重复数组长度尚未实例化"))?,
+            );
+        }
+    }
     for constant in &mut body.constants {
+        if let ConstValue::Parameter(ty) = constant.value {
+            let Ty::Const(value) = context.type_at(ty, &instance.substitutions)? else {
+                return Err(invalid("comptime 参数没有常量绑定"));
+            };
+            constant.value = ConstValue::Integer(u128::from(
+                value
+                    .known()
+                    .ok_or_else(|| invalid("comptime 参数尚未实例化"))?,
+            ));
+            continue;
+        }
         let ConstValue::Definition(definition) = constant.value else {
             continue;
         };

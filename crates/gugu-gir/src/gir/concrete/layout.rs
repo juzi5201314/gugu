@@ -114,6 +114,7 @@ impl<'a, 'm> Builder<'a, 'm> {
         let bits = PassingClass::BITS;
         let identity = PassingClass::IDENTITY;
         Ok(match ty {
+            Ty::Const(_) => return Err(invalid("comptime 实参不是运行期类型")),
             Ty::Never => (TypeKind::Never, bits),
             Ty::Unit => (TypeKind::Unit, bits),
             Ty::Bool => (TypeKind::Bool, bits),
@@ -144,18 +145,13 @@ impl<'a, 'm> Builder<'a, 'm> {
             }
             Ty::Array(element, count) => {
                 let element = self.intern(element)?;
-                let passing = if *count == 0 {
+                let count = count.known().ok_or_else(|| invalid("数组长度尚未实例化"))?;
+                let passing = if count == 0 {
                     bits
                 } else {
                     self.passing(element)?
                 };
-                (
-                    TypeKind::Array {
-                        element,
-                        count: *count,
-                    },
-                    passing,
-                )
+                (TypeKind::Array { element, count }, passing)
             }
             Ty::Tuple(_)
             | Ty::Named(..)

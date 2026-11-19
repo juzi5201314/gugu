@@ -201,6 +201,15 @@ impl Builder<'_> {
                 }
             }
             hir::Res::Def(definition) => self.emit_definition(id, definition)?,
+            hir::Res::ConstParameter(ty) => {
+                let local = self.temp(self.expr_ty(id));
+                let constant = self.intern_const(self.expr_ty(id), ConstValue::Parameter(ty));
+                self.assign(
+                    Place::local(local),
+                    Rvalue::Use(Operand::Constant(constant)),
+                );
+                self.set_value(id, local);
+            }
             hir::Res::Primitive(ty) => {
                 let local = self.intrinsic_temp(
                     IntrinsicOp::TypeId,
@@ -318,7 +327,12 @@ impl Builder<'_> {
         Ok(())
     }
 
-    fn emit_repeat(&mut self, id: ExprId, value: ExprId, count: u64) -> Result<(), Diagnostic> {
+    fn emit_repeat(
+        &mut self,
+        id: ExprId,
+        value: ExprId,
+        count: hir::ArrayLength,
+    ) -> Result<(), Diagnostic> {
         let Some(local) = self.emit_expr(value)? else {
             return Ok(());
         };

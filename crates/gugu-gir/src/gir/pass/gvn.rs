@@ -295,7 +295,7 @@ fn rvalue_key(rvalue: &Rvalue) -> Vec<u8> {
         Rvalue::Repeat { operand, count } => {
             key.push(4);
             operand_key(&mut key, operand);
-            key.extend_from_slice(&count.to_le_bytes());
+            key.extend_from_slice(&crate::canonical::to_vec(count).expect("数组长度编码"));
         }
         Rvalue::Discriminant(place) => place_key(&mut key, 5, *place),
         Rvalue::Len(place) => place_key(&mut key, 6, *place),

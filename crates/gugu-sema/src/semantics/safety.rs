@@ -108,8 +108,9 @@ impl Model<'_> {
                 let Some(Ty::Array(_, len)) = ty(base).map(Ty::strip_refs) else {
                     return false;
                 };
-                self.constant_int(module, index)
-                    .is_ok_and(|value| value >= 0 && value < i128::from(*len))
+                self.constant_int(module, index).is_ok_and(|value| {
+                    value >= 0 && len.known().is_some_and(|len| value < i128::from(len))
+                })
             }
             _ => false,
         }
@@ -118,6 +119,7 @@ impl Model<'_> {
     // 调用前由布局形成检查排除无限大小类型；未知泛型留下待实例化的义务。
     fn type_property(&self, ty: &Ty, hidden: &[Option<Ty>], property: Property) -> Option<bool> {
         match ty {
+            Ty::Const(_) => None,
             Ty::Error | Ty::Var(_) | Ty::Param(_) | Ty::Projection(..) => None,
             Ty::Opaque(id, arguments) => {
                 let ty = hidden[*id as usize].as_ref()?;
@@ -133,7 +135,7 @@ impl Model<'_> {
             | Ty::Function(..)
             | Ty::Callable(..)
             | Ty::Dyn(_) => Some(false),
-            Ty::Array(_, 0) => Some(property == Property::Bit),
+            Ty::Array(_, super::model::ArrayLength::Known(0)) => Some(property == Property::Bit),
             Ty::Array(inner, _) | Ty::Option(inner) | Ty::MaybeUninit(inner) => {
                 self.type_property(inner, hidden, property)
             }

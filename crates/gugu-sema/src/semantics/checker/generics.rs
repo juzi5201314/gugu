@@ -3,6 +3,27 @@ use super::super::model::{CallableId, substitute};
 use super::*;
 
 impl Checker<'_, '_> {
+    pub(super) fn length_type(&self, length: &super::super::model::ArrayLength) -> Ty {
+        use super::super::model::ArrayLength;
+        if let ArrayLength::Param(name) = length
+            && let Some(id) = name
+                .strip_prefix("$const-var:")
+                .and_then(|s| s.parse().ok())
+        {
+            return self.resolve(&Ty::Var(id));
+        }
+        Ty::Const(length.clone())
+    }
+
+    pub(super) fn resolve_length(
+        &self,
+        length: &super::super::model::ArrayLength,
+    ) -> super::super::model::ArrayLength {
+        match self.length_type(length) {
+            Ty::Const(value) => value,
+            _ => length.clone(),
+        }
+    }
     pub(super) fn instantiate_callable(
         &mut self,
         ty: Ty,
@@ -43,7 +64,7 @@ impl Checker<'_, '_> {
         let arguments = arguments.as_slice(&self.arena().generic_args);
         let fixed = generics
             .iter()
-            .filter(|param| matches!(param.kind, GenericParamKind::Type { pack: false, .. }))
+            .filter(|param| !matches!(param.kind, GenericParamKind::Type { pack: true, .. }))
             .count();
         let pack = generics.iter().find_map(|param| {
             if let GenericParamKind::Type {
@@ -86,12 +107,42 @@ impl Checker<'_, '_> {
         }
         let mut index = 0;
         for generic in generics {
+            if let GenericParamKind::Comptime { name, .. } = generic.kind {
+                let ty = match arguments.get(index) {
+                    Some(argument) => match self.model.form_argument(self.module, *argument) {
+                        Ok(ty @ Ty::Const(_)) => ty,
+                        Ok(_) => {
+                            self.error(
+                                DiagnosticCode::InvalidType,
+                                "comptime 泛型位置需要非负整数常量",
+                                span.clone(),
+                            );
+                            Ty::Error
+                        }
+                        Err(error) => {
+                            self.errors.push(error);
+                            Ty::Error
+                        }
+                    },
+                    None => self.fresh(),
+                };
+                bindings.insert(self.model.name(id.module, name).to_owned(), ty);
+                index += 1;
+            }
             if let GenericParamKind::Type {
                 name, pack: false, ..
             } = generic.kind
             {
                 let ty = match arguments.get(index) {
                     Some(argument) => match self.model.form_argument(self.module, *argument) {
+                        Ok(Ty::Const(_)) => {
+                            self.error(
+                                DiagnosticCode::InvalidType,
+                                "类型泛型位置不能使用 comptime 值",
+                                span.clone(),
+                            );
+                            Ty::Error
+                        }
                         Ok(ty) => ty,
                         Err(error) => {
                             self.errors.push(error);

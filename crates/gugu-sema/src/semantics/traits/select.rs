@@ -23,7 +23,18 @@ pub fn matches(pattern: &Ty, concrete: &Ty, bindings: &mut BTreeMap<String, Ty>)
         | (Ty::Chan(a), Ty::Chan(b))
         | (Ty::Join(a), Ty::Join(b))
         | (Ty::MaybeUninit(a), Ty::MaybeUninit(b)) => matches(a, b, bindings),
-        (Ty::Array(a, n), Ty::Array(b, m)) => n == m && matches(a, b, bindings),
+        (Ty::Array(a, n), Ty::Array(b, m)) => {
+            matches(&Ty::Const(n.clone()), &Ty::Const(m.clone()), bindings)
+                && matches(a, b, bindings)
+        }
+        (Ty::Const(super::super::model::ArrayLength::Param(name)), Ty::Const(_)) => {
+            if let Some(previous) = bindings.get(name) {
+                previous == concrete
+            } else {
+                bindings.insert(name.clone(), concrete.clone());
+                true
+            }
+        }
         (Ty::Tuple(a), Ty::Tuple(b)) => match_list(a, b, bindings),
         (Ty::Named(i, a), Ty::Named(j, b)) => i == j && match_list(a, b, bindings),
         (Ty::Opaque(i, a), Ty::Opaque(j, b)) => i == j && match_list(a, b, bindings),
@@ -363,7 +374,7 @@ impl Model<'_> {
             Ty::Ref(t) => Ty::Ref(Box::new(recur(t, stack)?)),
             Ty::Ptr(t) => Ty::Ptr(Box::new(recur(t, stack)?)),
             Ty::Slice(t) => Ty::Slice(Box::new(recur(t, stack)?)),
-            Ty::Array(t, n) => Ty::Array(Box::new(recur(t, stack)?), *n),
+            Ty::Array(t, n) => Ty::Array(Box::new(recur(t, stack)?), n.clone()),
             Ty::Option(t) => Ty::Option(Box::new(recur(t, stack)?)),
             Ty::Chan(t) => Ty::Chan(Box::new(recur(t, stack)?)),
             Ty::Join(t) => Ty::Join(Box::new(recur(t, stack)?)),

@@ -65,6 +65,13 @@ impl BodyBuilder<'_, '_, '_, '_> {
         let selected = &self.facts.body.dispatches[index];
         let id = checked_id(self.output.dispatches.len())?;
         let dispatch = hir::Dispatch {
+            arguments: match self.facts.ty(selected.expression) {
+                Some(Ty::Callable(_, arguments, _)) => arguments
+                    .iter()
+                    .map(|ty| self.type_id(ty))
+                    .collect::<Result<_, _>>()?,
+                _ => Vec::new(),
+            },
             function: selected
                 .callable
                 .map(|function| self.compiler.identities.function(function)),

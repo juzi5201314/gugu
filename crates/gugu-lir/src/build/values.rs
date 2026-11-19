@@ -345,7 +345,9 @@ impl Builder<'_> {
                 }
                 return Ok(Computed::Address { ty, address });
             }
-            ConstValue::Definition(_) => return Err(invalid("LIR 不能重新求值常量定义")),
+            ConstValue::Definition(_) | ConstValue::Parameter(_) => {
+                return Err(invalid("LIR 不能重新求值常量定义或泛型参数"));
+            }
         };
         Ok(Computed::Values { ty, values })
     }

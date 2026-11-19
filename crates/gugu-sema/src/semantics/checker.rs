@@ -10,6 +10,7 @@ mod assembly;
 mod borrow;
 mod calls;
 mod captures;
+mod construct;
 mod conversion;
 mod defer;
 mod expr;
@@ -280,6 +281,14 @@ pub(super) fn check(
 impl<'m, 'a> Checker<'m, 'a> {
     /// 优先消费 EarlyConstTable 中已求值的整数常量。
     pub(super) fn early_int(&self, expression: ExprId) -> Option<i128> {
+        let span = &self.arena().exprs[expression.0 as usize].span;
+        let params = self.model.parameters_at(self.module, span);
+        if self
+            .model
+            .has_const_parameter(self.module, expression, &params)
+        {
+            return None;
+        }
         match self.early.expression_value(self.module, expression.0) {
             Some(super::comptime::eval::ConstantValue::Int(value)) => Some(*value),
             _ => None,
@@ -386,7 +395,8 @@ impl<'m, 'a> Checker<'m, 'a> {
             Ty::Ref(t) => Ty::Ref(Box::new(self.resolve(t))),
             Ty::Ptr(t) => Ty::Ptr(Box::new(self.resolve(t))),
             Ty::Slice(t) => Ty::Slice(Box::new(self.resolve(t))),
-            Ty::Array(t, n) => Ty::Array(Box::new(self.resolve(t)), *n),
+            Ty::Array(t, n) => Ty::Array(Box::new(self.resolve(t)), self.resolve_length(n)),
+            Ty::Const(n) => Ty::Const(self.resolve_length(n)),
             Ty::Option(t) => Ty::Option(Box::new(self.resolve(t))),
             Ty::Result(t, e) => Ty::Result(Box::new(self.resolve(t)), Box::new(self.resolve(e))),
             Ty::Tuple(ts) => Ty::Tuple(ts.iter().map(|t| self.resolve(t)).collect()),
@@ -507,7 +517,8 @@ impl<'m, 'a> Checker<'m, 'a> {
                 self.relate(e, f, span, false);
                 return self.resolve(&b);
             }
-            (Ty::Array(x, n), Ty::Array(y, m)) if n == m => {
+            (Ty::Array(x, n), Ty::Array(y, m)) => {
+                self.relate(&self.length_type(n), &self.length_type(m), span, false);
                 self.relate(x, y, span, false);
                 return self.resolve(&b);
             }

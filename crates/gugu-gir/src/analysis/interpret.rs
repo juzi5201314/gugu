@@ -220,8 +220,10 @@ fn seed_param_lens(module: &Module, owner: &Owner, state: &mut AbstractState) {
         if let hir::Type::Ref(inner) = ty {
             ty = &module.types[inner.index()];
         }
-        if let hir::Type::Array(_, length) = ty {
-            state.set_range(ValueKey::LocalLen(id), Interval::point(i128::from(*length)));
+        if let hir::Type::Array(_, length) = ty
+            && let Some(length) = length.known()
+        {
+            state.set_range(ValueKey::LocalLen(id), Interval::point(i128::from(length)));
         }
     }
 }
