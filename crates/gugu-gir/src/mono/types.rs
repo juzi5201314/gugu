@@ -8,6 +8,23 @@ use crate::{Diagnostic, DiagnosticCode};
 use std::collections::{BTreeMap, BTreeSet};
 
 impl MonoContext<'_> {
+    pub fn dispatch_arguments(
+        &self,
+        bindings: &BTreeMap<String, Ty>,
+        dispatch: &hir::Dispatch,
+        definition: hir::DefId,
+        inferred: Vec<Ty>,
+    ) -> Result<Vec<Ty>, Diagnostic> {
+        if dispatch.function != Some(definition) || dispatch.arguments.is_empty() {
+            return Ok(inferred);
+        }
+        dispatch
+            .arguments
+            .iter()
+            .map(|ty| self.type_at(*ty, bindings))
+            .collect()
+    }
+
     /// HIR TypeId 连续且子类型先驻留；每个类型只恢复一次语义工作值。
     pub fn semantic_type(&self, id: hir::TypeId) -> Result<&Ty, Diagnostic> {
         let index = id.index();

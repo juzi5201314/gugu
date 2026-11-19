@@ -410,6 +410,7 @@ pub fn owner_dependency_fingerprint(module: &hir::Module, owner: &hir::Owner) ->
     for dispatch in &owner.dispatches {
         types.insert(dispatch.self_ty);
         types.insert(dispatch.signature);
+        types.extend(dispatch.arguments.iter().copied());
         definitions.extend(dispatch.function);
         definitions.extend(dispatch.implementation);
     }

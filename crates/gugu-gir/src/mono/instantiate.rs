@@ -510,7 +510,12 @@ fn resolve_dispatch(
         };
         return Ok(Some(ResolvedCallee {
             definition: context.identities.function(callable),
-            arguments,
+            arguments: context.dispatch_arguments(
+                &entry.bindings,
+                dispatch,
+                context.identities.function(callable),
+                arguments,
+            )?,
             signature,
         }));
     }
@@ -533,10 +538,15 @@ fn resolve_dispatch(
     unify(declared_signature, &signature, &mut bindings)?;
     Ok(Some(ResolvedCallee {
         definition,
-        arguments: arguments
-            .iter()
-            .map(|ty| context.model.normalize(&substitute(ty, &bindings), &[]))
-            .collect::<Result<_, _>>()?,
+        arguments: context.dispatch_arguments(
+            &entry.bindings,
+            dispatch,
+            definition,
+            arguments
+                .iter()
+                .map(|ty| context.model.normalize(&substitute(ty, &bindings), &[]))
+                .collect::<Result<_, _>>()?,
+        )?,
         signature,
     }))
 }

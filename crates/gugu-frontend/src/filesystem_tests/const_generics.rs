@@ -1,6 +1,31 @@
 use super::{CompileRequest, Compiler, TargetName, printing::output};
 
 #[test]
+fn explicit_const_method_arguments_survive_dispatch() {
+    let actual: Vec<_> = output(
+        r#"
+use std.io.{println}
+struct Counter {}
+impl Counter {
+    fn count[comptime N: int](self: &Self) int { N }
+}
+fn forward[comptime K: int](c: &Counter) int { c.count::[K]() }
+fn main() {
+    let c = Counter {}
+    println(c.count::[3]())
+    println(c.count::[0]())
+    println(forward::[4](&c))
+}
+"#,
+        &[],
+    )
+    .into_iter()
+    .flat_map(|(_, bytes)| bytes)
+    .collect();
+    assert_eq!(actual, b"3\n0\n4\n");
+}
+
+#[test]
 fn early_calls_bind_explicit_and_inferred_const_generics() {
     let actual: Vec<_> = output(
         r#"

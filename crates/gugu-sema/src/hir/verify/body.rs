@@ -492,6 +492,7 @@ impl Module {
                     .is_some_and(|interface| !self.trait_ref(interface))
                 || !self.ty(dispatch.self_ty)
                 || !self.ty(dispatch.signature)
+                || dispatch.arguments.iter().any(|ty| !self.ty(*ty))
                 || dispatch.dynamic
                     && (dispatch.function.is_some()
                         || dispatch.interface.is_none()

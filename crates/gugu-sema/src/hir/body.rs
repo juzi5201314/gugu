@@ -242,6 +242,7 @@ pub enum CallTarget {
 #[derive(Clone, Debug, Eq, PartialEq, Serialize, Deserialize)]
 pub struct Dispatch {
     pub function: Option<DefId>,
+    pub arguments: Vec<TypeId>,
     pub implementation: Option<DefId>,
     pub interface: Option<TraitRef>,
     pub member: Option<u32>,

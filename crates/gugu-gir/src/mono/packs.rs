@@ -396,6 +396,9 @@ impl Expander<'_, '_> {
             }
         }
         for dispatch in &mut copy.dispatches {
+            for argument in &mut dispatch.arguments {
+                self.rebind(argument, &hidden)?;
+            }
             self.rebind(&mut dispatch.self_ty, &hidden)?;
             self.rebind(&mut dispatch.signature, &hidden)?;
             if let Some(i) = &mut dispatch.interface {
