@@ -28,6 +28,128 @@ const CHECK: &str = r#"
     }
 "#;
 
+fn aggregate_keys(ty: &str, low: &str, middle: &str, high: &str, fresh: &str) {
+    assert_eq!(
+        printed(&format!(
+            r#"{CHECK}
+        fn equal[T: Eq](a: T, b: T) bool = a == b
+        fn ordered[T: Ord](a: T, b: T) bool = a < b && a <= b && b > a && b >= a
+        fn main() {{
+            let low: {ty} = {low}
+            let middle: {ty} = {middle}
+            let high: {ty} = {high}
+            let fresh: {ty} = {fresh}
+            let map = HashMap[{ty}, int]::new()
+            check(is_none(map.insert(high, 30)))
+            check(is_none(map.insert(low, 10)))
+            check(is_none(map.insert(middle, 20)))
+            check(same(map.get(&fresh), 10))
+            check(same(map.insert(fresh, 11), 10) && map.len() == 3)
+            let tree = BTreeMap[{ty}, int]::new()
+            check(is_none(tree.insert(high, 30)))
+            check(is_none(tree.insert(middle, 20)))
+            check(is_none(tree.insert(low, 10)))
+            check(same(tree.get(&fresh), 10))
+            check(same(tree.insert(fresh, 11), 10) && tree.len() == 3)
+            let index = 0
+            for (key, value) in tree {{
+                match index {{
+                    0 => check(equal(key, low) && value == 11),
+                    1 => check(equal(key, middle) && value == 20),
+                    _ => check(equal(key, high) && value == 30),
+                }}
+                index = index + 1
+            }}
+            check(index == 3 && equal(low, fresh) && !equal(low, high))
+            check(ordered(low, middle) && ordered(middle, high))
+            check(!ordered(low, fresh) && !ordered(high, middle))
+            check(low == fresh && low != high && low < middle && middle < high)
+            check(same(map.remove(&fresh), 11) && map.len() == 2)
+            check(same(tree.remove(&fresh), 11) && tree.len() == 2)
+            println("ok")
+        }}
+    "#
+        )),
+        "ok\n"
+    );
+}
+
+#[test]
+fn aggregate_collection_keys_large_tuples() {
+    aggregate_keys(
+        "(int, int, int)",
+        "(1, 2, 3)",
+        "(1, 9, 9)",
+        "(2, 1, 0)",
+        "(1, 2, 3)",
+    );
+}
+
+#[test]
+fn aggregate_collection_keys_small_tuples() {
+    aggregate_keys("(int, int)", "(-2, 50)", "(1, 2)", "(1, 9)", "(-2, 50)");
+}
+
+#[test]
+fn aggregate_collection_keys_string_tuples() {
+    aggregate_keys(
+        "(string, int)",
+        r#"("ant", 1)"#,
+        r#"("ant", 2)"#,
+        r#"("bat", 0)"#,
+        r#"("a" + "nt", 1)"#,
+    );
+}
+
+#[test]
+fn aggregate_collection_keys_nested_tuples() {
+    aggregate_keys(
+        "((string, int), (int, int, int))",
+        r#"(("ant", -1), (1, 2, 3))"#,
+        r#"(("ant", -1), (1, 3, 0))"#,
+        r#"(("bat", -5), (0, 0, 0))"#,
+        r#"(("a" + "nt", -1), (1, 2, 3))"#,
+    );
+}
+
+#[test]
+fn structural_comparisons_empty_arrays_and_variants() {
+    assert_eq!(
+        printed(&format!(
+            r#"{CHECK}
+        fn equal[T: Eq](a: T, b: T) bool = a == b
+        fn compare[T: Eq + Ord](a: T, b: T) int {{
+            if a == b {{ 0 }} else if a < b {{ -1 }} else {{ 1 }}
+        }}
+        fn main() {{
+            check(equal((), ()) && compare((), ()) == 0)
+            let empty: [int; 0] = [0; 0]
+            check(equal(empty, empty) && compare(empty, empty) == 0)
+            check(equal([(1, 2), (3, 4)], [(1, 2), (3, 4)]))
+            check(compare([(1, 2), (3, 4)], [(1, 2), (3, 5)]) < 0)
+            check(compare([(-1, 9), (8, 9)], [(0, 0), (0, 0)]) < 0)
+            let none: Option[(string, int)] = None
+            let some: Option[(string, int)] = Some(("ant", -1))
+            let same_some: Option[(string, int)] = Some(("a" + "nt", -1))
+            let later: Option[(string, int)] = Some(("ant", 1))
+            check(equal(none, none) && !equal(none, some))
+            check(equal(some, same_some) && compare(some, same_some) == 0)
+            check(compare(none, some) > 0 && compare(some, none) < 0)
+            check(compare(some, later) < 0)
+            let ok: Result[(int, int), string] = Ok((1, 2))
+            let same_ok: Result[(int, int), string] = Ok((1, 2))
+            let error: Result[(int, int), string] = Err("ant")
+            let same_error: Result[(int, int), string] = Err("a" + "nt")
+            check(equal(ok, same_ok) && equal(error, same_error) && !equal(ok, error))
+            check(compare(ok, error) < 0 && compare(error, ok) > 0)
+            println("ok")
+        }}
+    "#
+        )),
+        "ok\n"
+    );
+}
+
 #[test]
 fn tuple_and_variant_patterns_test_every_field() {
     assert_eq!(

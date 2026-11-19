@@ -222,7 +222,7 @@ HashMap 使用八路持久 hash trie：共享 State 保存根、长度、view �
 
 BTreeMap 使用持久 AVL 树：节点保存 K/V、左右子树与高度，插入和删除沿路径复制，用单旋转或双旋转维持高度差不超过一；两子树删除用右子树最小键替换。比较只依赖 Ord 的关系运算，不额外要求 Eq。普通查询和修改都是 O(log len) 次比较。两种 Map 的 iter 都 O(1) 捕获当前根，next 使用持久 frame 栈延迟遍历，已有迭代器不读取共享 State 的新根；AVL 遍历及直接 for_each_ref 都是中序升序。HashSet / BTreeSet 以对应 Map[T, ()] 实现，迭代器去掉 unit value。
 
-泛型 Eq / Ord 操作符保留 trait dispatch 到 mono，用户键的比较不能退回聚合存储位比较；`!=` 对 eq 结果取反，Ord 运算符对 cmp 的 int 结果与零比较。具体内建 Eq / Ord 调用由 concrete protocol 交给既有 LIR 数值或字符串比较，纯比较不保留 unwind 后继。模式的多字段测试按字段顺序连接成功边，任一字段失败都进入同一个失败分支。
+泛型 Eq / Ord 操作符保留 trait dispatch 到 mono，用户键的比较不能退回聚合存储位比较；`!=` 对 eq 结果取反，Ord 运算符对 cmp 的 int 结果与零比较。具体内建 Eq / Ord protocol 与直接 Compare 共用 LIR 的类型定向比较：标量走数值比较，string 走 StringCompare，聚合按 concrete 字段偏移递归读取并在首个不等字段短路；数组用索引循环，不按长度展开代码。枚举先比较 tag，同变体才读取活动载荷，避免读取未初始化的其它变体。零大小值比较相等；不能把聚合的 ABI 车道或间接 ABI 地址当作比较值。纯比较 protocol 不保留 unwind 后继。模式的多字段测试按字段顺序连接成功边，任一字段失败都进入同一个失败分支。
 
 Map 的 with_ref / for_each_ref 在共享 State 增加 view 计数并用 defer 在退出时减少；insert / remove / update 和 Entry 操作先检查该计数，所以别名写入和无效果的写调用也会 panic。Entry 只保存共享 Map 句柄和键，每次访问重新查询当前根，不保存易失效的节点地址。执行测试使用生产 LIR 的进程内解释器，view 标记由生产 verifier 检查，解释器在 Runtime(Panic) 边界报告 payload；该测试钩子不模拟完整 panic 展开。
 
@@ -232,7 +232,7 @@ placement schema 2 在分配点之外新增 region 计划：CFG 去掉直接挂�
 
 ### generic 与 monomorphic GIR
 
-具体 GIR 的类型编号只在本体内有效。内联前用稳定类型 key 映射 callee 的局部、常量和动作 descriptor 到 caller 的类型表；缺少所需类型时保留调用，不把局部编号直接复制到另一函数。当前语义 schema 为 19、LowerHir schema 为 13、GIR world schema 为 4、build schema 为 16、pipeline revision 为 4，LIR query/world schema 为 20、body revision 为 21；具体类型 schema 为 4，保留 `transparent` 以区别 Win64 的透明浮点与普通整数聚合。`Call.foreign_arguments` 保留原始参数的车道范围、字节大小、对齐与 MEMORY 分类；x64 lowering revision 为 19、allocation revision 为 6、metadata revision 为 3。调用先保存全部 outgoing 栈参数，再执行寄存器并行拷贝，防止栈参数的源寄存器被较早的参数落位覆盖。C 按值临时副本和隐藏返回区地址保留 `Stack` provenance；verifier 仅在 `by_value` / `sret` 登记位置接受这种内部地址，用户传入的 managed/stack pointer 仍不能直接跨外部边界。两类 bridge 的参数包与 spill 槽都登记精确根，fixup 的 high-relative 深度不登记为根。并行拷贝删除包括栈槽在内的自拷贝；组内存在内存到内存搬运时，环值保存到 frame scratch，不能与中转所用 r11 重叠。
+具体 GIR 的类型编号只在本体内有效。内联前用稳定类型 key 映射 callee 的局部、常量和动作 descriptor 到 caller 的类型表；缺少所需类型时保留调用，不把局部编号直接复制到另一函数。当前语义 schema 为 19、LowerHir schema 为 13、GIR world schema 为 4、build schema 为 16、pipeline revision 为 4，LIR query/world schema 为 21、body revision 为 22；具体类型 schema 为 4，保留 `transparent` 以区别 Win64 的透明浮点与普通整数聚合。`Call.foreign_arguments` 保留原始参数的车道范围、字节大小、对齐与 MEMORY 分类；x64 lowering revision 为 19、allocation revision 为 6、metadata revision 为 3。调用先保存全部 outgoing 栈参数，再执行寄存器并行拷贝，防止栈参数的源寄存器被较早的参数落位覆盖。C 按值临时副本和隐藏返回区地址保留 `Stack` provenance；verifier 仅在 `by_value` / `sret` 登记位置接受这种内部地址，用户传入的 managed/stack pointer 仍不能直接跨外部边界。两类 bridge 的参数包与 spill 槽都登记精确根，fixup 的 high-relative 深度不登记为根。并行拷贝删除包括栈槽在内的自拷贝；组内存在内存到内存搬运时，环值保存到 frame scratch，不能与中转所用 r11 重叠。
 
 generic GIR 允许 `TyId` 和 `ConstId` 中引用 owner 的泛型参数，也允许
 `Operand::Function` 保存尚未替换的 `MonoCandidate`。它必须已经固定 trait/impl 选择规则；

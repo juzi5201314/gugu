@@ -1,5 +1,6 @@
 //! 具体 GIR 到 LIR；变量读取由 block 参数封口，不引入 phi 或平行语义 IR。
 mod calls;
+mod comparison;
 pub(crate) mod foreign;
 mod intrinsics;
 mod memory;

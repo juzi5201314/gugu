@@ -15,18 +15,7 @@ impl Builder<'_> {
         if protocol == crate::gir::concrete::Protocol::Eq {
             return self.compare_computed(CompareOp::Eq, left, right, ty);
         }
-        let less = self.compare_computed(CompareOp::Lt, left.clone(), right.clone(), ty)?;
-        let greater = self.compare_computed(CompareOp::Gt, left, right, ty)?;
-        let less = self.computed_values(less)?[0];
-        let greater = self.computed_values(greater)?[0];
-        let less = self.integer_resize(less, Type::I64, false);
-        let greater = self.integer_resize(greater, Type::I64, false);
-        let result = self.emit_one(
-            Op::Integer(IntOp::Sub),
-            &[greater, less],
-            ValueType::scalar(Type::I64),
-            Origin::None,
-        );
+        let result = self.comparison_order(left, right)?;
         Ok(Computed::Values {
             ty,
             values: vec![result],
@@ -179,26 +168,33 @@ impl Builder<'_> {
         rhs: Computed,
         ty: u32,
     ) -> Result<Computed, Diagnostic> {
-        if matches!(self.kind(lhs.ty()), TypeKind::String) {
-            let mut arguments = self.explicit_abi_values(lhs)?;
-            arguments.extend(self.explicit_abi_values(rhs)?);
-            let result = self.runtime(
-                RuntimeCall::StringCompare,
-                &arguments,
-                &[ValueType::scalar(Type::I64)],
-            )?[0];
+        let value = if matches!(
+            self.kind(lhs.ty()),
+            TypeKind::Unit | TypeKind::String | TypeKind::Array { .. } | TypeKind::Aggregate { .. }
+        ) {
+            let result = self.comparison_order(lhs, rhs)?;
             let zero = self.constant(0, Type::I64);
-            let value = self.compare_value(condition(op), true, result, zero);
-            return Ok(Computed::Values {
-                ty,
-                values: vec![value],
-            });
-        }
+            self.compare_value(condition(op), true, result, zero)
+        } else {
+            self.scalar_comparison(op, lhs, rhs)?
+        };
+        Ok(Computed::Values {
+            ty,
+            values: vec![value],
+        })
+    }
+
+    pub(super) fn scalar_comparison(
+        &mut self,
+        op: CompareOp,
+        lhs: Computed,
+        rhs: Computed,
+    ) -> Result<ValueId, Diagnostic> {
         let signed = matches!(self.kind(lhs.ty()), TypeKind::Int { signed: true, .. });
         let lhs = self.computed_values(lhs)?;
         let rhs = self.computed_values(rhs)?;
         let condition = condition(op);
-        let value = if lhs.len() == 2 && rhs.len() == 2 {
+        Ok(if lhs.len() == 2 && rhs.len() == 2 {
             self.wide_compare(condition, signed, &lhs, &rhs)
         } else {
             let (&lhs, &rhs) = lhs
@@ -206,10 +202,6 @@ impl Builder<'_> {
                 .zip(rhs.first())
                 .ok_or_else(|| invalid("比较缺少机器值"))?;
             self.compare_value(condition, signed, lhs, rhs)
-        };
-        Ok(Computed::Values {
-            ty,
-            values: vec![value],
         })
     }
 
