@@ -332,8 +332,8 @@ pub fn plan(
     let Some(entry) = module.entry else {
         return Ok(None);
     };
-    let (linux, windows) = match target {
-        TargetName::X86_64Linux => (
+    let (linux, windows) = match descriptor.object_format {
+        target::ObjectFormat::Elf64 => (
             x64::elf::link_world(
                 x64,
                 &raw.gc_metadata().type_section,
@@ -342,7 +342,7 @@ pub fn plan(
             )?,
             x64::pe::PeImage::absent(),
         ),
-        TargetName::X86_64Windows => (
+        target::ObjectFormat::Pe32Plus => (
             x64::elf::LinuxImage::absent(),
             x64::pe::link_world(
                 x64,
@@ -351,6 +351,9 @@ pub fn plan(
                 native_link,
             )?,
         ),
+        target::ObjectFormat::MachO64 => {
+            return Err("macho64 format has no image writer yet".to_owned());
+        }
     };
     let placement = gir.placement.counts();
     let (runtime_glue_bound, runtime_glue_stubbed) = x64.runtime_glue_counts();
