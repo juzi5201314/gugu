@@ -144,6 +144,7 @@ fn darwin() -> Builder {
         (25, "sendto", -1),
         (26, "fcntl", -1),
         (27, "recvmsg", -1),
+        (28, "disconnectx", -1),
     ];
     let native_done = b.label();
     super::darwin::dispatch(&mut b, &methods, 0, RESULT, FAILURE, native_done);

@@ -427,7 +427,11 @@ fn darwin_datagram_truncation_and_disconnect_follow_native_results() {
             put(memory, message + 40, 16 << 32);
         } else if op == 21 {
             let address = word(memory, request + 8) as usize;
-            assert_eq!(&memory[address..address + 2], &[16, 0]);
+            assert_eq!(&memory[address..address + 2], &[2, 0]);
+        } else if op == 28 {
+            assert_eq!(word(memory, request), 42);
+            assert_eq!(word(memory, request + 8), 0);
+            assert_eq!(word(memory, request + 16), 0);
         }
     });
     h.script.push_back((27, 2, 0));
@@ -442,16 +446,47 @@ fn darwin_datagram_truncation_and_disconnect_follow_native_results() {
     assert_ne!(result.last().unwrap() & 255, 0);
     assert_eq!(&memory[BUFFER as usize..BUFFER as usize + 2], b"AA");
 
+    check_darwin_ip_disconnect(&mut h, &mut memory);
+    put(&mut memory, CONTROL + 240, 1);
     for (peer_error, connected) in [(0, 1), (57, 0)] {
         put(&mut memory, CONTROL + 1248, 1);
         let disconnect = node(&mut h, &mut memory, 8, 0, 0);
-        put(&mut memory, disconnect + 96, 16);
-        h.script.extend([(21, 0, 47), (6, 0, peer_error)]);
+        put(&mut memory, disconnect + 96, 2);
+        h.script.extend([(21, 0, 22), (6, 0, peer_error)]);
         submit(&mut h, &mut memory, disconnect);
         assert_eq!(word(&memory, CONTROL + 1248), connected);
-        assert_eq!(word(&memory, disconnect + 72), connected * 47);
+        assert_eq!(word(&memory, disconnect + 72), connected * 22);
     }
     assert!(h.script.is_empty());
+}
+
+fn check_darwin_ip_disconnect(h: &mut Harness<'_>, memory: &mut Vec<u8>) {
+    for (ipv6, family) in [(0, 2), (1, 30)] {
+        put(memory, CONTROL + 240, family);
+        for (explicit, initial, status, connected) in [(0, 1, 0, 0), (1, 1, 45, 1), (1, 0, 0, 0)] {
+            put(memory, CONTROL + 1304, 0);
+            let words = h.invoke("main.gg", "udp_binding", &[ipv6, explicit], memory);
+            let address = h.allocate(memory, words.len() * 8);
+            for (index, value) in words.into_iter().enumerate() {
+                put(memory, address + index as u64 * 8, value);
+            }
+            h.invoke(
+                TRANSPORT,
+                "record_datagram_binding",
+                &[CONTROL, address],
+                memory,
+            );
+            put(memory, CONTROL + 1248, initial);
+            let disconnect = node(h, memory, 8, 0, 0);
+            if explicit == 0 {
+                h.script.push_back((28, 0, 0));
+            }
+            submit(h, memory, disconnect);
+            assert_eq!(word(memory, CONTROL + 1248), connected);
+            assert_eq!(word(memory, disconnect + 72), status);
+            assert!(h.script.is_empty());
+        }
+    }
 }
 
 #[test]

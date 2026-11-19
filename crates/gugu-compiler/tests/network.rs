@@ -87,6 +87,7 @@ fn listener_and_datagram_bind_link_macos_libsystem() {
         b"_bind\0",
         b"_kevent\0",
         b"_recvmsg\0",
+        b"_disconnectx\0",
     ] {
         assert!(image.windows(name.len()).any(|value| value == name));
     }

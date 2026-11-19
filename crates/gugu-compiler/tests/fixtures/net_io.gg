@@ -1,4 +1,4 @@
-use std.net.{TcpStream, UdpSocket, SocketAddr, IpAddr, Ipv4Addr, DatagramBindOptions, Shutdown}
+use std.net.{TcpStream, UdpSocket, SocketAddr, IpAddr, Ipv4Addr, Ipv6Addr, DatagramBindOptions, Shutdown}
 use std.io.{Read, Write, Bytes, Error}
 use std.sync.{CancelSource}
 use std.time.{Duration}
@@ -24,3 +24,10 @@ fn packets(value: UdpSocket) Result[(), Error] {
     Ok(())
 }
 fn main() { _ = UdpSocket::bind(SocketAddr::new(IpAddr::V4(Ipv4Addr::new(127, 0, 0, 1)), 0), DatagramBindOptions::new()) }
+#[used]
+fn udp_binding(ipv6: bool, explicit: bool) SocketAddr {
+    let ip = if ipv6 {
+        IpAddr::V6(Ipv6Addr::new([0, 0, 0, 0, 0, 0, 0, if explicit { u16(1) } else { u16(0) }]))
+    } else { IpAddr::V4(Ipv4Addr::new(if explicit { byte(127) } else { byte(0) }, 0, 0, 0)) }
+    SocketAddr::new(ip, 0)
+}

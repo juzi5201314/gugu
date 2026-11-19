@@ -5,6 +5,7 @@ use std.runtime.net_platform as native
 use std.runtime.net_wait as waiting
 use std.runtime.net_endpoint as endpoint
 use std.runtime.net_datagram as datagram
+use std.runtime.net_transport as transport
 use std.runtime.net_connect as connecting
 use std.runtime.net_deadline as timeout
 
@@ -126,7 +127,9 @@ impl Write for TcpWriteHalf {
 }
 impl UdpSocket {
     pub fn bind(address: SocketAddr, options: DatagramBindOptions) Result[Self, Error] {
-        Ok(Self { cell: bind(address, false, 0, options.reuse_address, options.ipv6_mode)? })
+        let cell = bind(address, false, 0, options.reuse_address, options.ipv6_mode)?
+        transport.record_datagram_binding(cell.control, address)
+        Ok(Self { cell })
     }
     pub fn local_addr(self: &Self) Result[SocketAddr, Error] = endpoint.address(&self.cell, false)
     pub fn peer_addr(self: &Self) Result[SocketAddr, Error] { endpoint.connected(&self.cell, true)?

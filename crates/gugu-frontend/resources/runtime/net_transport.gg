@@ -7,6 +7,7 @@ use std.runtime.fs_platform.{FsResult, control_allocate, control_free}
 use std.runtime.heap.{heap_word, heap_store_word, heap_word32, heap_store_word32, heap_fail}
 use std.runtime.scheduler.{park_current, ready_hot}
 use std.io.{Error}
+use std.net.address.{IpAddr, SocketAddr}
 
 pub const READ: uint = 0
 pub const WRITE: uint = 1
@@ -23,6 +24,7 @@ const TAIL: uint = 1224
 pub const CONNECTED: uint = 1248
 pub const SHUT: uint = 1256
 const REGISTERED: uint = 1264
+const SPECIFIC_BINDING: uint = 1304
 pub const OVERLAPPED: uint = native.TRANSPORT_OVERLAPPED
 pub const ADDRESS: uint = 128
 pub const SCRATCH: uint = 512
@@ -168,26 +170,55 @@ fn mode_error(node: uint) uint {
 }
 pub const INVALID_STATE: uint = 18446744073709551612
 pub const NOT_CONNECTED: uint = 18446744073709551611
+#[cfg(os = "macos")]
+pub fn record_datagram_binding(control: uint, address: SocketAddr) {
+    match address.ip() {
+        IpAddr::V4(ip) => {
+            for octet in ip.octets() {
+                if octet != 0 { heap_store_word(control + SPECIFIC_BINDING, 1) }
+            }
+        },
+        IpAddr::V6(ip) => {
+            if address.scope_id() != 0 { heap_store_word(control + SPECIFIC_BINDING, 1) }
+            for segment in ip.segments() {
+                if segment != 0 { heap_store_word(control + SPECIFIC_BINDING, 1) }
+            }
+        },
+    };
+}
+#[cfg(not(os = "macos"))]
+pub fn record_datagram_binding(control: uint, address: SocketAddr) {
+    _ = control
+    _ = address
+}
 fn udp_control(node: uint) FsResult {
     let control = heap_word(node + 16)
     let connected = heap_word(node + 48) == UDP_CONNECT
     let handle = heap_word(control + 64)
     let result = if connected {
         native.request(node + SCRATCH, 21, handle, node + ADDRESS, heap_word(node + 96), 0, 0, 0)
-    } else { disconnect_datagram(node, handle) }
+    } else { disconnect_datagram(node, control, handle) }
     if result.error == 0 { heap_store_word(control + CONNECTED, if connected { 1 } else { 0 }) }
     result
 }
 #[cfg(not(os = "macos"))]
-fn disconnect_datagram(node: uint, handle: uint) FsResult =
+fn disconnect_datagram(node: uint, control: uint, handle: uint) FsResult {
+    _ = control
     native.request(node + SCRATCH, 21, handle, node + ADDRESS, heap_word(node + 96), 0, 0, 0)
+}
 #[cfg(os = "macos")]
-fn disconnect_datagram(node: uint, handle: uint) FsResult {
+fn disconnect_datagram(node: uint, control: uint, handle: uint) FsResult {
+    if heap_word(control + CONNECTED) == 0 { return FsResult { value: 0, error: 0 } }
+    if heap_word(control + native.FAMILY) != 1 {
+        // Darwin 清除本地 IP；同一个 socket 无法重新 bind。
+        if heap_word(control + SPECIFIC_BINDING) != 0 { return FsResult { value: 0, error: 45 } }
+        return native.request(node + SCRATCH, 28, handle, 0, 0, 0, 0, 0)
+    }
     let address = node + ADDRESS
     let length = heap_word(node + 96)
     native.put_family(address, 0, length)
     let result = native.request(node + SCRATCH, 21, handle, address, length, 0, 0, 0)
-    // Darwin 可已解除 peer，却拒绝 AF_UNSPEC（IP: EAFNOSUPPORT，Unix: EINVAL）。
+    // Darwin Unix socket 可已解除 peer，却拒绝 AF_UNSPEC。
     if result.error == 47 || result.error == 22 {
         let size = node + 304
         heap_store_word32(size, 128)

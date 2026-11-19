@@ -351,7 +351,7 @@ Darwin 的对齐地址预留先将请求长度向上取整为整页，再裁剪�
 
 Darwin datagram 接收使用 `recvmsg` 的返回标志识别 `MSG_TRUNC`，不能将写满缓冲的报文误判为完整报文。
 
-Darwin 的 datagram disconnect 遇到 `AF_UNSPEC` 被拒绝时，只有确认 native socket 已不再关联 peer 才提交断开状态。
+Darwin 用 `disconnectx` 解除通配地址 UDP socket 的 peer，保留本地端口。Darwin 会清除已连接 UDP socket 的本地 IP，且同一 socket 无法重新绑定；原先绑定具体地址的 UDP socket 在调用原生断开前返回 `Unsupported`，保留绑定和 peer。Unix datagram 的 `AF_UNSPEC` 被拒绝时，只有确认 native socket 已不再关联 peer 才提交断开状态。
 
 ### 外部错误状态
 
