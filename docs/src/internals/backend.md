@@ -712,6 +712,18 @@ runtime-ABI 的 `A64ForeignCallPacket` 保留完整的 176-byte `ForeignCallPack
 协议。shared prefix 的 reserved 字保持零。此阶段只定义布局和原始 C 签名，尚未把
 A64 worker、栈切换或 LIR 外调 lowering 接入；外调仍显式拒绝，不登记新目标。
 
+`foreign::classify` 按 canonical C 类型分别分类 Linux 与 Darwin，不从旧的 SysV/Win64
+车道推断 HFA 或符号性。Darwin 不跳过奇数 GPR；固定窄栈参数紧凑排列，匿名参数
+默认提升后全部使用 8-byte 栈槽；Linux 的 16-byte 对齐参数从偶数 GPR 开始。
+HFA 不能拆分到剩余 FP 寄存器与栈；大于 16-byte 的非 HFA 值通过 raw 副本间接传递。
+
+`fragments::foreign_native_worker` 是已获 admission 的 OS native 线程入口，依赖调用方
+提供独立、16-byte 对齐的 system stack；不能直接从协程栈调用。它有界探测栈参数区，
+加载 x0–x8/d0–d7，保存 x0/x1/d0–d3 和线程 errno，release 发布/清除线程 id，
+不清除 thread handle、不发布已 join 或释放 credit。线程启动、join 确认和调度仍需平台绑定。
+Linux C 引用保留 raw 名，Darwin 函数使用 `import_stub_symbol`；Data 符号不加函数桩前缀。
+字节 VM 使用 TLS 函数、admission/copy-back 与栈移动替身，绝不执行 OS FFI 或线程。
+
 ### A64 生产源与镜像数据绑定
 
 `runtime/a64.gg` 随已有 runtime source table 提供，用现有 `#![cfg(arch = "aarch64")]`

@@ -3,6 +3,7 @@ mod atomic;
 mod atomic_vm;
 mod calls;
 mod control;
+mod foreign_worker;
 mod fp;
 mod fp_vm;
 mod integer;

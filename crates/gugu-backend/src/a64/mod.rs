@@ -9,6 +9,7 @@ pub mod contract;
 pub mod decode;
 pub mod elf;
 pub mod encode;
+pub mod foreign;
 mod fp;
 pub mod fragments;
 pub mod frame;

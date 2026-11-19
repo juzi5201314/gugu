@@ -7,6 +7,7 @@ mod darwin_net;
 mod darwin_process;
 mod darwin_resolver;
 mod entry;
+mod foreign;
 mod linux_entry;
 mod linux_fd;
 mod poll;
@@ -22,6 +23,7 @@ pub use darwin_process::{darwin_process_call, darwin_process_imports, darwin_pro
 pub use darwin_resolver::{darwin_resolver_imports, darwin_resolver_symbol};
 pub(crate) use entry::darwin_main;
 pub use entry::rt0;
+pub use foreign::foreign_native_worker;
 pub(crate) use linux_entry::linux_main;
 pub use linux_fd::linux_fd_dispatch;
 pub use poll::safepoint_slow;
