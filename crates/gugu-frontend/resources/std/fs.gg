@@ -3,6 +3,8 @@ use std.io as io
 use std.text.{Bytes, alloc_bytes}
 use std.path.{Path, OsString, native_bytes, from_native_bytes}
 use std.runtime.fs_platform.{raw_allocate, raw_free, FsResult}
+
+use std.runtime.permission as permission
 #[cfg(os = "linux")]
 use std.runtime.fs_platform.{call, call_cancel}
 #[cfg(os = "windows")]
@@ -98,12 +100,24 @@ fn snapshot(path: Path) Result[Path, Error] {
     resolve(context.snapshot_cwd(), path)
 }
 fn path_call(op: uint, path: Path, argument: uint, output: uint) Result[uint, Error] {
+    // build task 权限门：按 op 归类读/写；非 build 上下文立即放行。
+    if op == uint(0) {
+        if argument & uint(6) != uint(0) { permission::check_file(path, true) }
+        else { permission::check_file(path, false) }
+    } else if op == uint(5) || op == uint(11) {
+        permission::check_file(path, false)
+    } else if op == uint(14) || op == uint(15) || op == uint(16) {
+        permission::check_file(path, true)
+    } else {
+    }
     let bytes = native_bytes(path)?
     let raw = raw_bytes(bytes)
     defer { raw_free(raw, uint(bytes.len()) + 1) }
     checked(call(op, raw, argument, output, 0, 0, 0))
 }
 fn pair_call(op: uint, from: Path, to: Path) Result[(), Error] {
+    permission::check_file(from, true)
+    permission::check_file(to, true)
     let first = native_bytes(from)?
     let second = native_bytes(to)?
     let a = raw_bytes(first)
@@ -249,6 +263,7 @@ pub fn exists(path: Path) Result[bool, Error] {
     match metadata(path, true) { Ok(_) => Ok(true), Err(Error::NotFound) => Ok(false), Err(error) => Err(error) }
 }
 fn returned_path(op: uint, path: Path) Result[Path, Error] {
+    permission::check_file(path, false)
     let input = native_bytes(path)?
     let raw = raw_bytes(input)
     defer { raw_free(raw, uint(input.len()) + 1) }

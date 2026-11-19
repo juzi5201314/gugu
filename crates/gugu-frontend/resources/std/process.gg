@@ -5,6 +5,8 @@ use std.io.{Read, ByteBuffer}
 use std.sync.{CancelSource}
 use std.runtime.process_spawn as spawn
 use std.runtime.process_state as state
+
+use std.runtime.permission as permission
 pub use std.io.{Error}
 pub use std.runtime.process_spawn.{Stdio}
 pub use std.runtime.process_state.{Child, ExitStatus}
@@ -25,8 +27,12 @@ impl Command {
     pub fn stdin(self: &Self, value: Stdio) { self.configuration.input = value }
     pub fn stdout(self: &Self, value: Stdio) { self.configuration.output = value }
     pub fn stderr(self: &Self, value: Stdio) { self.configuration.error = value }
-    pub fn spawn(self: &Self) Result[Child, Error] = Ok(state.adopt(spawn.spawn(spawn.snapshot(self.configuration))?))
+    pub fn spawn(self: &Self) Result[Child, Error] {
+        permission::check_run(self.configuration.executable)
+        Ok(state.adopt(spawn.spawn(spawn.snapshot(self.configuration))?))
+    }
     pub fn output(self: &Self) Result[Output, Error] {
+        permission::check_run(self.configuration.executable)
         let configuration = spawn.snapshot(self.configuration)
         configuration.input = Stdio::null()
         configuration.output = Stdio::pipe()

@@ -548,10 +548,12 @@
   - 接入证据：`project::ActionStore`（`<cache>/actions/v1/entries/<key>/`，`tmp/` 原子发布、`last_used_at` LRU、损坏 entry 隔离 `quarantine/`、使用窗口内不回收）；`gugu cache dir|clean|gc|verify` 与 `gugu clean --cache/--registry/--all` 接入 dispatch；`gugu build` 把镜像物化到 `target/<target>/{bin,lib,tests,benches,examples}` 并在 `build-logs/` 写 action graph JSONL；`--strip` 经 `backend::x64::strip` 做末端后处理，image 与 stripped image 记为两条 record；`emit-image` action 在镜像生成后 `complete`。
   - 验收证据：`action_store` 单元测试覆盖 publish/read、digest 不符、verify 隔离、LRU 淘汰跳过使用窗口、clean；`strip` 测试覆盖非法输入拒绝与 PE debug 目录清零；手工验证 `gugu build` 物化 `target/x86_64-linux/bin/hello` + build-log，`--strip` 产生两条末端 record，`gugu clean` 只删 `target/` 不动全局缓存。
 
-- [ ] **阶段 72：实现 build.gg、权限门与生成模块闭环**（复杂度：5）
+- [x] **阶段 72：实现 build.gg、权限门与生成模块闭环**（复杂度：5）
   - 依赖：阶段 05、06、58、66、68、71。
   - 实现 build.gg host 编译、std.build.run、out_dir、rerun 记录、emit_module、define_cfg、link metadata、permission advisory gate、TTY/非交互授权和授权失效。
   - 验收：build task 在 target 源码前运行；输出协议与 rerun 输入完整；权限门不被描述为 sandbox；`--permission` 缺授权的非交互构建失败；生成模块进入 cfg/name/type/HIR/cache 闭包。
+  - 接入证据：`std.runtime.build_task` 向 `GUGU_BUILD_RECORD` 按序追加 TAB 分隔记录（`rerun-file`/`rerun-env`/`rerun-always`/`emit`/`define`/`link`/`link-search`/`warning`/`error`/`run-*`）；`std.runtime.permission` 挂在 fs/env/process/net 的 std 层检查点，经 `GUGU_PERM_MODE` 与 `GUGU_PERM_*` 规则在 build task 上下文内做 advisory 检查，fs 规则按目录前缀匹配；CLI 在 target 编译前把 build target 编为 host 镜像并执行（`GUGU_BUILD_*` env 协议），模块闭包只含 `build.gg`；`emit_module` 内容以 `generated.<name>` 逻辑路径注入后续 target 的源码闭包，`define_cfg` 进入 `custom_cfg`，`link` 记录进入 `NativeLink`；指纹（manifest+build.gg+feature+host+target+rerun 声明，未声明时全包树）驱动重跑或复用 record。交互式 TTY 询问与永久授权本版本未实现，规范已如实收窄为非交互拒绝+预授权规则。`std.text.concat` 修复 right 段写到 offset 0 的损坏（`+` 拼接与记录协议依赖）。
+  - 验收证据：`gugu-frontend` 单测覆盖 `generated_logical_path` 校验与 `generated.*` 快照注入；手工验证 demo 包：`build.gg` 写出 `out/values.gg` + `emit_module` 后 lib 经 `use generated.values` 编译通过、`define` 的 `#[cfg(edition = "2026")]` 生效、`--permission` 下 `/etc/passwd` 读取被拒且 `--read-allows /etc` 前缀放行、`record`/`inputs` 落盘 `target/build/<pkg>-<key>/`。
 
 - [ ] **阶段 73：完成 CLI 命令端到端编排**（复杂度：5）
   - 依赖：阶段 04–06、09、56、57、69–72。

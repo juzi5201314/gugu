@@ -256,7 +256,7 @@ package 根存在 `build.gg` 时，它是唯一 build task。没有该文件且�
 fn main() Result[(), string]
 ```
 
-返回 `Err`、panic 或违反输出协议都会使 package 构建失败。build task 可以使用完整 Gugu、unsafe、FFI 和宿主标准库；权限门不是安全沙箱，低层代码可以绕过它。
+返回 `Err`、panic 或违反输出协议都会使 package 构建失败。build task 可以使用完整 Gugu、unsafe、FFI 和宿主标准库；权限门不是安全沙箱，低层代码可以绕过它。build task 的模块闭包只包含 `build.gg` 自身与 `[build.dependencies]` 提供的模块——package 其余源码不进入 build task 编译，`emit_module` 产生的 `generated.*` 模块也只注入 target 编译，不回流到 build task。build task 编译域定义 `cfg(build_task)` 为真，build.gg 可据此条件化只面向构建场景的代码路径；普通 target 编译不定义该 atom。
 
 `std.build` 提供类型化构建接口，至少包括：
 
@@ -290,7 +290,7 @@ fn error(message: string) !
 fn run(executable: string, args: &[string], options: RunOptions) ProcessOutput
 ```
 
-构建信息通过这些类型化 API 传递，不解析 stdout 魔法指令。所有 `std.build` 调用共享一条按序追加的原生 action 记录：构建宿主在任务开始时写入 out_dir/host/target/features 头，每个 API 追加对应条目，宿主在任务结束时回收——因此 `std.build` 只能在 build task 上下文中调用，任务外调用（包括普通程序里的调用）一律 panic。`emit_module` 的文件必须位于 `out_dir()` 下，并以保留根 `generated.<name>` 加入当前 package；同名用户模块或重复 emit 是错误。`link_library` 的 kind 只能是 `"static"` 或 `"dynamic"`，最终仍由 Gugu 编译器写 ELF/PE，不调用系统链接器。`define_cfg*` 不能覆盖内置 cfg、feature 或另一不同值，并进入缓存 key。`run` 捕获 stdout/stderr，进程非零退出不会自动 panic，由 build.gg 根据 `code` 决定；无法启动进程则 panic。
+构建信息通过这些类型化 API 传递，不解析 stdout 魔法指令。所有 `std.build` 调用共享一条按序追加的原生 action 记录：构建宿主在任务开始时写入 out_dir/host/target/features 头，每个 API 追加对应条目，宿主在任务结束时回收——因此 `std.build` 只能在 build task 上下文中调用，任务外调用（包括普通程序里的调用）一律 panic。`emit_module` 的文件必须位于 `out_dir()` 下，并以保留根 `generated.<name>` 加入当前 package；同名用户模块或重复 emit 是错误。`link_library` 的 kind 只能是 `"static"` 或 `"dynamic"`，最终仍由 Gugu 编译器写 ELF/PE，不调用系统链接器。`dynamic` 记录映射为纯装载依赖（ELF `DT_NEEDED`/PE 导入目录条目，不产生待解析符号）；`static` 需要归档搜索路径通道，本版本未接入，记录即构建错误。`link_search` 与 `link` 的 `path` 字段记录为元数据，链接器搜索路径在本版本未接入。`define_cfg*` 不能覆盖内置 cfg、feature 或另一不同值，并进入缓存 key。`run` 捕获 stdout/stderr，进程非零退出不会自动 panic，由 build.gg 根据 `code` 决定；无法启动进程则 panic。
 
 build.gg 首次构建必定执行。执行期间调用 `rerun_if_changed` / `rerun_if_env_changed` 记录下一次重跑条件；任一匹配输入变化、build.gg/清单/build 依赖变化、宿主/目标/feature 变化或 `rerun_always` 都使任务失效。一次成功执行没有登记任何 rerun 条件时，默认 package 归档范围内任一文件变化都重跑，与 Cargo build.rs 一致。
 
@@ -304,20 +304,21 @@ build.gg 不能直接调用 `std.process.Command` 或 `ShellCommand`；外部进
 
 权限门默认关闭；关闭时 build.gg 的文件、环境、网络和进程操作全部放行，行为与普通本地程序相同。`--permission` 开启规则检查：
 
-- 已有匹配的永久授权则放行；
-- 交互 TTY 中没有匹配项时显示 package 身份、build.gg 内容哈希、操作、路径/主机或 executable+argv，并询问；
-- 同意后永久记录，不提供“仅本次”或“本次会话”；
-- 非交互环境中没有匹配项立即失败；
+- `GUGU_PERM_{READ,WRITE,ENV,NET,RUN}` 与对应 `--*-allows` 命令行列表提供预授权规则；`--read-allows`、`--write-allows` 的无通配规则按目录前缀匹配（`/etc` 覆盖 `/etc/passwd`），其余按 `*` 单通配 glob 比较；文件读写的路径参数含 `..` 词法段时一律拒绝，不做归一化推断（`/work/out/../x` 不能借前缀授权逃逸）；
+- 非交互环境（stdin 非 TTY，或 `GUGU_PERM_NONINTERACTIVE`）中没有匹配项立即失败；交互式询问与永久授权存储在本版本未实现，授权只能通过命令行或环境变量逐次给出；
 - `-A` 显式允许全部操作；
-- `--read-allows`、`--write-allows`、`--env-allows`、`--net-allows`、`--run-allows` 可以预先提供精确或 glob 规则。
+- 拒绝表现为 build task 以带说明的 panic 退出，不记录 deny 状态，宿主将任务视为失败；
+- 工具链自身对 record 文件与 out_dir 的写入不经权限门，out_dir 同时是 `emit_module` 等生成操作的授权输出区；记录中的 emit 路径经词法归一（折叠 `.`/`..`）后仍须落在 out_dir 内，越界或无前缀的记录直接判为构建错误；
+- 权限门当前只在 Linux 宿主编译域生效：windows 目标中检查点为空操作，授权判定不生效；windows 宿主的 env 读取通道在本版本未实现。
+- env 检查点覆盖 `std.env` 全量操作与 `rerun_if_env_changed` 声明读取；run 检查点在 `std.build.run` 与 `std.process` 的启动点；net 检查点覆盖 TCP connect、bind 与 UDP `send_to`/`connect` 的远端地址。
+- 记录协议字段中的 TAB/CR/LF 统一清洗为空格，字段内容不能伪造额外记录行；`rerun-env` 记录只保存变量名，宿主在计算指纹时重新读取值，明文不落盘。
+- 同一 package 的 build task 目录（record/inputs/out/lock）在并发构建间互斥：锁文件以 hard_link 原子创建并记录宿主与 build task 子进程 pid（不支持硬链接的文件系统退回 create_new 写入，子进程 pid 同样原子写入），全部退出或进入僵尸态才视为残留锁，由原子 rename 认领回收而非直接删除；无法读出 pid 的锁文件超过数秒窗口同样按残留处理；持有者在运行时后到的进程等待锁释放，超时即报错，不会混读另一进程的产物；指纹文件只在任务成功后才写出，失败留下的半截记录不会被后续构建复用。
 
-永久授权绑定到 package source、owner/name、version、registry 归档 checksum 或 Git tree/path 身份、build.gg 内容哈希和规范化操作。版本、source、checksum、build.gg 或被批准操作变化后不匹配旧授权，必须重新确认。拒绝只使当前构建失败，不写永久 deny。
-
-`--run-allows` 同时匹配规范化 executable 路径 glob 与 argv 各位置的 glob；规则缺少 argv 部分时只授权 executable，不限制参数。Windows 路径比较使用规范大小写与分隔符，Unix 按字节区分大小写。TUI 始终显示最终解析路径和 argv 数组，不把参数拼成 shell 字符串。
+`--run-allows` 同时匹配规范化 executable 路径 glob 与 argv 各位置的 glob；规则缺少 argv 部分时只授权 executable，不限制参数。Windows 路径比较使用规范大小写与分隔符，Unix 按字节区分大小写。
 
 该机制完全是 advisory 规则检查，不是 OS sandbox：build.gg 可以通过 unsafe、FFI、直接 syscall、已获准进程或修改工具状态绕过；`-A` 也允许写任意宿主位置，包括缓存。工具必须在界面和文档中明确这一点，不能把 `--permission` 描述为执行不可信依赖的安全边界。
 
-永久授权放在用户配置目录，不写 workspace、锁文件或 package 归档。授权与否不进入编译缓存 key；它只决定本次需要执行 build.gg 时某个操作能否发生。
+授权与否不进入编译缓存 key；它只决定本次需要执行 build.gg 时某个操作能否发生。
 
 ## 缓存与 Target 视图 {#cache-and-target-view}
 

@@ -21,6 +21,12 @@ pub(super) fn blobs(request: &LinkRequest) -> Result<Vec<Blob>, String> {
     let mut symbols = vec![0; SYMBOL_BYTES];
     let mut needed = Vec::new();
     let mut names = std::collections::BTreeSet::new();
+    // Library 导入只占一条 DT_NEEDED，不进 dynsym/rela。
+    let relocations = request
+        .imports
+        .iter()
+        .filter(|import| import.kind != crate::NativeImportKind::Library)
+        .count();
     for crate::NativeImport {
         library,
         name,
@@ -30,7 +36,7 @@ pub(super) fn blobs(request: &LinkRequest) -> Result<Vec<Blob>, String> {
         if library.is_empty() || name.is_empty() || library.contains('\0') || name.contains('\0') {
             return Err("动态导入名为空或包含 NUL".into());
         }
-        if !names.insert(name.as_str()) {
+        if *kind != crate::NativeImportKind::Library && !names.insert(name.as_str()) {
             return Err(format!("动态符号 {name} 重复导入"));
         }
         if !offsets.contains_key(library) {
@@ -39,6 +45,9 @@ pub(super) fn blobs(request: &LinkRequest) -> Result<Vec<Blob>, String> {
             needed.push((DT_NEEDED, offset));
             strings.extend_from_slice(library.as_bytes());
             strings.push(0);
+        }
+        if *kind == crate::NativeImportKind::Library {
+            continue;
         }
         let name_offset = u32::try_from(strings.len()).map_err(|_| "动态字符串表超过 u32")?;
         strings.extend_from_slice(name.as_bytes());
@@ -49,6 +58,7 @@ pub(super) fn blobs(request: &LinkRequest) -> Result<Vec<Blob>, String> {
         symbols[at + 4] = match kind {
             crate::NativeImportKind::Function => 0x12, // STB_GLOBAL | STT_FUNC。
             crate::NativeImportKind::Data => 0x11,     // STB_GLOBAL | STT_OBJECT。
+            crate::NativeImportKind::Library => 0x10,
         };
     }
     for symbol in &request.symbols {
@@ -89,7 +99,7 @@ pub(super) fn blobs(request: &LinkRequest) -> Result<Vec<Blob>, String> {
         (DT_STRTAB, 0),
         (DT_SYMTAB, 0),
         (DT_RELA, 0),
-        (DT_RELASZ, request.imports.len() as u64 * 24),
+        (DT_RELASZ, relocations as u64 * 24),
         (DT_RELAENT, 24),
         (DT_STRSZ, strings.len() as u64),
         (DT_SYMENT, 24),
@@ -115,7 +125,7 @@ pub(super) fn blobs(request: &LinkRequest) -> Result<Vec<Blob>, String> {
         },
         Blob {
             name: ".rela.dyn".into(),
-            bytes: vec![0; request.imports.len() * 24],
+            bytes: vec![0; relocations * 24],
         },
         Blob {
             name: ".dynamic".into(),
@@ -127,9 +137,14 @@ pub(super) fn blobs(request: &LinkRequest) -> Result<Vec<Blob>, String> {
 pub(super) fn patch(
     file: &mut [u8],
     defined: &BTreeMap<String, u64>,
-    imports: usize,
     request: &LinkRequest,
 ) -> Result<(), String> {
+    // Library 导入不产符号/重定位：dynsym 序数与 GOT 槽分别按各自口径枚举。
+    let imports = request
+        .imports
+        .iter()
+        .filter(|import| import.kind != crate::NativeImportKind::Library)
+        .count();
     let Some(&dynamic) = defined.get(".dynamic") else {
         return Ok(());
     };
@@ -160,15 +175,20 @@ pub(super) fn patch(
         put_u64(file, at + 8, defined[&symbol.name])?;
     }
     let relocations = defined[".rela.dyn"] as usize;
-    for index in 0..imports {
-        let at = relocations + index * 24;
+    let mut ordinal = 0_usize;
+    for (slot, import) in request.imports.iter().enumerate() {
+        if import.kind == crate::NativeImportKind::Library {
+            continue;
+        }
+        let at = relocations + ordinal * 24;
         put_u64(
             file,
             at,
-            defined["__gugu_stack_limit"] + 128 + index as u64 * 8,
+            defined["__gugu_stack_limit"] + 128 + slot as u64 * 8,
         )?;
         put_u32(file, at + 8, 6)?; // R_X86_64_GLOB_DAT。
-        put_u32(file, at + 12, (index + 1) as u32)?;
+        put_u32(file, at + 12, (ordinal + 1) as u32)?;
+        ordinal += 1;
     }
     Ok(())
 }

@@ -7,6 +7,8 @@ use std.runtime.net_endpoint as endpoint
 use std.runtime.net_datagram as datagram
 use std.runtime.net_connect as connecting
 use std.runtime.net_deadline as timeout
+
+use std.runtime.permission as permission
 use std.runtime.resource.{ResourceCell}
 use std.io.{Error, CancelToken, Read, Write, Bytes, ByteBuffer}
 use std.time.{Duration}
@@ -52,6 +54,7 @@ pub struct UdpSocket { cell: ResourceCell }
 
 fn dual(mode: Ipv6BindMode) bool = match mode { Ipv6BindMode::V6Only => false, Ipv6BindMode::DualStack => true }
 fn bind(address: SocketAddr, tcp: bool, backlog: int, reuse: bool, mode: Ipv6BindMode) Result[ResourceCell, Error] {
+    permission::check_net(address.to_string())
     let handle = native.bind(address, tcp, backlog, reuse, dual(mode))?
     match waiting.initialize() {
         Ok(_) => Ok(endpoint.create(handle, endpoint.family(address))),

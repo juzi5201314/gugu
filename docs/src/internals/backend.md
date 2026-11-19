@@ -28,6 +28,8 @@ Rt0Payload revision=5、144 字节；Linux 独立寄存器保存初始 argc/argv
 
 原生导入明确分 Function/Data。ELF 为每项提供 `__gugu_got_<name>` 槽符号，Data 的 dynsym 为 STT_OBJECT、重定位为 GLOB_DAT，不生成 PLT；environ 操作加载槽中的变量地址，再由 Gugu 读取当前 char**。导入 environ 时，rt0 使用参数块 reserved_14 定位 GOT，仅在变量为 NULL 时以启动 envp 初始化，保留 loader/构造器修改。没有此数据导入便不发射初始化代码。PE 使用 IAT 槽，普通 C 外调只接受 Function。
 
+权限门在 Linux 读取宿主环境变量不导入 environ：process_context 在 boot_args 时把 `argv[argc]` 之后紧随的 envp 指针表记入上下文槽（偏移 56），permission 模块直接扫描该表匹配 `NAME=` 前缀。这样 std.fs 等带权限检查点的模块闭包不携带 environment 依赖，不会通过 with_implied 向每个使用它们的程序注入 glibc/pthread/interpreter 链接要求。Windows argv 无 envp 布局，permission 仍走 environment 模块的 GetEnvironmentVariable。
+
 ## 后端阶段
 
 cage 控制记录含机器更新的解码计数，ELF 将其放在 rt0 只读收尾范围之外的保留可写区，PE 放在 `.data`；两者都不可执行。PE 的 cage 重定位直接使用数据 RVA，不叠加文本 RVA。私有 `cage_control` 访问器与解码序列共用 `CageControl` relocation，因此公开统计与机器更新消费同一份记录。栈深度读取/复制片段在入口根据当前 r14 的 stack_high 重建地址，复制尾跳 glue 域的既有 memcpy；不能误用 runtime 域同名符号。时钟由两个片段分别提供：`monotonic_nanos` 在 Linux 使用 CLOCK_BOOTTIME（计入系统挂起时间）、在 Windows 使用 GetTickCount64；`wall_nanos` 在 Linux 使用 CLOCK_REALTIME、在 Windows 读取 GetSystemTimePreciseAsFileTime 并把 FILETIME 换成 Unix epoch 纳秒（输出缓冲位于 shadow space 之上）。双目标镜像布局与登记片段重定位回归分别验证页权限、地址及尾跳定义。

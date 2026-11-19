@@ -7,7 +7,7 @@ pub struct Bytes {
 pub fn concat(left: &[byte], right: &[byte]) string {
     let data = unsafe { alloc_bytes(left.len() + right.len()) }
     for index in 0..left.len() { data[index] = left[index] }
-    for index in 0..right.len() { data[index] = right[index] }
+    for index in 0..right.len() { data[left.len() + index] = right[index] }
     unsafe { std.runtime.string_from_utf8_unchecked(data) }
 }
 

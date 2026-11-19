@@ -1,0 +1,147 @@
+//! `std.runtime.permission` —— build task 权限门（advisory）。
+//!
+//! 这不是安全边界：门只约束 build task 宿主进程内经 std API 的文件、环境、
+//! 网络与进程操作。`GUGU_PERM_MODE`：`advisory` 生效、`allow-all`/`off` 放行；
+//! 规则来自 `GUGU_PERM_{READ,WRITE,ENV,NET,RUN}`（分号分隔 glob），非交互
+//! (`GUGU_PERM_NONINTERACTIVE=1`) 无匹配即拒绝。
+//! 注意：不能 `use std.env`/`std.fs`——它们经本模块做权限检查，必须保持无环。
+//! 也不能依赖 `std.runtime.environment` 做 linux env 读取：`EnvironmentSymbol`
+//! 机器指令会让所有 std.fs/process/net 用户获得隐式 glibc/pthread 导入。
+//! linux 改为直接扫 `process_context` 启动快照的 envp 指针表。
+//! windows 目标暂无免 environment 的宿主 env 通道，env_text 返回空、门不生效
+//! （spec：windows 检查点为空操作，授权判定仅 linux 宿主编译域实现）。
+
+use std.path.{OsString, Path}
+use std.runtime.process_context as context
+use std.runtime.heap.{heap_word}
+use std.text.{Bytes}
+
+
+#[cfg(os = "linux")]
+fn env_text(name: string) string {
+    let base = context.environ()
+    if base == 0 { return "" }
+    let key = Bytes::from_string(name)
+    let index: uint = 0
+    loop {
+        let entry = heap_word(base + index * 8)
+        if entry == 0 { return "" }
+        // "NAME=VALUE" C 串：比 key 前缀后必须是 '='。
+        let position: int = 0
+        while position < key.len() && context.unit(entry + uint(position)) == uint(byte_at(key, position)) {
+            position = position + 1
+        }
+        if position == key.len() && context.unit(entry + uint(position)) == uint(61) {
+            let value = entry + uint(position) + 1
+            match context.copy_native(value, context.native_length(value)) {
+                Ok(os) => { match os.to_string() {
+                    Ok(text) => return text,
+                    Err(_) => return "",
+                } }
+                Err(_) => return "",
+            }
+        }
+        index = index + 1
+    }
+}
+
+#[cfg(os = "windows")]
+fn env_text(name: string) string = ""
+
+fn byte_at(text: Bytes, index: int) byte {
+    match text.get(index) { Some(b) => b, None => byte(0) }
+}
+
+// 单 `*` 通配任意段；规则 `**` 等同 `*`。
+fn wildcard(pattern: Bytes, text: Bytes, pi: int, ti: int) bool {
+    if pi == pattern.len() { return ti == text.len() }
+    if byte_at(pattern, pi) != byte(42) {
+        return byte_at(text, ti) == byte_at(pattern, pi) && wildcard(pattern, text, pi + 1, ti + 1)
+    }
+    let skip = pi
+    while byte_at(pattern, skip) == byte(42) { skip = skip + 1 }
+    if skip == pattern.len() { return true }
+    let probe = ti
+    while probe <= text.len() {
+        if wildcard(pattern, text, skip, probe) { return true }
+        probe = probe + 1
+    }
+    false
+}
+
+// `..` 词法成分可绕开文本前缀规则（`/work/out/../x` 归一后逃逸）：
+// path 模式下含 `..` 段的读写一律拒绝，不做归一化推断。
+fn has_dotdot(value: Bytes) bool {
+    let index: int = 0
+    while index + 1 < value.len() {
+        if byte_at(value, index) == byte(46) && byte_at(value, index + 1) == byte(46) {
+            let before = index == 0 || byte_at(value, index - 1) == byte(47) || byte_at(value, index - 1) == byte(92)
+            let after = index + 2 == value.len() || byte_at(value, index + 2) == byte(47) || byte_at(value, index + 2) == byte(92)
+            if before && after { return true } else {}
+        }
+        index = index + 1
+    }
+    false
+}
+
+// 无通配的规则按目录前缀匹配：`/etc` 覆盖 `/etc/passwd`。
+fn path_prefix(rule: Bytes, value: Bytes) bool {
+    if rule.len() == 0 || rule.len() > value.len() || !value.starts_with(rule) { return false }
+    if value.len() == rule.len() { return true }
+    byte_at(rule, rule.len() - 1) == byte(47) || byte_at(value, rule.len()) == byte(47)
+}
+
+fn internal_path(value: string) bool {
+    // 构建框架对 record 文件与 out_dir 的内部读写不经权限门；
+    // out_dir 也是 build.emit_module/run 的授权输出区。
+    let record = env_text("GUGU_BUILD_RECORD")
+    if record != "" && value == record { return true }
+    let out = env_text("GUGU_BUILD_OUT_DIR")
+    out != "" && path_prefix(Bytes::from_string(out), Bytes::from_string(value))
+}
+
+// 顺序扫 `;` 分隔规则流，path 模式额外加目录前缀匹配；不必构造规则 Vec。
+fn matches(list: string, value: string, path_mode: bool) bool {
+    if path_mode && has_dotdot(Bytes::from_string(value)) { return false }
+    if path_mode && internal_path(value) { return true }
+    let raw = Bytes::from_string(env_text(list))
+    let v = Bytes::from_string(value)
+    let start: int = 0
+    let index: int = 0
+    while index <= raw.len() {
+        if index == raw.len() || byte_at(raw, index) == byte(59) {
+            // 切片取 raw[start..index]：先截尾再断头。
+            let rule = raw.split_at(index).0.split_at(start).1
+            if rule.to_string_lossy() == "*" || wildcard(rule, v, 0, 0) { return true }
+            if path_mode && path_prefix(rule, v) { return true }
+            start = index + 1
+        }
+        index = index + 1
+    }
+    false
+}
+
+fn gate(op: string, list: string, value: string, path_mode: bool) {
+    let flag = env_text("GUGU_BUILD_TASK")
+    if env_text("GUGU_PERM_MODE") != "advisory" || !(flag == "1" || flag == "true" || flag == "yes") { return }
+    if matches(list, value, path_mode) { return }
+    panic("build task 权限门拒绝 " + op + ": " + value + "（以 --" + op + "-allows 授权）")
+}
+
+// write 为 true 检查写授权，false 检查读授权。
+pub fn check_file(path: Path, write: bool) {
+    if write { gate("write", "GUGU_PERM_WRITE", path.to_string_lossy(), true) }
+    else { gate("read", "GUGU_PERM_READ", path.to_string_lossy(), true) }
+}
+
+pub fn check_env(name: OsString) {
+    gate("env", "GUGU_PERM_ENV", name.to_string_lossy(), false)
+}
+
+pub fn check_net(address: string) {
+    gate("net", "GUGU_PERM_NET", address, false)
+}
+
+pub fn check_run(executable: Path) {
+    gate("run", "GUGU_PERM_RUN", executable.to_string_lossy(), false)
+}

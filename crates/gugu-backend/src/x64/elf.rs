@@ -435,7 +435,7 @@ fn defined_layout(request: &LinkRequest, header_end: u64) -> Result<BTreeMap<Str
     cursor = place(&mut map, "__gugu_stub_ret", cursor, 1)?;
     cursor = place(&mut map, "__gugu_stub_exit", cursor, 8)?;
     for (index, import) in request.imports.iter().enumerate() {
-        if import.kind == crate::NativeImportKind::Data {
+        if import.kind != crate::NativeImportKind::Function {
             continue;
         }
         let key = plt_name(index);
@@ -755,7 +755,7 @@ fn assemble(
     )?;
     write_text(&mut file, request, defined)?;
     write_readonly(&mut file, request, defined)?;
-    dynamic::patch(&mut file, defined, request.imports.len(), request)?;
+    dynamic::patch(&mut file, defined, request)?;
     write_relro(&mut file, request, defined, relocs)?;
     write_payload(&mut file, defined, request)?;
     let cage = crate::runtime::cage_control::CageControlRecord::boot_bytes(request.cage_bytes);
@@ -1010,7 +1010,7 @@ fn write_plt(
 ) -> Result<(), String> {
     let limit = defined["__gugu_stack_limit"];
     for index in 0..request.imports.len() {
-        if request.imports[index].kind == crate::NativeImportKind::Data {
+        if request.imports[index].kind != crate::NativeImportKind::Function {
             continue;
         }
         let plt = defined[&plt_name(index)];
