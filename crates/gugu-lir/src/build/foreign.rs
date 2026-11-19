@@ -189,6 +189,9 @@ pub(crate) fn describe(types: &[TypeLayout], ty: u32) -> crate::foreign::Type {
 }
 
 fn natural_alignment(types: &[TypeLayout], ty: u32) -> u32 {
+    if types[ty as usize].packed {
+        return 1;
+    }
     let alignment = |index: u32| types[index as usize].layout.expect("C 成员布局").align;
     (match &types[ty as usize].kind {
         TypeKind::Array { element, .. } => alignment(*element),

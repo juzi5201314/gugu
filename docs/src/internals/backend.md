@@ -740,9 +740,12 @@ runtime-ABI 的 `A64ForeignCallPacket` 保留完整的 176-byte `ForeignCallPack
 HFA 不能拆分到剩余 FP 寄存器与栈；大于 16-byte 的非 HFA 值通过 raw 副本间接传递。
 canonical HFA 要求成员从偏移零连续排列且总大小等于成员数乘元素大小；含尾 padding
 的过对齐聚合不是 HFA。producer 与 verifier 共用此检查。canonical 聚合另保留直接成员
-最大对齐（数组取元素对象对齐），不计聚合自身的 repr(align) 调整。Linux AAPCS64
+最大对齐（数组取元素对象对齐），不计聚合自身的 repr(align) 调整。具体 GIR 保留
+packed 标志，限制该聚合的成员对齐为 1；不能从可能又被 repr(align) 提高的对象对齐
+猜测 packing。Linux AAPCS64
 以此自然对齐（上限 16）分配参数寄存器和栈槽；Darwin 仍使用对象对齐。
-原始大小、分组对齐和 copy-back 不变；BuildLir schema/body revision=25 失效旧描述缓存。
+原始大小、分组对齐和 copy-back 不变；具体类型 schema=6、BuildLir schema/body revision=26
+失效旧描述缓存。
 
 `machine::ForeignCall` 在分配后展开。先把全部 SSA 输入保存到独立 staging 区，
 再构造 native 参数包，防止固定 scratch 覆盖尚未使用的输入。by-value、sret 与额外

@@ -178,6 +178,52 @@ fn overaligned_composites_keep_object_alignment_but_use_linux_natural_pcs_alignm
     }
 }
 
+#[test]
+fn packed_composites_honor_packing_before_outer_alignment() {
+    use crate::backend::a64::foreign::{Platform, Slot, classify};
+    use crate::lir::foreign::Kind;
+    let compilation = Compiler::shared().compile(CompileRequest::single_file(
+        "main.gg",
+        include_str!("fixtures/foreign_packed.gg"),
+        TargetName::X86_64Linux,
+    ));
+    assert!(
+        compilation.is_success(),
+        "{:?}",
+        compilation.diagnostics().items()
+    );
+    let mut calls = std::collections::BTreeMap::new();
+    for body in compilation.lir.as_ref().unwrap().bodies() {
+        for instruction in &body.instructions {
+            if let Op::ForeignCall(call) = &instruction.op {
+                record(&mut calls, call);
+            }
+        }
+        for block in &body.blocks {
+            if let Terminator::Invoke { call, .. } = &block.terminator {
+                record(&mut calls, call);
+            }
+        }
+    }
+    for (name, object_align) in [("packed", 1), ("aligned_packed", 16)] {
+        let signature = calls[name].foreign_signature.as_ref().unwrap();
+        assert_eq!(signature.arguments[1].align, object_align);
+        for platform in [Platform::Linux, Platform::Darwin] {
+            let layout = classify(signature, platform).unwrap();
+            assert_eq!(layout.arguments[1].pieces[0].slot, Slot::Integer(1));
+            assert_eq!(layout.arguments[1].pieces[1].slot, Slot::Integer(2));
+            assert_eq!(layout.arguments[2].pieces[0].slot, Slot::Integer(3));
+        }
+        assert_eq!(
+            signature.arguments[1].kind,
+            Kind::Aggregate {
+                hfa: None,
+                natural_align: 1
+            }
+        );
+    }
+}
+
 fn verify_metadata(calls: &std::collections::BTreeMap<&str, &Call>) {
     use crate::lir::foreign::{Hfa, Kind};
     for call in calls.values() {

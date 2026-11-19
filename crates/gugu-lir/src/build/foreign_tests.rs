@@ -6,6 +6,59 @@ use gugu_gir::{
 };
 
 #[test]
+fn packed_member_alignment_is_not_restored_by_outer_alignment() {
+    let wide = TypeLayout {
+        key: [0; 32],
+        layout: Some(Layout {
+            size: 16,
+            align: 16,
+        }),
+        kind: TypeKind::Int {
+            signed: false,
+            bits: 128,
+        },
+        passing: PassingClass::BITS,
+        transparent: false,
+        packed: false,
+        c_repr: None,
+    };
+    let mut types = vec![wide];
+    for (packed, align, expected) in [(false, 16, 16), (true, 1, 1), (true, 16, 1)] {
+        types.push(TypeLayout {
+            packed,
+            layout: Some(Layout { size: 16, align }),
+            kind: TypeKind::Aggregate {
+                tag_bytes: 0,
+                variants: vec![vec![Field { ty: 0, offset: 0 }]],
+            },
+            ..types[0].clone()
+        });
+        assert_eq!(
+            describe(&types, types.len() as u32 - 1).kind,
+            Kind::Aggregate {
+                hfa: None,
+                natural_align: expected
+            }
+        );
+    }
+    types.push(TypeLayout {
+        packed: false,
+        kind: TypeKind::Aggregate {
+            tag_bytes: 0,
+            variants: vec![vec![Field { ty: 3, offset: 0 }]],
+        },
+        ..types[0].clone()
+    });
+    assert_eq!(
+        describe(&types, 4).kind,
+        Kind::Aggregate {
+            hfa: None,
+            natural_align: 16
+        }
+    );
+}
+
+#[test]
 fn canonical_hfa_excludes_tail_and_nested_padding_but_keeps_dense_overalignment() {
     let scalar = TypeLayout {
         key: [0; 32],
@@ -13,6 +66,7 @@ fn canonical_hfa_excludes_tail_and_nested_padding_but_keeps_dense_overalignment(
         kind: TypeKind::Float(32),
         passing: PassingClass::BITS,
         transparent: false,
+        packed: false,
         c_repr: None,
     };
     let mut types = vec![scalar];
@@ -36,6 +90,7 @@ fn canonical_hfa_excludes_tail_and_nested_padding_but_keeps_dense_overalignment(
             },
             passing: PassingClass::BITS,
             transparent: false,
+            packed: false,
             c_repr: None,
         });
     }

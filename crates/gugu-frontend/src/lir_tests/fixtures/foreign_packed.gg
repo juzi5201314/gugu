@@ -1,0 +1,8 @@
+#[repr(C, packed)] struct Packed { value: u128 }
+#[repr(C, packed, align(16))] struct AlignedPacked { value: u128 }
+#[ffi(leaf, stack = 128)] unsafe extern "C" fn packed(a: uint, p: Packed, z: uint)
+#[ffi(leaf, stack = 128)] unsafe extern "C" fn aligned_packed(a: uint, p: AlignedPacked, z: uint)
+fn main() { unsafe {
+    packed(1, Packed { value: 2 }, 3)
+    aligned_packed(1, AlignedPacked { value: 2 }, 3)
+} }
