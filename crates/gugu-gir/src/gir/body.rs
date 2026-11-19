@@ -8,7 +8,7 @@ use serde::{Deserialize, Serialize};
 use std::ops::Range;
 
 /// GIR schema revision（见 gir-lir.md「共同表示规则」）。
-pub const GIR_REVISION: u32 = 9;
+pub const GIR_REVISION: u32 = 10;
 
 macro_rules! ids {
     ($($name:ident),* $(,)?) => { $(

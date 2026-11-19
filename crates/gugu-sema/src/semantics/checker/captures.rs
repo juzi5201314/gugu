@@ -49,6 +49,7 @@ impl Checker<'_, '_> {
             coroutine,
         });
         self.state.initialized.fill(false);
+        self.state.maybe_initialized.fill(false);
         self.state.cleanup_paths.clear();
         self.state.reachable = true;
         saved

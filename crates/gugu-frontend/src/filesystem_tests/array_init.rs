@@ -378,3 +378,13 @@ fn panicking_rhs_releases_only_the_initialized_prefix() {
 fn empty_resource_init_loop_never_evaluates_rhs() {
     check_leases("empty", false, &[2, 2, 2, 2]);
 }
+
+#[test]
+fn repeated_local_init_loops_release_each_iterations_leases() {
+    check_leases("repeated_local", false, &[1, 1, 1, 1]);
+}
+
+#[test]
+fn repeated_local_init_loop_panic_does_not_release_prior_iterations_leases() {
+    check_leases("repeated_local_panic", true, &[1, 1, 2, 2]);
+}

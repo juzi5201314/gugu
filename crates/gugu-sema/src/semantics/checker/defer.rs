@@ -73,6 +73,7 @@ impl Checker<'_, '_> {
             id,
             CleanupPath {
                 initialized: self.state.initialized.clone(),
+                maybe_initialized: self.state.maybe_initialized.clone(),
                 callables: self.state.callables.clone(),
                 mandatory: true,
             },
@@ -112,12 +113,15 @@ impl Checker<'_, '_> {
             };
             if deferred.execute_body {
                 let initialized = std::mem::replace(&mut self.state.initialized, path.initialized);
+                let maybe_initialized =
+                    std::mem::replace(&mut self.state.maybe_initialized, path.maybe_initialized);
                 let callables = std::mem::replace(&mut self.state.callables, path.callables);
                 let pending = self.state.cleanup_paths.clone();
                 self.state.names = deferred.names;
                 self.expression(deferred.body, Some(&Ty::Unit));
                 if !path.mandatory {
                     self.state.initialized = initialized;
+                    self.state.maybe_initialized = maybe_initialized;
                     self.state.callables = callables;
                     self.state.cleanup_paths = pending;
                     self.state.reachable = true;

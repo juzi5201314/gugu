@@ -31,6 +31,13 @@ impl Checker<'_, '_> {
                     .is_some_and(|path| path.mandatory)
             });
             path.initialized.resize(self.slots.len(), false);
+            path.maybe_initialized.resize(self.slots.len(), false);
+            for (slot, initialized) in path.maybe_initialized.iter_mut().enumerate() {
+                *initialized = reachable
+                    .iter()
+                    .filter_map(|state| state.cleanup_paths.get(&id))
+                    .any(|path| path.maybe_initialized.get(slot) == Some(&true));
+            }
             for (slot, initialized) in path.initialized.iter_mut().enumerate() {
                 *initialized = reachable
                     .iter()
@@ -54,6 +61,9 @@ impl Checker<'_, '_> {
             }
         }
         for i in 0..self.state.initialized.len() {
+            self.state.maybe_initialized[i] = reachable
+                .iter()
+                .any(|state| state.maybe_initialized.get(i) == Some(&true));
             self.state.initialized[i] = reachable
                 .iter()
                 .all(|s| s.initialized.get(i) == Some(&true));
@@ -403,6 +413,7 @@ impl Checker<'_, '_> {
                 }
             } else if irrefutable {
                 fallthrough.initialized = guard_failed.initialized;
+                fallthrough.maybe_initialized = guard_failed.maybe_initialized;
                 fallthrough.cleanup_paths = guard_failed.cleanup_paths;
                 fallthrough.reachable = guard_failed.reachable;
             } else {
@@ -464,6 +475,8 @@ impl Checker<'_, '_> {
             self.bind(pat, &elem, true, Some(false));
         }
         self.loops.push(LoopState {
+            entry_slots: self.slots.len(),
+            written: Default::default(),
             pack,
             values: Vec::new(),
             exits: Vec::new(),
@@ -477,6 +490,16 @@ impl Checker<'_, '_> {
             exits.push(state);
         }
         self.merge(&base, &exits);
+        for slot in loop_state.written {
+            if let Some(initialized) = self.state.maybe_initialized.get_mut(slot) {
+                *initialized = true;
+            }
+            for path in self.state.cleanup_paths.values_mut() {
+                if let Some(initialized) = path.maybe_initialized.get_mut(slot) {
+                    *initialized = true;
+                }
+            }
+        }
         let mut result = if loop_state.value_allowed {
             Ty::Never
         } else {

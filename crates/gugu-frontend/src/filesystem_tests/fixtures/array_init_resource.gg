@@ -20,3 +20,17 @@ pub fn empty() {
     let a: [ResourceCell; 0]
     for i in 0..0 { a[i] = make(i, true) }
 }
+
+pub fn repeated_local() {
+    for round in 0..2 {
+        let a: [ResourceCell; 2]
+        for i in 0..2 { a[i] = make(round * 2 + i, false) }
+    }
+}
+
+pub fn repeated_local_panic() {
+    for round in 0..2 {
+        let a: [ResourceCell; 2]
+        for i in 0..2 { a[i] = make(round * 2 + i, round == 1) }
+    }
+}

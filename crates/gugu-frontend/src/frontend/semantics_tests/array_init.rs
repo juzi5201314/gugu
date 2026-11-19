@@ -180,6 +180,9 @@ macro_rules! rejects {
 }
 
 rejects! {
+    reused_array_outside_outer_for: "fn f() { let a: [int; 2]\n for round in 0..2 { for i in 0..2 { a[i] = i } } }";
+    reused_array_outside_outer_while: "fn f() { let a: [int; 2]\n let round = 0\n while round < 2 { for i in 0..2 { a[i] = i }\n round += 1 } }";
+    maybe_initialized_array: "fn f(flag: bool) { let a: [int; 2]\n if flag { a = [1, 2] }\n for i in 0..2 { a[i] = i } }";
     nonzero_start: "fn f() [int; 3] { let a: [int; 3]\n for i in 1..3 { a[i] = i }\n a }";
     wrong_end: "fn f() [int; 3] { let a: [int; 3]\n for i in 0..2 { a[i] = i }\n a }";
     loop_break: "fn f() [int; 3] { let a: [int; 3]\n for i in 0..3 { a[i] = i\n break }\n a }";

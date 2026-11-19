@@ -1,5 +1,10 @@
 # GIR 与 LIR
 
+逐元素初始化证明分别合流 definitely-initialized 的交集与 maybe-initialized 的并集；
+首次写入计划只适用于所有入口均未初始化、且声明位于每个外围循环内的数组。
+planned array 的无初始化器声明重入时，GIR 先释放旧的零填充槽，再重新发出 StorageLive，
+使 LIR 在新一轮写入前重置存储与根有效位；panic 不得再次释放上轮遗留的控制字。
+
 本章规定 Gugu 的两个中间表示：GIR 是完成类型检查后的、目标无关且显式控制流的语义 IR；LIR 是完成具体布局和 ABI lowering 后、面向目标机器的 SSA IR。两者是编译器内部契约，不是序列化给第三方工具的稳定格式。
 ## stable fragment 复用与 changed-only pass
 

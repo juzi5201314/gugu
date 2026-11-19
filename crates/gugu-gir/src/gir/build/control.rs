@@ -81,6 +81,15 @@ impl Builder<'_> {
         otherwise: Option<ExprId>,
     ) -> Result<(), Diagnostic> {
         let Some(value) = value else {
+            if let hir::PatternKind::Bind(local) = self.owner.patterns[pattern.index()].kind {
+                let local = self.hir_to_gir[local.index()];
+                if self.locals[local.index()].element_initialization {
+                    self.release_local(local);
+                    self.push_stmt(StatementKind::StorageDead(local));
+                    self.push_stmt(StatementKind::StorageLive(local));
+                    self.written[local.index()] = PlaceInit::Unwritten;
+                }
+            }
             return Ok(());
         };
         let Some(local) = self.emit_expr(value)? else {

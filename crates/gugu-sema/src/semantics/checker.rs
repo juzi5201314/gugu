@@ -36,6 +36,7 @@ mod source;
 struct State {
     names: BTreeMap<Symbol, usize>,
     initialized: Vec<bool>,
+    maybe_initialized: Vec<bool>,
     callables: Vec<Vec<super::model::CallableId>>,
     cleanup_paths: BTreeMap<usize, CleanupPath>,
     reachable: bool,
@@ -43,6 +44,7 @@ struct State {
 #[derive(Clone)]
 struct CleanupPath {
     initialized: Vec<bool>,
+    maybe_initialized: Vec<bool>,
     callables: Vec<Vec<super::model::CallableId>>,
     mandatory: bool,
 }
@@ -53,6 +55,8 @@ struct Slot {
     range: [u32; 2],
 }
 struct LoopState {
+    entry_slots: usize,
+    written: std::collections::BTreeSet<usize>,
     pack: bool,
     values: Vec<Ty>,
     exits: Vec<State>,
@@ -313,6 +317,7 @@ impl<'m, 'a> Checker<'m, 'a> {
                 names: BTreeMap::new(),
                 cleanup_paths: BTreeMap::new(),
                 initialized: Vec::new(),
+                maybe_initialized: Vec::new(),
                 callables: Vec::new(),
                 reachable: true,
             },
@@ -739,6 +744,7 @@ impl<'m, 'a> Checker<'m, 'a> {
             range: [span.start(), span.end()],
         });
         self.state.initialized.resize(id + 1, false);
+        self.state.maybe_initialized.resize(id + 1, false);
         self.state.callables.resize_with(id + 1, Vec::new);
         self.initialize(id, initialized);
         self.state.names.insert(name, id);
@@ -749,9 +755,17 @@ impl<'m, 'a> Checker<'m, 'a> {
             self.capture_slot(slot, false);
         }
         self.state.initialized[slot] = value;
+        self.state.maybe_initialized[slot] = value;
+        if value {
+            for loop_state in &mut self.loops {
+                loop_state.written.insert(slot);
+            }
+        }
         for path in self.state.cleanup_paths.values_mut() {
             path.initialized.resize(self.slots.len(), false);
             path.initialized[slot] = value;
+            path.maybe_initialized.resize(self.slots.len(), false);
+            path.maybe_initialized[slot] = value;
         }
     }
     fn assign_callables(&mut self, slot: usize, origins: Vec<super::model::CallableId>) {

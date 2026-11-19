@@ -148,7 +148,10 @@ impl Checker<'_, '_> {
             return None;
         }
         let &slot = self.state.names.get(&array)?;
-        if !self.array_init_is_local(slot) || self.state.initialized.get(slot) != Some(&false) {
+        if !self.array_init_is_local(slot)
+            || self.state.maybe_initialized.get(slot) != Some(&false)
+            || self.loops.iter().any(|outer| slot < outer.entry_slots)
+        {
             return None;
         }
         let Ty::Array(_, actual) = self.resolve(&self.slots[slot].ty) else {
