@@ -33,7 +33,7 @@ impl Formatter {
         let sign = if !non_negative { "-" } else if self.sign == 1 { "+" } else if self.sign == 3 { " " } else { "" }
         let prefix = if self.alternate { prefix } else { "" }
         let head = sign + prefix
-        let length = Bytes::from_string(head).len() + Bytes::from_string(digits).len()
+        let length = scalar_count(head) + scalar_count(digits)
         if self.zero {
             self.write_str(head)
             self.repeat('0', self.width - length)
@@ -58,6 +58,15 @@ impl Formatter {
 
 fn scalar_width(first: byte) int {
     if first < 128 { 1 } else if first < 224 { 2 } else if first < 240 { 3 } else { 4 }
+}
+
+fn scalar_count(value: string) int {
+    let bytes = unsafe { Bytes::from_string(value).as_slice() }
+    let length = 0
+    for first in bytes {
+        if first < 128 || first >= 192 { length = length + 1 }
+    }
+    length
 }
 
 fn character(value: char) string {

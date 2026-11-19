@@ -315,6 +315,8 @@ trait UpperExp  { fn upper_exp(self: &Self, out: &Formatter) }
 
 Formatter 追加文本不复制已有输出；累计追加 n 字节的存储量为 O(n)，`finish()` 线性物化当前内容的独立快照。
 
+`pad` 与 `pad_integral` 的 width 均按 Unicode 标量数计算，不按 UTF-8 字节数计算；后者包括符号、启用的前缀和 digits 的标量数。多字节 fill 每次补一个标量，zero padding 仍在符号与前缀后补 ASCII `0`。
+
 ## 集合与 Hash {#collections-and-hash}
 
 `std.collections` 首批稳定提供：

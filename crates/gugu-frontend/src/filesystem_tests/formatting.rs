@@ -342,6 +342,36 @@ fn runtime_format_never_hole_returns() {
 }
 
 #[test]
+fn runtime_formatter_padding_counts_unicode_scalars() {
+    let expected = [
+        oracle("界>#8x", |f| f.pad_integral(false, "前", "é🙂")),
+        oracle("界>#8x", |f| f.pad_integral(true, "", "")),
+        oracle("界>6.2", |f| f.pad("界é🙂")),
+    ]
+    .join("|");
+    assert_eq!(
+        render(
+            r#"
+        use std.fmt.{Formatter}
+        struct Integral { non_negative: bool, prefix: string, digits: string }
+        impl LowerHex for Integral {
+            fn lower_hex(self: &Self, out: &Formatter) {
+                out.pad_integral(self.non_negative, self.prefix, self.digits)
+            }
+        }
+        fn render() string {
+            let text = "界é🙂"
+            let value = Integral { non_negative: false, prefix: "前", digits: "é🙂" }
+            let empty = Integral { non_negative: true, prefix: "", digits: "" }
+            f"{value:界>#8x}|{empty:界>#8x}|{text:界>6.2}"
+        }
+    "#
+        ),
+        expected
+    );
+}
+
+#[test]
 #[should_panic(expected = "Runtime(Panic)")]
 fn runtime_format_never_hole_panics() {
     render(r#"fn render() string = f"prefix{panic("test")}suffix""#);
