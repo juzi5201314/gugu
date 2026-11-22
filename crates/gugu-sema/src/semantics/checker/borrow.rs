@@ -3,6 +3,7 @@ use super::super::borrow::{BorrowCheck, Projection};
 use super::*;
 
 struct AddressPath {
+    root_slot: Option<usize>,
     base: Ty,
     ty: Ty,
     projection: Vec<Projection>,
@@ -10,6 +11,7 @@ struct AddressPath {
 impl AddressPath {
     fn new(ty: Ty) -> Self {
         Self {
+            root_slot: None,
             base: ty.clone(),
             ty,
             projection: Vec::new(),
@@ -91,6 +93,14 @@ impl Checker<'_, '_> {
         if *target == Ty::Error {
             return;
         }
+        if let Some(path) = &path
+            && !self.require_mutable_binding(
+                path.root_slot,
+                &self.arena().exprs[expression.0 as usize].span.clone(),
+            )
+        {
+            return;
+        }
         match path {
             Some(path) => self.borrow_checks.push(BorrowCheck {
                 expression,
@@ -106,6 +116,30 @@ impl Checker<'_, '_> {
         }
     }
 
+    pub(super) fn require_mutable_binding(&mut self, slot: Option<usize>, span: &Span) -> bool {
+        let Some(slot) = slot else { return true };
+        let local = &self.slots[slot];
+        let parameter = self.arena().params.iter().any(|parameter| {
+            parameter.comptime
+                && parameter.pat.is_some_and(|pattern| {
+                    let span = &self.arena().pats[pattern.0 as usize].span;
+                    local.range == [span.start(), span.end()]
+                })
+        });
+        if parameter
+            && matches!(self.model.const_parameter_at(self.module, span, self.model.name(self.module, local.name)),
+            Some(Ty::Const(super::super::model::ArrayLength::Param(name))) if name.starts_with("$value-const:"))
+        {
+            self.error(
+                DiagnosticCode::InvalidExpression,
+                "用于类型的 comptime 值参数不能赋值或借用",
+                span.clone(),
+            );
+            return false;
+        }
+        true
+    }
+
     fn path_address(&self, path: PathId) -> Option<AddressPath> {
         let segments = self.arena().paths[path.0 as usize]
             .segments
@@ -117,6 +151,7 @@ impl Checker<'_, '_> {
         let first = segments.first()?;
         let mut path = if let Some(&slot) = self.state.names.get(&first.name) {
             let mut path = AddressPath::new(self.resolve(&self.slots[slot].ty));
+            path.root_slot = Some(slot);
             for segment in &segments[1..] {
                 path.field(self.model, self.model.name(self.module, segment.name))?;
             }

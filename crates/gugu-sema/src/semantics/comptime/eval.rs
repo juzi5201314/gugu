@@ -18,6 +18,7 @@ use crate::source::{ExpansionId, SourceMap, SourceSlot, SourceSnapshot};
 use crate::string;
 use crate::{Diagnostic, DiagnosticCode};
 mod arguments;
+mod array_init;
 mod generics;
 
 /// ParseSource query 的 schema 版本。
@@ -477,6 +478,16 @@ impl Model<'_> {
         expression: ExprId,
         ty: &Ty,
     ) -> Result<ConstantValue, Diagnostic> {
+        self.eval_early_const_with_bindings(module, expression, ty, &BTreeMap::new())
+    }
+
+    pub fn eval_early_const_with_bindings(
+        &self,
+        module: usize,
+        expression: ExprId,
+        ty: &Ty,
+        bindings: &BTreeMap<String, Option<ConstantValue>>,
+    ) -> Result<ConstantValue, Diagnostic> {
         if self.depends_on_late(module, expression) {
             return Err(Diagnostic::error(
                 DiagnosticCode::LateComptime,
@@ -490,6 +501,17 @@ impl Model<'_> {
         }
         let mut state = EvalState::new(Domain::EARLY_CONST, self.eval_profile());
         state.embed = self.embed.as_ref();
+        if !bindings.is_empty() {
+            let span = &self.modules[module].arena.exprs[expression.0 as usize].span;
+            state.enter("const argument", span)?;
+            *state.const_arguments.last_mut().expect("常量环境帧") = bindings.clone();
+            for (name, value) in bindings {
+                if let Some(value) = value {
+                    state.alloc(value.heap_bytes(), span)?;
+                    state.bind(name.clone(), value.clone());
+                }
+            }
+        }
         let value = self
             .value(module, expression, &mut state)
             .map_err(|error| {
@@ -1663,10 +1685,10 @@ impl Model<'_> {
             .into()
         };
         match arena.stmts[statement.0 as usize].kind {
-            StmtKind::Let { pat, init, .. } => {
+            StmtKind::Let { pat, init, ty, .. } => {
                 let value = match init {
                     Some(init) => self.value(module, init, state)?,
-                    None => ConstantValue::Unit,
+                    None => self.uninitialized_array(module, ty, state)?,
                 };
                 self.bind_pattern(module, pat, &value, state)
                     .map_err(EvalError::from)
@@ -1704,6 +1726,14 @@ impl Model<'_> {
                 Some(span.clone()),
             )
         };
+        if let ExprKind::Index {
+            base,
+            index: IndexKind::Expr(index),
+        } = arena.exprs[place.0 as usize].kind
+            && op == AssignOp::Assign
+        {
+            return self.assign_array_element(module, base, index, value, state);
+        }
         let ExprKind::Path(path) = arena.exprs[place.0 as usize].kind else {
             return Err(deny("comptime 赋值目标必须是局部绑定"));
         };

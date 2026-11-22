@@ -216,6 +216,9 @@ impl Checker<'_, '_> {
                     }
                     self.discarded(value);
                 } else {
+                    if !self.require_mutable_binding(self.place_root(place), &stmt.span) {
+                        return;
+                    }
                     let left = self.place(place, op != AssignOp::Assign);
                     let trait_assignment =
                         op != AssignOp::Assign && !self.is_number(&left) && left != Ty::String;

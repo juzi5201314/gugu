@@ -185,8 +185,8 @@ fn emitted_switch_and_restore_transfer_exact_context_and_supplied_runtime_regist
     vm.gpr[19..27].copy_from_slice(&[11; 8]);
     vm.gpr[27] = 0xaaaa;
     vm.gpr[28] = 0xbbbb;
-    for index in 8..16 {
-        vm.vector[index] = [index as u64, u64::MAX];
+    for (index, lane) in vm.vector.iter_mut().enumerate().take(16).skip(8) {
+        *lane = [index as u64, u64::MAX];
     }
     assert_eq!(vm.run(0x10000), restore.pc);
     let saved = vm.saved(0x20000);
@@ -205,8 +205,8 @@ fn emitted_switch_and_restore_transfer_exact_context_and_supplied_runtime_regist
         (vm.gpr[27], vm.gpr[28], vm.gpr[29], vm.gpr[31]),
         (0x40000, 0x50000, restore.x29, restore.sp)
     );
-    for index in 8..16 {
-        assert_eq!(vm.vector[index], [88, 0]);
+    for lane in vm.vector.iter().take(16).skip(8) {
+        assert_eq!(*lane, [88, 0]);
     }
     vm.gpr[0] = 0x20000;
     vm.gpr[1] = 0x70000;
@@ -318,8 +318,8 @@ fn emitted_morestack_switch_copy_and_restore_fix_roots_before_argument_reload() 
     vm.gpr[28] = 0x90000;
     vm.gpr[..9].copy_from_slice(&[0x11e0, 0x11e0, 2, 3, 4, 5, 6, 7, 8]);
     vm.gpr[19..27].fill(0x11e0);
-    for lane in 0..8 {
-        vm.vector[lane] = [0x11e0 + lane as u64, u64::MAX];
+    for (lane, slot) in vm.vector.iter_mut().enumerate().take(8) {
+        *slot = [0x11e0 + lane as u64, u64::MAX];
     }
     let arguments: [u64; 9] = vm.gpr[..9].try_into().unwrap();
     let vectors = vm.vector;

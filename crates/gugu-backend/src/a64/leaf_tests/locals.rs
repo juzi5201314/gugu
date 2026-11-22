@@ -141,8 +141,8 @@ fn initialized_local_roots_keep_five_classes_and_dead_locals_leave_the_map() {
         .filter(|p| p.kind == 1)
         .collect::<Vec<_>>();
     let live = &decoded.maps[polls[0].map_index as usize];
-    for class in 0..5 {
-        assert!(live.slots[class].contains(&(fragment.frame.locals[0] / 8 + class as u32)));
+    for (class, slots) in live.slots.iter().take(5).enumerate() {
+        assert!(slots.contains(&(fragment.frame.locals[0] / 8 + class as u32)));
     }
     assert!(live.typed.is_empty());
     let dead = &decoded.maps[polls[1].map_index as usize];
