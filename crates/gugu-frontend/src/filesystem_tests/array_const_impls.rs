@@ -255,7 +255,7 @@ fn array_clone_explicit_negative_blocks_wrapped_fallback() {
     ] {
         rejects(
             &format!(
-                "impl !Clone for [int; 2] {{}}\nfn take[T: Clone](value: T) {{}}\nfn main() {{ let values = [1, 2]\n {wrapped}\n take(wrapped) }}"
+                "impl !Clone for [int; 2] {{}}\nfn take[T: Clone](value: T) {{}}\nfn main() {{ let values: [int; 2] = [1, 2]\n {wrapped}\n take(wrapped) }}"
             ),
             "不满足 trait",
         );
@@ -271,7 +271,7 @@ fn array_clone_custom_dispatch_is_not_silently_skipped_by_wrappers() {
     ] {
         rejects(
             &format!(
-                "impl Clone for [int; 2] {{ fn clone(self: &Self) Self {{ [8, 9] }} }}\nfn take[T: Clone](value: T) {{}}\nfn main() {{ let values = [1, 2]\n {wrapped}\n take(wrapped) }}"
+                "impl Clone for [int; 2] {{ fn clone(self: &Self) Self {{ [8, 9] }} }}\nfn take[T: Clone](value: T) {{}}\nfn main() {{ let values: [int; 2] = [1, 2]\n {wrapped}\n take(wrapped) }}"
             ),
             "不满足 trait",
         );
@@ -286,7 +286,7 @@ use std.io.{println}
 fn main() {
     let opt: Option[[int; 2]] = Some([1, 2])
     let res: Result[[int; 2], int] = Ok([3, 4])
-    let pair = ([5, 6], 7)
+    let pair: ([int; 2], int) = ([5, 6], 7)
     if let Some(value) = opt.clone() { println(value[1]) }
     if let Ok(value) = res.clone() { println(value[1]) }
     let (array, _) = pair.clone()
