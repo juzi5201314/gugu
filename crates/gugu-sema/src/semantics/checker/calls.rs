@@ -413,10 +413,12 @@ impl Checker<'_, '_> {
         {
             return None;
         }
-        let params = self
-            .model
-            .parameters_at(self.module, &self.arena().exprs[expression.0 as usize].span);
-        match params.get(self.model.name(self.module, segment.name)) {
+        let name = self.model.name(self.module, segment.name);
+        match self.model.scoped_comptime_parameter(
+            self.module,
+            &self.arena().exprs[expression.0 as usize].span,
+            name,
+        ) {
             Some(Ty::Const(length)) => Some(length.clone()),
             _ => None,
         }

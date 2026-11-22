@@ -41,6 +41,55 @@ impl Model<'_> {
             ),
         )
     }
+    /// 按名字查找 `span` 作用域内的 comptime 参数：内层 fn 参数优先，其次外层 fn 与关联作用域。
+    /// 与 `parameters_at` 的插入顺序一致（内层覆盖外层），但只为单个名字做定向查找，不建整张表。
+    pub(in super::super) fn scoped_comptime_parameter(
+        &self,
+        module: usize,
+        span: &crate::Span,
+        name: &str,
+    ) -> Option<Ty> {
+        let arena = &self.modules[module].arena;
+        // parser 先分配内层 FnDecl，顺序遍历即由内到外；首个命中即 `parameters_at` 的胜出项。
+        for (index, owner) in arena.fns.iter().enumerate().filter(|(_, function)| {
+            function.span.start() <= span.start() && function.span.end() >= span.end()
+        }) {
+            // 按名字先过滤：仅当 fn 有同名 comptime 参数才跑 `value_const_parameters`，
+            // 避免对每个包含 span 的 owner 都执行 `mentions` 全模块扫描。
+            let gated = owner
+                .params
+                .as_slice(&arena.params)
+                .iter()
+                .any(|parameter| {
+                    parameter.comptime
+                        && parameter.pat.is_some_and(|pat| {
+                            matches!(arena.pats[pat.0 as usize].kind,
+                            PatKind::Ident(symbol) if self.name(module, symbol) == name)
+                        })
+                });
+            if gated {
+                for (_, param_name, identity) in self.value_const_parameters(CallableId {
+                    module,
+                    function: index as u32,
+                }) {
+                    if param_name == name {
+                        return Some(Ty::Const(ArrayLength::Param(identity)));
+                    }
+                }
+            }
+            for param in owner.generics.as_slice(&arena.generic_params) {
+                let (generic_name, ty) = self.generic_binding(module, &param.kind);
+                if generic_name == name && matches!(ty, Ty::Const(_)) {
+                    return Some(ty);
+                }
+            }
+        }
+        self.associated_scope(module, span)
+            .get(name)
+            .filter(|ty| matches!(ty, Ty::Const(_)))
+            .cloned()
+    }
+
     pub fn value_const_parameters(&self, id: CallableId) -> Vec<(usize, String, String)> {
         let parsed = &self.modules[id.module];
         let arena = &parsed.arena;
@@ -105,8 +154,7 @@ impl Model<'_> {
                 PatKind::Ident(symbol) if self.name(module, symbol) == name))) {
             return None;
         }
-        self.parameters_at(module, span)
-            .remove(name)
+        self.scoped_comptime_parameter(module, span, name)
             .filter(|ty| matches!(ty, Ty::Const(_)))
     }
     pub(super) fn validate_const_generics(&self) -> Result<(), Diagnostic> {
