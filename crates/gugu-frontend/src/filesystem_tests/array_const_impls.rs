@@ -378,6 +378,18 @@ fn array_const_impls_trait_value_parameters_remain_unsupported() {
 }
 
 #[test]
+fn array_const_impl_rejects_values_as_trait_type_arguments() {
+    for value in ["N", "2"] {
+        rejects(
+            &format!(
+                "trait Mark[T] {{}}\nimpl[comptime N: int] Mark[{value}] for [int; N] {{}}\nfn main() {{}}"
+            ),
+            "trait 实参必须是类型",
+        );
+    }
+}
+
+#[test]
 fn array_const_impls_empty_managed_array_type_is_valid_without_impl() {
     let compiled = Compiler::shared().compile(CompileRequest::single_file(
         "main.gg",

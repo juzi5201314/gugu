@@ -165,6 +165,9 @@ impl Model<'_> {
         if arguments.len() != self.traits.interfaces[id].parameters.len() {
             return Err(self.error(module, "trait 实参数量不符"));
         }
+        if arguments.iter().any(|arg| matches!(arg, Ty::Const(_))) {
+            return Err(self.error(module, "trait 实参必须是类型，不能是 comptime 值"));
+        }
         Ok(TraitRef { id, arguments })
     }
     pub(super) fn generic_parameters(
