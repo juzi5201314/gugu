@@ -412,21 +412,7 @@ impl Builder<'_> {
             Rvalue::ValueCopy(place) => self.read_place(*place),
             Rvalue::CowSnapshot(place) => {
                 let value = self.read_place(*place)?;
-                if !self.layout(ty).passing.has_cow() {
-                    return Ok(value);
-                }
-                let source = self.computed_address(value)?;
-                let destination = self.temporary(ty)?;
-                let descriptor = self.descriptor(ty);
-                self.runtime(
-                    RuntimeCall::CowSnapshot,
-                    &[destination, source, descriptor],
-                    &[],
-                )?;
-                Ok(Computed::Address {
-                    ty,
-                    address: destination,
-                })
+                self.cow_snapshot(value, ty)
             }
             Rvalue::DynErase { operand, .. } => {
                 let value = self.operand(operand)?;

@@ -45,41 +45,11 @@ impl Builder<'_> {
         if plan.dynamic || plan.function.is_some() {
             return Ok(None);
         }
-        let Some(interface) = plan.interface.as_ref() else {
-            return Ok(None);
-        };
-        let interface = self.module.definitions[interface.definition.index()]
-            .name
-            .clone();
-        let Some(member) = plan.member_name.clone() else {
-            return Ok(None);
-        };
-        let explicit = expr_range(self.owner, arguments);
-        // `Clone::clone` 就是语言规定的语义拷贝：位值浅拷贝、COW 封存、resource lease。
-        if let ("Clone", "clone") = (interface.as_str(), member.as_str()) {
-            let receiver = match receiver {
-                Some(receiver) => Some(receiver),
-                None => match explicit.as_slice() {
-                    [only] => Some(*only),
-                    _ => None,
-                },
-            };
-            let Some(receiver) = receiver else {
-                return Ok(None);
-            };
-            let Some(local) = self.emit_expr(receiver)? else {
-                return Ok(None);
-            };
-            let ty = self.owner.expression_types[id.index()];
-            let dest = self.temp(ty);
-            self.copy_value(Place::local(dest), Place::local(local), ty);
-            self.set_value(id, dest);
-            return Ok(Some(dest));
-        }
         // 内建运算符 impl 的语义就是对应语言运算。
         let Some(op) = self.builtin_binary(dispatch) else {
             return Ok(None);
         };
+        let explicit = expr_range(self.owner, arguments);
         let (left, right) = match receiver {
             Some(receiver) => match explicit.as_slice() {
                 [right] => (receiver, *right),

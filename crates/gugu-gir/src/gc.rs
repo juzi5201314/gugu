@@ -369,6 +369,7 @@ fn trace_flags(shape: &MetadataShape, universe: &TypeUniverse) -> Result<(bool, 
         MetadataShape::Direct(_) => (true, false),
         MetadataShape::Interior(_) | MetadataShape::String => (false, true),
         MetadataShape::Pointers { count } => (*count > 0, false),
+        MetadataShape::Array { count: 0, .. } => (false, false),
         MetadataShape::Array { element, .. } => {
             trace_flags(&universe.record(element)?.metadata, universe)?
         }

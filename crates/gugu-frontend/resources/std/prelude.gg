@@ -1,1 +1,6 @@
 /* Gugu 标准库源树的 bootstrap 编译单元。公开 API 随标准库阶段加入。 */
+fn clone_array[T: Clone, comptime n: int](value: &[T; n]) [T; n] {
+    let out: [T; n]
+    for i in 0..n { out[i] = value[i].clone() }
+    out
+}

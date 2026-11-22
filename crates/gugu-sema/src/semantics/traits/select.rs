@@ -121,8 +121,13 @@ impl Model<'_> {
             stack.pop();
             return result;
         }
+        // 回退检查保留当前证明栈：数组 Clone 的元素证明能检测到经由 impl 约束绕回来的循环。
+        let builtin = match &selected {
+            Ok(None) => self.builtin_trait_inner(ty, interface, assumptions, stack),
+            _ => false,
+        };
         stack.pop();
-        if selected?.is_some() || self.builtin_trait(ty, interface) {
+        if selected?.is_some() || builtin {
             return Ok(());
         }
         Err(self.error(
@@ -204,6 +209,15 @@ impl Model<'_> {
         Ok(selected)
     }
     pub(super) fn builtin_trait(&self, ty: &Ty, interface: &TraitRef) -> bool {
+        self.builtin_trait_inner(ty, interface, &[], &mut Vec::new())
+    }
+    fn builtin_trait_inner(
+        &self,
+        ty: &Ty,
+        interface: &TraitRef,
+        assumptions: &[Obligation],
+        stack: &mut Vec<(Ty, TraitRef)>,
+    ) -> bool {
         let definition = &self.traits.interfaces[interface.id];
         if definition.definition.is_some() {
             return false;
@@ -215,17 +229,33 @@ impl Model<'_> {
                 Ty::Never | Ty::MaybeUninit(_) | Ty::Var(_) | Ty::Error | Ty::Param(_)
             );
         }
-        if let Some(satisfied) = self.builtin_core_trait(ty, interface, name) {
+        if let Some(satisfied) = self.builtin_core_trait(ty, interface, name, assumptions, stack)
+        {
             return satisfied;
         }
         if matches!(name, "Clone" | "Eq" | "Ord" | "StableOrd" | "StableHash") {
             return match ty {
                 Ty::Unit | Ty::Bool | Ty::Int { .. } | Ty::Char | Ty::String | Ty::TypeId => true,
                 Ty::Float(_) => name == "Clone",
-                Ty::Array(t, _) | Ty::Option(t) => self.builtin_trait(t, interface),
-                Ty::Tuple(ts) => ts.iter().all(|t| self.builtin_trait(t, interface)),
+                Ty::Array(t, _) if name == "Clone" => {
+                    match self.select_impl_inner(ty, interface, assumptions, stack) {
+                        // 显式 impl（含否定 impl 的拒绝）优先于元素级回退。
+                        Ok(Some(_)) => true,
+                        Err(_) => false,
+                        Ok(None) => {
+                            self.require_trait_inner(t, interface, assumptions, stack).is_ok()
+                        }
+                    }
+                }
+                Ty::Array(t, _) | Ty::Option(t) => {
+                    self.builtin_trait_inner(t, interface, assumptions, stack)
+                }
+                Ty::Tuple(ts) => ts
+                    .iter()
+                    .all(|t| self.builtin_trait_inner(t, interface, assumptions, stack)),
                 Ty::Result(t, e) => {
-                    self.builtin_trait(t, interface) && self.builtin_trait(e, interface)
+                    self.builtin_trait_inner(t, interface, assumptions, stack)
+                        && self.builtin_trait_inner(e, interface, assumptions, stack)
                 }
                 _ => false,
             };
@@ -277,18 +307,24 @@ impl Model<'_> {
             _ => false,
         }
     }
-    fn builtin_core_trait(&self, ty: &Ty, interface: &TraitRef, name: &str) -> Option<bool> {
-        let algebraic = |model: &Self| match ty {
+    fn builtin_core_trait(
+        &self,
+        ty: &Ty,
+        interface: &TraitRef,
+        name: &str,
+        assumptions: &[Obligation],
+        stack: &mut Vec<(Ty, TraitRef)>,
+    ) -> Option<bool> {
+        let algebraic = |model: &Self, stack: &mut Vec<(Ty, TraitRef)>| match ty {
             Ty::Array(element, _) | Ty::Option(element) => {
-                Some(model.builtin_trait(element, interface))
+                Some(model.builtin_trait_inner(element, interface, assumptions, stack))
             }
-            Ty::Tuple(elements) => Some(
-                elements
-                    .iter()
-                    .all(|element| model.builtin_trait(element, interface)),
-            ),
+            Ty::Tuple(elements) => Some(elements.iter().all(|element| {
+                model.builtin_trait_inner(element, interface, assumptions, stack)
+            })),
             Ty::Result(value, error) => {
-                Some(model.builtin_trait(value, interface) && model.builtin_trait(error, interface))
+                Some(model.builtin_trait_inner(value, interface, assumptions, stack)
+                    && model.builtin_trait_inner(error, interface, assumptions, stack))
             }
             _ => None,
         };
@@ -297,7 +333,7 @@ impl Model<'_> {
                 if core_scalar(ty, true) {
                     return Some(true);
                 }
-                algebraic(self)
+                algebraic(self, stack)
             }
             "Hash" => {
                 if matches!(ty, Ty::Float(_)) {
@@ -306,16 +342,18 @@ impl Model<'_> {
                 if core_scalar(ty, false) {
                     return Some(true);
                 }
-                algebraic(self)
+                algebraic(self, stack)
             }
             "Default" => Some(match ty {
                 Ty::Unit | Ty::Bool | Ty::Int { .. } | Ty::Char | Ty::String | Ty::Option(_) => {
                     true
                 }
-                Ty::Array(element, _) => self.builtin_trait(element, interface),
-                Ty::Tuple(elements) => elements
-                    .iter()
-                    .all(|element| self.builtin_trait(element, interface)),
+                Ty::Array(element, _) => {
+                    self.builtin_trait_inner(element, interface, assumptions, stack)
+                }
+                Ty::Tuple(elements) => elements.iter().all(|element| {
+                    self.builtin_trait_inner(element, interface, assumptions, stack)
+                }),
                 _ => false,
             }),
             "Binary" | "Octal" | "LowerHex" | "UpperHex" => Some(matches!(ty, Ty::Int { .. })),

@@ -334,6 +334,16 @@ impl Builder<'_> {
             self.jump(self.target(normal));
             return Ok(());
         }
+        if self.concrete.calls.iter().any(|call| {
+            call.site == site
+                && call.target.is_none()
+                && call.protocol == Some(crate::gir::concrete::Protocol::Clone)
+        }) {
+            let value = self.clone_protocol(&operands[0], result_ty)?;
+            self.write_place(destination, value)?;
+            self.jump(self.target(normal));
+            return Ok(());
+        }
         let foreign = kind != g::CallKind::Managed;
         let mut arguments = Vec::new();
         let mut by_value = Vec::new();

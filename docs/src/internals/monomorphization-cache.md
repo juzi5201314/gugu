@@ -13,6 +13,17 @@
 GIR 布局前所有数组长度必须成为 `Known`。名义类型身份包含其 comptime 实参，
 因此同一元素类型、不同长度的实例具有不同的类型身份与布局。
 
+数组 impl 选择将 Self 的具体长度绑定为 `Ty::Const(Known(N))`，经方法的外围 impl
+参数上下文进入同一套 const 实参编码；不增加数组方法专用的实例键。
+coherence 比较先按类型/const 种类分别重命名右侧参数，再统一数组长度与元素类型；
+重复长度变量共享绑定，不能把两个声明中同名的变量当作同一变量。
+数组 Clone 的源 impl 通过普通 impl 选择优先于语言回退，回退没有源 impl 表项。
+generic GIR 保留 `Clone` 派发，单态化后先选择具体元素的源方法；只有没有源方法的
+数组回退在单态化时绑定 `std.prelude.clone_array`，其初始化循环逐元素保留 Clone 派发，
+复用正常的根有效位与 panic 前缀清理。只有非数组 `Protocol::Clone` 才在 LIR 复用值复制、
+COW snapshot 和资源 acquire 路径，不能提前把 `T: Clone` 的调用擦成语义复制。
+`BuildGenericGir` schema 为 21、实例 schema 为 12、LIR schema 为 29。
+
 编译采用两个互补层次：
 
 1. 前端和语义分析使用 Rust 风格的 query DAG，按依赖指纹判断既有结果能否复用；

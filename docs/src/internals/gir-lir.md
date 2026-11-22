@@ -215,7 +215,7 @@ HIR同样提供保持源码臂优先级的 pattern matrix。GIR把它编译成�
 完成复制后立即结束 RHS 自有临时租约；调用结果只在正常后继记为已写入，不能因未记录而漏释放。
 
 栈根表是 enum 变体的并集，初始全零可追踪不表示以后能无条件追踪标量载荷。
-LIR query/world schema 与 body revision 为 27，合并逐根动态字节地址与 C 聚合的自然对齐约束。
+LIR query/world schema 与 body revision 在 27 合并逐根动态字节地址与 C 聚合的自然对齐约束。
 
 成功元素写入后，LIR 用 `RootInitAddr(slot)` 取得帧内逐根字节基址，计算
 `index * element_root_count + field_root_index`，再按当前活动变体复位和置位。

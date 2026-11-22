@@ -191,8 +191,10 @@ impl Vec[T] {
 - 固有方法默认模块私有，跨模块要 `pub fn`。`pub trait` 的方法全部公开；`impl Trait for Type` 不能改方法可见性。
 - 方法调用默认静态分发、单态化、可内联。
 - 只有写成 `dyn Print` 才走 vtable。哪些 trait 能 `dyn` 见 [类型](types.md)。
-- 语言可以对 `dyn Trait` 写固有 impl（`impl dyn Any`）。用户不能给 `dyn Trait` 写固有方法。语言为数组和元组生成的 `Clone` / `Eq` / `Ord` / `Print` 视为定义处 impl，用户不能再写一份重叠的固有 impl。
+- 语言可以对 `dyn Trait` 写固有 impl（`impl dyn Any`）。用户不能给 `dyn Trait` 写固有方法。语言为数组和元组生成的 `Eq` / `Ord` / `Print` 视为定义处 impl，用户不能再写一份重叠的固有 impl。数组 `Clone` 是没有显式 trait impl 时的回退；显式数组 `Clone` impl 按普通一致性与特化规则选择。
 - 关联类型与关联常量都走 `::`：`Iter::Item`、`Dim::N`。在 impl 里写 `type Output = Point`、`const N = 4`；在签名里用 `Self::Output` / `Self::N`，不要靠裸名。
+
+数组 Clone 的显式候选可以覆盖含内置标量元素的数组，包括 `impl[comptime N: int] Clone for [int; N]`；显式否定 impl 同样阻止回退。这不允许覆盖标量自身不可重写的语言实现。
 
 关联调用遵循[类型路径的分段泛型规则](types.md)。`Self` 在关联项签名和函数体中都指当前实现的完整 Self 类型，可以直接用于构造该类型。
 
@@ -235,6 +237,11 @@ fn dump[T: Print](x: T) {
 ## 特化
 
 允许重叠 impl，用**最具体者获胜**：
+
+数组 impl 的 comptime 长度参与同样的比较：`[T; N]` 与 `[T; 4]` 重叠，后者在其它条件相同时更具体。
+不同声明的符号长度须独立统一；重复出现的同一长度参数必须取同一值。
+比较递归进入元素类型，包括 `dyn Trait[Args]` 的 trait 身份及实参，不能以改名隐藏重叠。
+符号与符号、符号与具体长度的交叉重叠若不能比较具体性，均须诊断，不能靠声明顺序选择。
 
 ```text
 impl Bar for Foo[T] { ... }
