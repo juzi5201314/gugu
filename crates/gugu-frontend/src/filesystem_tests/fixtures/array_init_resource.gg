@@ -34,3 +34,21 @@ pub fn repeated_local_panic() {
         for i in 0..2 { a[i] = make(round * 2 + i, round == 1) }
     }
 }
+
+struct CloneItem { index: int, lease: ResourceCell }
+
+impl Clone for CloneItem {
+    fn clone(self: &Self) Self {
+        CloneItem { index: self.index, lease: make(self.index, true) }
+    }
+}
+
+pub fn clone_partial() {
+    let input = [
+        CloneItem { index: 0, lease: ResourceCell { control: 0 } },
+        CloneItem { index: 2, lease: ResourceCell { control: 0 } },
+        CloneItem { index: 3, lease: ResourceCell { control: 0 } },
+    ]
+    let output = input.clone()
+    _ = output
+}

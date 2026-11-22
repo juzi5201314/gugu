@@ -86,7 +86,10 @@ impl Builder<'_> {
         let block = self.fresh(true);
         let saved = self.current;
         self.current = block;
+        // 生成异常分支不能结束正常分支仍存活的局部变量。
+        let live = self.live.clone();
         self.dead_unpinned();
+        self.live = live;
         self.terminate(Terminator::ResumePanic);
         self.current = saved;
         block

@@ -239,30 +239,31 @@ fn init_loop_root_events_reach_generated_images() {
     }
 }
 
-fn resource_protocol(source: &str) -> (crate::frontend::FrontendOutput, crate::lir::Validated) {
-    protocol(
-        source,
-        false,
-        crate::runtime::RuntimeResources::new(resource_artifact()),
-    )
-}
-
 fn protocol(
     source: &str,
+    stack_arrays: bool,
+    resources: crate::runtime::RuntimeResources<'_>,
+) -> (crate::frontend::FrontendOutput, crate::lir::Validated) {
+    let sources = crate::SourceMap::new(vec![
+        crate::SourceSnapshot::from_str("main.gg", source).unwrap(),
+    ])
+    .unwrap();
+    protocol_at(sources, "main.gg", stack_arrays, resources)
+}
+
+fn protocol_at(
+    mut sources: crate::SourceMap,
+    entry: &str,
     stack_arrays: bool,
     resources: crate::runtime::RuntimeResources<'_>,
 ) -> (crate::frontend::FrontendOutput, crate::lir::Validated) {
     use crate::frontend::{self, PrefixMode, SourceInput, cfg::CfgContext};
     let target = TargetName::X86_64Linux;
     let queries = crate::QueryEngine::new();
-    let mut sources = crate::SourceMap::new(vec![
-        crate::SourceSnapshot::from_str("main.gg", source).unwrap(),
-    ])
-    .unwrap();
     let mut frontend = frontend::bootstrap_with(
         SourceInput::Sources {
             source_map: &mut sources,
-            entry: "main.gg",
+            entry,
             source_root: "",
             package_identity: "array-init",
             require_main: true,
@@ -299,41 +300,45 @@ fn protocol(
     (frontend, lir)
 }
 
-fn resource_artifact() -> &'static crate::runtime::RuntimeArtifactV1 {
-    static ARTIFACT: std::sync::LazyLock<crate::runtime::RuntimeArtifactV1> =
-        std::sync::LazyLock::new(|| {
-            let base = crate::testing::provider()
-                .artifact(TargetName::X86_64Linux)
-                .unwrap();
-            let mut sources: Vec<_> = base
-                .payload
-                .sources
-                .iter()
-                .map(|blob| gugu_compiler_core::RuntimeSourceInput {
-                    logical_path: &blob.logical_path,
-                    source: &blob.source,
-                    role: blob.role,
-                })
-                .collect();
-            sources.push(gugu_compiler_core::RuntimeSourceInput {
-                logical_path: "std/array_init_probe.gg",
-                source: include_str!("fixtures/array_init_resource.gg"),
-                role: gugu_compiler_core::RuntimeSourceRole::StandardLibrary,
-            });
-            let artifact = gugu_compiler_core::RuntimeArtifactBuilder::build(
-                gugu_compiler_core::TargetName::X86_64Linux,
-                &sources,
-            )
+const RESOURCE_PROBE: &str = "std/runtime/fixtures/array_init_probe.gg";
+
+fn resource_artifact(function: &str) -> crate::runtime::RuntimeArtifactV1 {
+    use gugu_compiler_core::{RuntimeArtifactBuilder, RuntimeSourceInput, RuntimeSourceRole};
+    let base = crate::testing::provider()
+        .artifact(TargetName::X86_64Linux)
+        .unwrap();
+    let fixture = include_str!("fixtures/array_init_resource.gg");
+    let source = format!("{fixture}\nfn main() {{ {function}() }}");
+    let mut sources: Vec<_> = base
+        .payload
+        .sources
+        .iter()
+        .map(|blob| RuntimeSourceInput {
+            logical_path: &blob.logical_path,
+            source: &blob.source,
+            role: blob.role,
+        })
+        .collect();
+    sources.push(RuntimeSourceInput {
+        logical_path: RESOURCE_PROBE,
+        source: &source,
+        role: RuntimeSourceRole::StandardLibrary,
+    });
+    let mut artifact =
+        RuntimeArtifactBuilder::build(gugu_compiler_core::TargetName::X86_64Linux, &sources)
             .unwrap();
-            crate::frontend::prebuild::materialize_tables(TargetName::X86_64Linux, artifact)
-                .unwrap()
-        });
-    &ARTIFACT
+    artifact.payload.prebuilt = base.payload.prebuilt.clone();
+    artifact
 }
 
 fn check_leases(function: &str, panic: bool, expected: &[u64]) {
-    let source = format!("use std.array_init_probe as probe\nfn main() {{ probe.{function}() }}");
-    let (frontend, lir) = resource_protocol(&source);
+    let artifact = resource_artifact(function);
+    let (frontend, lir) = protocol_at(
+        crate::SourceMap::empty(),
+        RESOURCE_PROBE,
+        false,
+        crate::runtime::RuntimeResources::new(&artifact),
+    );
     let mut harness = Harness::from_bodies(frontend.hir.module(), lir.bodies());
     harness.set_sizes(&frontend.gir);
     harness.metadata = Some(
@@ -350,7 +355,7 @@ fn check_leases(function: &str, panic: bool, expected: &[u64]) {
         put(&mut memory, 1024 + i * 256, 2);
     }
     let result = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
-        harness.invoke("std/array_init_probe.gg", function, &[], &mut memory)
+        harness.invoke(RESOURCE_PROBE, function, &[], &mut memory)
     }));
     if panic {
         assert!(result.unwrap_err().is::<root_trace::InterpretedPanic>());
@@ -371,6 +376,11 @@ fn overwriting_after_init_releases_old_lease_exactly_once() {
 #[test]
 fn panicking_rhs_releases_only_the_initialized_prefix() {
     check_leases("partial", true, &[1, 1, 2, 2]);
+}
+
+#[test]
+fn panicking_array_clone_releases_only_the_cloned_prefix() {
+    check_leases("clone_partial", true, &[1, 2, 2, 2]);
 }
 
 #[test]
