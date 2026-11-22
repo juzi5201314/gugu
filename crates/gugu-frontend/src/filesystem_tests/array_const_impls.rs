@@ -247,6 +247,22 @@ fn array_clone_explicit_negative_blocks_fallback() {
 }
 
 #[test]
+fn array_clone_explicit_negative_blocks_wrapped_fallback() {
+    rejects(
+        "impl !Clone for [int; 2] {}\nfn take[T: Clone](value: T) {}\nfn main() { let wrapped: Option[[int; 2]] = Some([1, 2])\n take(wrapped) }",
+        "不满足 trait",
+    );
+}
+
+#[test]
+fn array_clone_fallback_detects_proof_cycle() {
+    rejects(
+        "trait Via[A] {}\nimpl[A: Clone] Via[A] for int {}\nstruct Wrap[T] { value: T }\nimpl[T: Via[[Wrap[T]; 1]]] Clone for Wrap[T] { fn clone(self: &Self) Self { panic(\"x\") } }\nfn take[T: Clone](value: T) {}\nfn main() { let w: Wrap[int] = Wrap { value: 1 }\n take(w) }",
+        "不满足 trait",
+    );
+}
+
+#[test]
 fn scalar_clone_remains_non_overridable() {
     rejects(
         "impl Clone for int { fn clone(self: &Self) Self { *self } }\nfn main() {}",
