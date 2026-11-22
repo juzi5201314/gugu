@@ -25,8 +25,8 @@ impl Vm {
         };
         vm.registers[0] = REQUEST;
         vm.registers[31] = STACK;
-        for i in 19..31 {
-            vm.registers[i] = 0x10000 + i as u64;
+        for (i, register) in vm.registers.iter_mut().enumerate().take(31).skip(19) {
+            *register = 0x10000 + i as u64;
         }
         vm.put(REQUEST + 8, operation, 8);
         vm.put(REQUEST + 72, 999, 8);
