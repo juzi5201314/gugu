@@ -229,24 +229,20 @@ impl Model<'_> {
                 Ty::Never | Ty::MaybeUninit(_) | Ty::Var(_) | Ty::Error | Ty::Param(_)
             );
         }
-        if let Some(satisfied) = self.builtin_core_trait(ty, interface, name, assumptions, stack)
-        {
+        if let Some(satisfied) = self.builtin_core_trait(ty, interface, name, assumptions, stack) {
             return satisfied;
         }
-        if matches!(name, "Clone" | "Eq" | "Ord" | "StableOrd" | "StableHash") {
+        if name == "Clone" {
+            if let Ty::Array(element, _) = ty {
+                return self
+                    .require_trait_inner(element, interface, assumptions, stack)
+                    .is_ok();
+            }
+            return self.clone_is_copy(ty, interface, assumptions, stack);
+        }
+        if matches!(name, "Eq" | "Ord" | "StableOrd" | "StableHash") {
             return match ty {
                 Ty::Unit | Ty::Bool | Ty::Int { .. } | Ty::Char | Ty::String | Ty::TypeId => true,
-                Ty::Float(_) => name == "Clone",
-                Ty::Array(t, _) if name == "Clone" => {
-                    match self.select_impl_inner(ty, interface, assumptions, stack) {
-                        // 显式 impl（含否定 impl 的拒绝）优先于元素级回退。
-                        Ok(Some(_)) => true,
-                        Err(_) => false,
-                        Ok(None) => {
-                            self.require_trait_inner(t, interface, assumptions, stack).is_ok()
-                        }
-                    }
-                }
                 Ty::Array(t, _) | Ty::Option(t) => {
                     self.builtin_trait_inner(t, interface, assumptions, stack)
                 }
@@ -307,6 +303,34 @@ impl Model<'_> {
             _ => false,
         }
     }
+    fn clone_is_copy(
+        &self,
+        ty: &Ty,
+        interface: &TraitRef,
+        assumptions: &[Obligation],
+        stack: &mut Vec<(Ty, TraitRef)>,
+    ) -> bool {
+        // 包装类型的回退只复制值；不能吞掉成员的显式 Clone 或否定 impl。
+        let mut member = |ty: &Ty| {
+            matches!(
+                self.select_impl_inner(ty, interface, assumptions, stack),
+                Ok(None)
+            ) && self.clone_is_copy(ty, interface, assumptions, stack)
+        };
+        match ty {
+            Ty::Array(element, _) | Ty::Option(element) => member(element),
+            Ty::Tuple(elements) => elements.iter().all(member),
+            Ty::Result(value, error) => member(value) && member(error),
+            Ty::Unit
+            | Ty::Bool
+            | Ty::Int { .. }
+            | Ty::Char
+            | Ty::String
+            | Ty::TypeId
+            | Ty::Float(_) => true,
+            _ => false,
+        }
+    }
     fn builtin_core_trait(
         &self,
         ty: &Ty,
@@ -315,19 +339,20 @@ impl Model<'_> {
         assumptions: &[Obligation],
         stack: &mut Vec<(Ty, TraitRef)>,
     ) -> Option<bool> {
-        let algebraic = |model: &Self, stack: &mut Vec<(Ty, TraitRef)>| match ty {
-            Ty::Array(element, _) | Ty::Option(element) => {
-                Some(model.builtin_trait_inner(element, interface, assumptions, stack))
-            }
-            Ty::Tuple(elements) => Some(elements.iter().all(|element| {
-                model.builtin_trait_inner(element, interface, assumptions, stack)
-            })),
-            Ty::Result(value, error) => {
-                Some(model.builtin_trait_inner(value, interface, assumptions, stack)
-                    && model.builtin_trait_inner(error, interface, assumptions, stack))
-            }
-            _ => None,
-        };
+        let algebraic =
+            |model: &Self, stack: &mut Vec<(Ty, TraitRef)>| match ty {
+                Ty::Array(element, _) | Ty::Option(element) => {
+                    Some(model.builtin_trait_inner(element, interface, assumptions, stack))
+                }
+                Ty::Tuple(elements) => Some(elements.iter().all(|element| {
+                    model.builtin_trait_inner(element, interface, assumptions, stack)
+                })),
+                Ty::Result(value, error) => Some(
+                    model.builtin_trait_inner(value, interface, assumptions, stack)
+                        && model.builtin_trait_inner(error, interface, assumptions, stack),
+                ),
+                _ => None,
+            };
         match name {
             "Print" | "Debug" => {
                 if core_scalar(ty, true) {
@@ -640,8 +665,12 @@ impl Model<'_> {
         interface: &TraitRef,
         assumptions: &[Obligation],
     ) -> bool {
+        let name = self.traits.interfaces[interface.id].name.as_str();
+        if name == "Clone" && matches!(ty, Ty::Array(..)) {
+            return self.require_trait(ty, interface, assumptions).is_ok();
+        }
         self.builtin_trait(ty, interface)
-            || (self.traits.interfaces[interface.id].name == "Hash"
+            || (name == "Hash"
                 && matches!(ty, Ty::Tuple(_))
                 && self.require_trait(ty, interface, assumptions).is_ok())
     }

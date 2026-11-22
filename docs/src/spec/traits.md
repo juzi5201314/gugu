@@ -195,6 +195,7 @@ impl Vec[T] {
 - 关联类型与关联常量都走 `::`：`Iter::Item`、`Dim::N`。在 impl 里写 `type Output = Point`、`const N = 4`；在签名里用 `Self::Output` / `Self::N`，不要靠裸名。
 
 数组 Clone 的显式候选可以覆盖含内置标量元素的数组，包括 `impl[comptime N: int] Clone for [int; N]`；显式否定 impl 同样阻止回退。这不允许覆盖标量自身不可重写的语言实现。
+数组、元组、`Option` 和 `Result` 的 Clone 回退逐个检查成员；不能绕过成员的否定 impl，也不能以循环约束作为证明。当前元组、`Option` 和 `Result` 的语言回退只支持成员的 Clone 等同于语义复制的类型；成员若需要执行显式 Clone，则不能使用包装类型的回退，可解包后显式调用成员的 Clone。
 
 关联调用遵循[类型路径的分段泛型规则](types.md)。`Self` 在关联项签名和函数体中都指当前实现的完整 Self 类型，可以直接用于构造该类型。
 

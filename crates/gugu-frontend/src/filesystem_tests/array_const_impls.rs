@@ -248,10 +248,57 @@ fn array_clone_explicit_negative_blocks_fallback() {
 
 #[test]
 fn array_clone_explicit_negative_blocks_wrapped_fallback() {
-    rejects(
-        "impl !Clone for [int; 2] {}\nfn take[T: Clone](value: T) {}\nfn main() { let wrapped: Option[[int; 2]] = Some([1, 2])\n take(wrapped) }",
-        "不满足 trait",
-    );
+    for wrapped in [
+        "let wrapped: Option[[int; 2]] = Some(values)",
+        "let wrapped: Result[[int; 2], int] = Ok(values)",
+        "let wrapped = (values, 3)",
+    ] {
+        rejects(
+            &format!(
+                "impl !Clone for [int; 2] {{}}\nfn take[T: Clone](value: T) {{}}\nfn main() {{ let values = [1, 2]\n {wrapped}\n take(wrapped) }}"
+            ),
+            "不满足 trait",
+        );
+    }
+}
+
+#[test]
+fn array_clone_custom_dispatch_is_not_silently_skipped_by_wrappers() {
+    for wrapped in [
+        "let wrapped: Option[[int; 2]] = Some(values)",
+        "let wrapped: Result[[int; 2], int] = Ok(values)",
+        "let wrapped = (values, 3)",
+    ] {
+        rejects(
+            &format!(
+                "impl Clone for [int; 2] {{ fn clone(self: &Self) Self {{ [8, 9] }} }}\nfn take[T: Clone](value: T) {{}}\nfn main() {{ let values = [1, 2]\n {wrapped}\n take(wrapped) }}"
+            ),
+            "不满足 trait",
+        );
+    }
+}
+
+#[test]
+fn array_clone_copyable_arrays_still_clone_through_wrappers() {
+    let bytes: Vec<_> = output(
+        r#"
+use std.io.{println}
+fn main() {
+    let opt: Option[[int; 2]] = Some([1, 2])
+    let res: Result[[int; 2], int] = Ok([3, 4])
+    let pair = ([5, 6], 7)
+    if let Some(value) = opt.clone() { println(value[1]) }
+    if let Ok(value) = res.clone() { println(value[1]) }
+    let (array, _) = pair.clone()
+    println(array[1])
+}
+"#,
+        &[],
+    )
+    .into_iter()
+    .flat_map(|(_, bytes)| bytes)
+    .collect();
+    assert_eq!(bytes, b"2\n4\n6\n");
 }
 
 #[test]
