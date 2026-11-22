@@ -80,7 +80,6 @@ fn run() int {
 fn main() { _ = run() }
 "#;
 
-#[expect(clippy::ptr_arg, reason = "固定 collect hook 签名")]
 fn collect(harness: &mut Harness<'_>, memory: &mut Vec<u8>) {
     let mut roots: Vec<_> = harness
         .root_frames

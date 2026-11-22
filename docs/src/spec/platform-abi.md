@@ -299,6 +299,17 @@ Mach-O 适配层必须通过既有 arm64 writer 和导入桩生成器布局、�
 同一 owned section/location/relocation 图允许 ELF 调用方消费，不构成新的 ELF writer。
 这些私有边界尚不绑定启动、调度、分配器或 GC，不构成可运行的 A64 平台或目标登记。
 
+A64 runtime 调用必须由既有 canonical glue resolver 确定唯一源码实例，逐调用点校验
+参数、结果、固定效果与叶证明；不得靠同名符号或未经校验的函数别名绕过绑定。
+编译输入必须仍是同一冻结 LIR 的函数体；绑定调用的被调源码体也必须编译进入同一
+world，不能用同名的任意机器片段顶替。隐含 handle、屏障和 region 调用沿用各自整数
+车道协议，region 编号与 export summary 必须作为真实实参传递。没有 authoritative
+安全点的调用只能进入有界的 poll-free 叶实现，不能凭空补栈图或放任其进入 slow path。
+scoped-view、no-safepoint 和 permit 标记只能在冻结 LIR 已验证的证明范围内消去；不能
+把缺少实现的 runtime、机器原语、分配或平台操作静默当成空操作。
+调用保持原有 LIR Allocation、Barrier 和 Select 安全点身份，后端仅在物理记录层映射到
+CallReturn 或 SuspendResume；尤其不能因解析了 select 的目标而丢掉 default/挂起区别。
+
 ### 总则
 
 ABI 字符串目前只有 `"C"`。无函数体的 `extern` 是导入，有函数体且公开的 `pub extern "C" fn` 是导出；库名、符号和链接方式必须在构建配置中显式登记。导出边界不能把 Gugu panic 展开到 C 帧：未被 `std.panic.catch` 收集的 panic 必须按[运行时](runtime.md)规则终止进程。

@@ -16,6 +16,7 @@ mod locals;
 mod memory;
 mod roots;
 mod runtime;
+mod runtime_binding;
 mod runtime_vm;
 mod vm;
 
@@ -158,19 +159,7 @@ impl Fixture {
             .collect::<Vec<_>>();
         let arguments = self.args(args);
         let results = self.args(&output);
-        let memory = if matches!(
-            op,
-            Op::Load(_)
-                | Op::Store(_)
-                | Op::Memcpy { .. }
-                | Op::Memmove { .. }
-                | Op::Memset { .. }
-                | Op::Atomic { .. }
-                | Op::Call(_)
-                | Op::ForeignCall(_)
-                | Op::StackCheck
-                | Op::SafepointPoll { .. }
-        ) {
+        let memory = if op.has_memory() {
             let next = self.value(
                 Type::Mem,
                 Definition::Instruction {

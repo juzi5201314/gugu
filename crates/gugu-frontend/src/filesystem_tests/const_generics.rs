@@ -133,7 +133,7 @@ fn dependent_value_parameter_instances_use_values_and_survive_cache_hits() {
 
 #[test]
 fn dependent_value_parameter_cannot_be_mutated_or_borrowed() {
-    for statement in ["n = 1", "_ = &n"] {
+    for statement in ["n = 1", "_ = &n", "_ = std.ptr.addr_of((n))"] {
         let source = format!(
             "fn f(comptime n: int) [int; n] {{ {statement}\n [0; n] }}\nfn main() {{ _ = f(2) }}"
         );
