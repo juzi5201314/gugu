@@ -453,6 +453,10 @@ load command 依次为各段、`LC_DYLD_CHAINED_FIXUPS`、`LC_DYLD_EXPORTS_TRIE`
 
 `a64::fragments::darwin_resolver_symbol` 独立于套接字操作分派。它用 x0 接收 `ResolverSymbol` 操作号，通过 `ADRP/ADD` 重定位到 `darwin_resolver_imports` 声明的 libSystem 调用桩，并在 x0 返回可按 C ABI 调用的地址。无效操作号触发陷阱。片段不执行解析、不捕获 errno，也不接入 worker、托管调用、栈切换或目标注册。
 
+`a64::fragments::darwin_vm(PlatformOp)` 为原生 C ABI 的独立范围片段工厂，契约与 `linux_vm` 相同：reserve 的 x0/x1 为 bytes/alignment，其他操作以 x0 接收 NativeExtent 的 base/+8 bytes，失败返回 -errno。全部经 `darwin_vm_imports` 声明的 libSystem 调用桩，int 结果经 `__error` 翻译 errno。reserve 与 linux_vm 同形：检查 bytes/align、二次幂和总长溢出，`mmap(0, bytes+align, PROT_NONE, MAP_ANON|MAP_PRIVATE, -1, 0)` 过量预留后按位对齐分别 `munmap` 首尾，任一 trim 失败释放仍拥有的范围并返回原错误。Commit/Unprotect 为 `mprotect(base, bytes, PROT_READ|PROT_WRITE)`，ProtectGuard 为 `mprotect(…, PROT_NONE)`，Release 为 `munmap`。Decommit 不复用 madvise：Darwin 的 `MADV_DONTNEED` 只标记页可回收、不保证再次访问读到零页，故改为 `mmap(base, bytes, PROT_NONE, MAP_ANON|MAP_PRIVATE|MAP_FIXED, -1, 0)` 以新映射覆盖区间，与 x86_64 Darwin 的 decommit 一致。`darwin_page_size()` 调用 `getpagesize` 并将 int 结果零扩展到 x0，不硬编码宿主页大小。
+
+`examples/a64_darwin_vm_image.rs` 在默认测试之外构建带 LC_MAIN 的 arm64 Mach-O，经共享 rt0 进入，调用 `getpagesize` 打印真实页大小，预留一页、提交、写入、guard/unprotect、decommit 后重新提交验证零页、munmap，并检查不对齐 munmap 的 EINVAL。进程内脚本以 libSystem 替身覆盖各操作的原始参数与 errno 翻译、reserve 的 prefix/tail 清理和非法输入，不做真实 I/O。
+
 ## 直接编码与验证
 
 encoder 对每个 `X64Inst` 先计算 exact 长度，再写 prefix、REX、opcode、ModRM、SIB、displacement和 immediate；两次计算必须一致。每条 instruction记录起止 offset，stack map、branch、relocation和 source table只引用该边界。

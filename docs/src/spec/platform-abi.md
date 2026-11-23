@@ -468,6 +468,8 @@ rt0 和运行时通过 libSystem 调用 Darwin 接口；文件系统、套接字
 
 Darwin 的对齐地址预留先将请求长度向上取整为整页，再裁剪对齐所需的额外地址空间；裁剪失败时不得报告预留成功。
 
+内部 arm64 Darwin 范围适配器在原生栈上通过 libSystem 执行平台范围操作：commit/unprotect 为保护位 `PROT_READ|PROT_WRITE`，guard 为 `PROT_NONE`，release 为 `munmap`，失败读取 Darwin errno 并返回其负值。decommit 以 `MAP_FIXED` 匿名 `PROT_NONE` 映射覆盖区间返回零页——Darwin 的 `MADV_DONTNEED` 不保证再次访问读到零内容；覆盖后的范围须重新 commit 才能访问。页大小取自 `getpagesize`，不硬编码宿主值。
+
 内部 arm64 进程适配器在原生栈上通过 libSystem 创建进程及管道，并支持非阻塞观察、终止和管道 I/O。`posix_spawn` 及其文件动作直接返回错误码；其他入口在失败时读取 Darwin errno。管道两端设置 close-on-exec，父进程端设置非阻塞并抑制 SIGPIPE。重定向用的描述符副本也设置 close-on-exec；传给 `fcntl` 的可变整数实参位于栈上。
 
 Darwin datagram 接收使用 `recvmsg` 的返回标志识别 `MSG_TRUNC`，不能将写满缓冲的报文误判为完整报文。
