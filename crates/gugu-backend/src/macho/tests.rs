@@ -372,6 +372,7 @@ fn arm64_darwin_runtime_fixture() -> (MachORequest, crate::a64::macho::DarwinEnt
         ("__gugu_maps", 32),
         ("__gugu_cfa", 16),
         ("__gugu_types", 24),
+        ("__gugu_ro", state::BYTES as usize),
     ] {
         request.sections.push(Section {
             segment: Segment::DataConst,
@@ -489,10 +490,10 @@ fn arm64_darwin_entry_rejects_invalid_runtime_locations() {
     use crate::a64::macho::link_entry;
 
     for (mutate, name) in [
-        // 状态区必须可写：__got 是 __DATA_CONST。
+        // 状态区必须可写：__gugu_ro 是容得下状态区的 __DATA_CONST。
         (
             Box::new(|runtime: &mut crate::a64::macho::DarwinRuntime| {
-                runtime.runtime_state = at(2, 0);
+                runtime.runtime_state = at(8, 0);
             }) as Box<dyn FnOnce(&mut crate::a64::macho::DarwinRuntime)>,
             "runtime_state",
         ),
