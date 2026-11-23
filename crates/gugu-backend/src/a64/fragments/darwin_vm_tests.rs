@@ -34,6 +34,7 @@ impl LibSystem {
             "__error" => ERRNO_AT,
             "mmap" if fail => u64::MAX,
             "mmap" => self.mmap_result,
+            "getpagesize" => 0x4000,
             _ if fail => u64::MAX,
             _ => 0,
         };
@@ -189,9 +190,34 @@ fn reserve_trims_prefix_and_tail() {
     assert_eq!(
         libsystem.calls,
         [
+            call("getpagesize", &[]),
             call("mmap", &[0, 0x2_0000, 0, 0x1002, u64::MAX, 0]),
             call("munmap", &[0x1_0000_8000, 0x8000]),
             call("munmap", &[0x1_0002_0000, 0x8000]),
+        ]
+    );
+}
+
+#[test]
+fn reserve_rounds_bytes_up_to_the_host_page() {
+    let (code, calls) = vm_code(PlatformOp::ReserveAligned);
+    let mut libsystem = LibSystem {
+        mmap_result: 0x1_0000_0000,
+        ..LibSystem::default()
+    };
+    let mut vm = request_vm();
+    vm.registers[0] = 0x3000;
+    vm.registers[1] = 0x4000;
+    assert_eq!(
+        vm.run_calls(&code, |vm, pc| libsystem.call(vm, &calls[&pc])),
+        0x1_0000_0000
+    );
+    assert_eq!(
+        libsystem.calls,
+        [
+            call("getpagesize", &[]),
+            call("mmap", &[0, 0x8000, 0, 0x1002, u64::MAX, 0]),
+            call("munmap", &[0x1_0000_4000, 0x4000]),
         ]
     );
 }
@@ -213,6 +239,7 @@ fn reserve_skips_prefix_when_already_aligned() {
     assert_eq!(
         libsystem.calls,
         [
+            call("getpagesize", &[]),
             call("mmap", &[0, 0x2_0000, 0, 0x1002, u64::MAX, 0]),
             call("munmap", &[0x1_0001_0000, 0x1_0000]),
         ]
@@ -239,6 +266,7 @@ fn reserve_releases_owned_range_on_trim_failure() {
     assert_eq!(
         libsystem.calls,
         [
+            call("getpagesize", &[]),
             call("mmap", &[0, 0x2_0000, 0, 0x1002, u64::MAX, 0]),
             call("munmap", &[0x1_0000_8000, 0x8000]),
             call("__error", &[]),
@@ -276,6 +304,7 @@ fn reserve_releases_remaining_range_on_tail_failure() {
     assert_eq!(
         libsystem.calls,
         [
+            call("getpagesize", &[]),
             call("mmap", &[0, 0x2_0000, 0, 0x1002, u64::MAX, 0]),
             call("munmap", &[0x1_0000_8000, 0x8000]),
             call("munmap", &[0x1_0002_0000, 0x8000]),
@@ -303,6 +332,7 @@ fn reserve_maps_mmap_failure_to_negative_errno() {
     assert_eq!(
         libsystem.calls,
         [
+            call("getpagesize", &[]),
             call("mmap", &[0, 0x2_0000, 0, 0x1002, u64::MAX, 0]),
             call("__error", &[]),
         ]
@@ -312,12 +342,7 @@ fn reserve_maps_mmap_failure_to_negative_errno() {
 #[test]
 fn reserve_rejects_invalid_arguments() {
     let (code, calls) = vm_code(PlatformOp::ReserveAligned);
-    for (bytes, align) in [
-        (0, 0x1_0000),
-        (0x1_0000, 0),
-        (0x1_0000, 3),
-        (u64::MAX - 8, 0x20),
-    ] {
+    for (bytes, align) in [(0, 0x1_0000), (0x1_0000, 0), (0x1_0000, 3)] {
         let mut libsystem = LibSystem::default();
         let mut vm = request_vm();
         vm.registers[0] = bytes;
@@ -329,4 +354,14 @@ fn reserve_rejects_invalid_arguments() {
         );
         assert!(libsystem.calls.is_empty());
     }
+    // 页取整溢出同样按非法输入处理；此时已经取得过页大小。
+    let mut libsystem = LibSystem::default();
+    let mut vm = request_vm();
+    vm.registers[0] = u64::MAX - 8;
+    vm.registers[1] = 0x20;
+    assert_eq!(
+        vm.run_calls(&code, |vm, pc| libsystem.call(vm, &calls[&pc])),
+        (-22_i64) as u64
+    );
+    assert_eq!(libsystem.calls, [call("getpagesize", &[])]);
 }

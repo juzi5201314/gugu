@@ -10,7 +10,10 @@ pub const NATIVE_RESERVED_OFFSET: uint = 3968
 pub const NATIVE_COMMITTED_OFFSET: uint = 3976
 pub const NATIVE_MAPPINGS_OFFSET: uint = 3984
 pub const NATIVE_PEAK_OFFSET: uint = 3992
+#[cfg(not(all(os = "macos", arch = "aarch64")))]
 pub const NATIVE_PAGE_BYTES: uint = 4096
+#[cfg(all(os = "macos", arch = "aarch64"))]
+pub const NATIVE_PAGE_BYTES: uint = 16384
 
 fn word(address: uint) uint { unsafe { std.ptr.read_unaligned[uint](std.mem.transmute[uint, *uint](address)) } }
 fn put(address: uint, value: uint) { unsafe { std.ptr.ptr_write[uint](std.mem.transmute[uint, *uint](address), value) } }

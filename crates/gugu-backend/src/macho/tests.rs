@@ -833,14 +833,15 @@ fn ad_hoc_signature_hashes_every_page() {
         );
         assert_eq!(limit, off);
         assert_eq!(name16(&cd[ident_off..ident_off + 10]), "gugu.test");
-        assert_eq!(&cd[36..40], &[32, 2, 0, 12]);
+        let shift = arch.page_size().trailing_zeros() as u8;
+        assert_eq!(&cd[36..40], &[32, 2, 0, shift]);
         let text = segments(&file)
             .into_iter()
             .find(|s| s.0 == "__TEXT")
             .unwrap();
         assert_eq!(u64::from_be_bytes(cd[64..72].try_into().unwrap()), text.3);
         assert_eq!(u64::from_be_bytes(cd[72..80].try_into().unwrap()), text.4);
-        let pages: Vec<_> = file[..off].chunks(4096).collect();
+        let pages: Vec<_> = file[..off].chunks(arch.page_size() as usize).collect();
         assert_eq!(pages.len(), slots as usize);
         for (i, page) in pages.into_iter().enumerate() {
             assert_eq!(

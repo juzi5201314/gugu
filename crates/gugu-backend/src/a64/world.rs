@@ -83,6 +83,21 @@ pub struct World {
     pub maps: Location,
     pub unwind: Location,
     pub code: Location,
+    /// `__gugutyp` 类型段内符号：名字 → 段内偏移插槽。type section 由整程序装配在
+    /// `build` 之后追加（见 `program::assemble`），别名在那里注册进 `symbols`。
+    pub type_symbols: Vec<(String, TypeSlot)>,
+}
+
+/// 类型段内的符号插槽：`Symbol::TypeDescriptor/TypeRecords/TypeNames` 的镜像符号都落在
+/// `__gugutyp` 记录/名字池上，不为每个引用复制 blob（与 x64 `type_descriptors` 同语义）。
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub enum TypeSlot {
+    /// `gc_metadata_section::descriptor_offset(type_id)` 的记录偏移。
+    Descriptor(u64),
+    /// `TypeRecord` 数组基址（段头 records_offset，即 TYPE_HEADER_BYTES）。
+    Records,
+    /// 类型名池基址（段头 name_offset 字段）。
+    Names,
 }
 
 fn fail(message: impl std::fmt::Display) -> Error {
@@ -188,12 +203,8 @@ fn body_symbols(
                     }
                     Symbol::External { name, .. } => {
                         let value = body
-                            .operands
-                            .get(
-                                instruction.results.start as usize
-                                    ..instruction.results.end as usize,
-                            )
-                            .and_then(|results| results.first())
+                            .results(instruction)
+                            .next()
                             .ok_or_else(|| fail("A64 symbol address result missing"))?;
                         let code = body
                             .values
@@ -315,6 +326,23 @@ fn build_with_catalog(
             }
         }
     }
+    // 未绑定的 runtime glue 目标兜底到 `__gugu_stub_exit`（与 x64 `resolve_target`
+    // 语义一致）：只有片段/体对 `__gugu_runtime_*` 命名的引用才可能走到这里，绑定
+    // 入口的别名已在上方注册，余下的都是不可达路径上的引用。
+    let stub = "__gugu_stub_exit";
+    for rel in &mut world.relocations {
+        let target = &mut rel.relocation.target;
+        if target.starts_with("__gugu_runtime_") && !world.symbols.contains_key(target.as_str()) {
+            *target = stub.to_owned();
+        }
+    }
+    for pointer in &mut world.pointers {
+        if pointer.target.starts_with("__gugu_runtime_")
+            && !world.symbols.contains_key(pointer.target.as_str())
+        {
+            pointer.target = stub.to_owned();
+        }
+    }
     world.entry = *world
         .symbols
         .get(&super::abi::symbol(&request.entry))
@@ -323,6 +351,35 @@ fn build_with_catalog(
         return Err(fail("A64 entry is not code"));
     }
     for (symbol, name) in requirements {
+        match &symbol {
+            // 显式 Definition 已提供该符号（测试/fixture 直接落数据）时走符号表，
+            // 不强制 type universe；否则登记 `__gugutyp` 段内插槽。
+            _ if world.symbols.contains_key(&name) => {}
+            Symbol::TypeDescriptor(key) => {
+                let universe = request
+                    .universe
+                    .ok_or_else(|| fail("A64 type descriptor requires a type universe"))?;
+                let type_id = universe
+                    .type_id(key)
+                    .ok_or_else(|| fail("A64 type descriptor outside the frozen table"))?;
+                world.type_symbols.push((
+                    name,
+                    TypeSlot::Descriptor(crate::runtime::gc_metadata_section::descriptor_offset(
+                        type_id,
+                    )),
+                ));
+                continue;
+            }
+            Symbol::TypeRecords => {
+                world.type_symbols.push((name, TypeSlot::Records));
+                continue;
+            }
+            Symbol::TypeNames => {
+                world.type_symbols.push((name, TypeSlot::Names));
+                continue;
+            }
+            _ => {}
+        }
         let at = world
             .symbols
             .get(&name)
@@ -332,7 +389,8 @@ fn build_with_catalog(
             return Err(fail("incompatible A64 typed symbol definition"));
         }
     }
-    world.validate()?;
+    // `type_symbols` 的别名要到整程序装配追加 `__gugutyp` 后才注册进 `symbols`；
+    // `validate()` 留给镜像请求（elf/macho request）在别名注册之后执行。
     Ok(world)
 }
 
@@ -372,6 +430,7 @@ fn assemble(
         maps: start,
         unwind: start,
         code: start,
+        type_symbols: vec![],
     };
     for definition in definitions.into_values() {
         world.append(definition)?;

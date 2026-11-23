@@ -417,7 +417,7 @@ Linux DNS 的 `net_resolver.gg` 经 `resolver_symbol` 获得 getaddrinfo/freeadd
 
 `a64::fragments::linux_vm(PlatformOp)` 为原生 C ABI 的独立范围片段工厂，不是 NativeRequest worker。reserve 的 x0/x1 对应 x64 reserve_aligned 的 bytes/alignment；其他操作以 x0 接收 NativeExtent 的 base/+8 bytes。使用 mmap 222、munmap 215、mprotect 226、madvise 233，保留负 errno。reserve 检查 bytes/align、二次幂和总长溢出，以 PROT_NONE 和 MAP_PRIVATE|MAP_ANONYMOUS 过量预留，按位对齐并分别 munmap 首尾。任一 trim 失败释放仍拥有的映射范围，返回原错误；成功解除前缀后先推进 owned base/length，再尝试尾部，避免错误清理解除其他线程在已释放前缀新建的映射。Commit/Unprotect 为保护位 3，Guard 为 0，Decommit 为 MADV_DONTNEED 4；未使用 MAP_FIXED 覆盖其他映射。
 
-`linux_page_size()` 用 x0 的 Linux envp 扫描环境终止项与 auxv，返回 AT_PAGESZ，不调用 libc/getauxval，不依赖宿主构建机器页大小，缺少时返回 0。调用方从 `Rt0Payload.boot_environment` 取得入口捕获的 envp，再按该返回值初始化内部 A64 的页舍入与 extent。当前 `native_memory.gg` 的 NATIVE_PAGE_BYTES = 4096 和 platform profile 仍只服务已登记 x64 路径；本次不注册 A64 目标、不改共享 schema，也不宣称完整 GC/allocator 已在 16/64 KiB 内核上接通。接通未来目标时须在该 owning layer 使用 native 页值，而非继续套用 x64 profile。
+`linux_page_size()` 用 x0 的 Linux envp 扫描环境终止项与 auxv，返回 AT_PAGESZ，不调用 libc/getauxval，不依赖宿主构建机器页大小，缺少时返回 0。调用方从 `Rt0Payload.boot_environment` 取得入口捕获的 envp，再按该返回值初始化内部 A64 的页舍入与 extent。`native_memory.gg` 的 NATIVE_PAGE_BYTES 与 `heap.gg` 的 LARGE_MAPPING_PAGE_BYTES 按 `#[cfg(all(os = "macos", arch = "aarch64"))]` 分档：aarch64-macos 为 16384，其余已登记路径仍为 4096；仍不注册 A64 目标，aarch64-linux 的动态页探测另行接线，不宣称完整 GC/allocator 已在 16/64 KiB 内核上接通。
 
 进程内指令/syscall 脚本覆盖 4/16/64 KiB auxv、缺失值、guard/commit/decommit/release 的原始参数与错误、reserve 的 prefix/tail、空输入/溢出和清理错误；不做真实 I/O。`examples/a64_linux_vm_image.rs` 在默认测试之外从真实 auxv 取得页大小，预留一页、提交、写入、guard/unprotect、验证内容、MADV_DONTNEED 后验证零填充并 munmap，同时检查不对齐 munmap 的 EINVAL。此层不需要 FP、原子或 foreign-call worker。
 
@@ -435,7 +435,7 @@ C 导出入口的 `.pdata` 在常量符号 RVA 发布后追加，`UNWIND_INFO` �
 
 load command 依次为各段、`LC_DYLD_CHAINED_FIXUPS`、`LC_DYLD_EXPORTS_TRIE`（空 trie）、`LC_SYMTAB`、`LC_DYSYMTAB`（只有本地符号）、`LC_LOAD_DYLINKER`、`LC_UUID`、`LC_BUILD_VERSION`（macOS 12.0）、`LC_MAIN`、每个 dylib 一条 `LC_LOAD_DYLIB` 和最后的 `LC_CODE_SIGNATURE`。导入使用 chained fixups：指针格式 `DYLD_CHAINED_PTR_64_OFFSET`、导入格式 `DYLD_CHAINED_IMPORT`，每个含 fixup 的段按页写链起点，链内 stride 为 4 字节且不跨页；rebase 槽保存目标相对镜像基址的 36 位偏移，bind 槽保存导入序号与 8 位 addend。dylib 序号 8 位且 `0xF0..=0xFF` 是 dyld 的负数特殊序号，因此镜像最多链接 239 个 dylib。fixup 槽必须是 `__DATA_CONST`/`__DATA` 内 8 字节对齐的有文件内容槽，重复槽、越界目标与缺失导入在写出前失败。`LC_UUID` 取签名前字节 BLAKE3 摘要的前 16 字节。
 
-签名是 linker-signed ad-hoc SuperBlob，只含一个 CodeDirectory（版本 `0x20400`、`CS_ADHOC | CS_LINKER_SIGNED`、SHA-256、4 KiB 页、无 special slot），`execSeg` 指向 `__TEXT` 并标记 main binary；页哈希覆盖 `[0, 签名偏移)`，因此签名最后写入。
+签名是 linker-signed ad-hoc SuperBlob，只含一个 CodeDirectory（版本 `0x20400`、`CS_ADHOC | CS_LINKER_SIGNED`、SHA-256、无 special slot），`execSeg` 指向 `__TEXT` 并标记 main binary；CodeDirectory 的 pageShift 取镜像架构页大小（Arm64 = 14，即 16 KiB；X86_64 = 12，即 4 KiB），页哈希覆盖 `[0, 签名偏移)` 且按该页大小分块，因此签名最后写入。
 
 `macho::append_native_imports` 将后端的 `NativeImport` 转换为两级导入及 `__DATA_CONST,__got` 中的 bind 槽，保留声明顺序；纯库依赖仅加入 dylib 列表。返回的槽位置和导入种类不依赖架构，供后端生成调用入口或引用数据。x86_64 在节大小及 dylib 列表固定后为 Function 写出 `jmp [rip+GOT]`，不为 Data 创建代码入口。
 
@@ -802,10 +802,25 @@ candidate 后按 restore ABI 恢复系统上下文）、`gc_enter`（HOT/SP 切�
 `__gugu_linux_stub_*` C 函数桩与 `linux_import_slot_symbol` 八字节文件回填 GOT 槽。
 `runtime_imports(platform)` 汇总各片段声明的原生导入：Darwin 全部经 LIB_SYSTEM
 （含 exit/write/pthread_threadid_np，按名去重），Linux 为 resolver 与外调工作线程
-共用的 libc 面（getaddrinfo/freeaddrinfo/gettid/__errno_location）。尚未提供片段的 glue 名（fs_start/fs_poll、callback_*、
-net_close、process_native_worker、monotonic/wall nanos、parallelism_probe、
-signal_install、startup/environment、stack/cage/callback glue、panic glue 与源码侧
-`gc_dispatch` body）在链接期以未定义符号显式失败，不做占位 no-op。
+共用的 libc 面（getaddrinfo/freeaddrinfo/gettid/__errno_location）。
+
+`runtime_definitions` 另含两批 `native.rs`/`callback.rs` 机器片段：cage 与栈
+（`cage_control` 返回 `__gugu_cage_control` 记录的地址；记录由
+`CageControlRecord::boot_bytes(cage_bytes)` 从 `ProgramRequest.cage_bytes` 生成，
+`stack_read_word`/`stack_copy_raw` 沿 coroutine 栈深度锚读写，`stack_copy_raw`
+拷贝循环内联发射不依赖 memcpy glue）、回调（`callback_control`/`callback_queue`
+携带 16-byte 对齐的 `stlxr` 队列协议，OPEN 登记成功在 x0 返回 `OK`，
+`callback_file_worker` 经 `callback_poll` 消费）与启动/平台杂项（`startup`/`environment`、`fs_start`/`fs_poll`、
+`monotonic`/`wall` 纳秒、`parallelism_probe`、`net_close`、`process_native_worker`、
+Linux 的 `linux_foreign_start`/`linux_foreign_poll` 按
+`BLOCKING_WORKER_STACK_BYTES = 65536` 以 `Operand::Wide { shift: 16 }`
+拼装，超过 imm12 不加截断）。未绑定到任何 Definition 的
+`__gugu_runtime_*` 重定位与指针目标由 world 构建期统一重写为
+`__gugu_stub_exit`（定义即 `fragments::process_exit`），与 x64
+`resolve_target` 的兜底语义一致；绑定名缺定义仍是链接期硬错误。
+仍未提供片段的 glue 名（`signal_install`/`signal_handler`、panic glue 与源码侧
+`gc_dispatch` body）不可达时不发射引用，可达路径引用按上述兜底处理，
+不做占位 no-op。
 
 ### A64 外调参数包与内部 lowering（4d.3）
 
@@ -876,10 +891,13 @@ function assembler 同时保留 ADRP/ADD 地址重定位与 call 重定位；无
 - `ForeignLeaf`、可 unwind 或 tail 外调、foreign callback/export adapter：未绑定其
   system-stack/异常/回调路径；外调当前只接受普通和 dirty bridge，拒绝 coroutine
   stack 裸地址泄漏、GC 车道、过对齐/过大签名和超 native stack budget。
-- `Invoke`、`ResumePanic` 尚未有专用 terminator lowering；结构化跳转、条件跳转、
-  switch、return、tail managed call、trap 和 unreachable 已支持。
-- 普通 managed 调用仍要求 scalar internal ABI 和直接实例；aggregate/sret、间接/erased
-  调用与捕获环境依赖 runtime/adapter 路径。整数除余仍要求静态非零除数证明；窄宽度
+- `Invoke`/`ResumePanic` 已接入：invoke 发射调用、landing 记录进入 unwind 表，
+  `ResumePanic` 走 panic glue；结构化跳转、条件跳转、switch、return、tail
+  managed call、trap 和 unreachable 均已支持。
+- 普通 managed 调用支持直接实例、绑定 runtime 目标与恰一个 Code-provenance
+  参数的间接调用；aggregate/sret 按 caller 临时副本/结果缓冲地址处理。`Vtable`
+  目标、`captures_arguments`（runtime 目标除外）与 `foreign_arguments` 仍拒绝，
+  依赖 runtime/adapter 路径。整数除余仍要求静态非零除数证明；窄宽度
   的非法 carry/wide、非法转换和超帧范围显式拒绝。
 
 这些拒绝不隐藏为 no-op；特别是泛型 SIMD 与动态除零检查不是已实现的 PR 6/8 能力。

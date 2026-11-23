@@ -164,11 +164,16 @@ impl<'a> Catalog<'a> {
                 "A64 runtime call effects differ from the canonical operation",
             ));
         }
-        let (body, target) = self.checked_target(
-            mangle::runtime_call_name(runtime),
-            &call.parameters,
-            &call.results,
-        )?;
+        let name = mangle::runtime_call_name(runtime);
+        // Fragment glue 没有源 body：ABI 车道合法性仍要校验，符号由登记的机器片段提供。
+        if crate::runtime::GLUE_DEFS.iter().any(|definition| {
+            definition.glue == name && definition.def == crate::runtime::GlueDefKind::Fragment
+        }) {
+            abi::arguments(call.parameters.iter().map(|kind| kind.ty))?;
+            abi::results(call.results.iter().map(|kind| kind.ty))?;
+            return Ok(mangle::mangle_runtime(name));
+        }
+        let (body, target) = self.checked_target(name, &call.parameters, &call.results)?;
         if call.poll_free_leaf && !body.poll_interface.leaf {
             return Err(super::error(
                 "A64 runtime leaf call lacks a source leaf proof",

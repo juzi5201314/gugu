@@ -97,7 +97,9 @@ fn alloc(
         arguments,
         results: vec![dest.0],
         suspend: false,
+        callee: None,
         safepoint: instruction.safepoint.map(|_| (block, site)),
+        landing: None,
     });
     let ty = body.values[dest.index()].kind.ty;
     b.normalize(dest.0, dest.0, super::bits(ty)?, false)?;
@@ -130,7 +132,9 @@ fn machine_call(call: &CallSite<'_>, b: &mut Builder<'_>, name: &str) -> Result<
         arguments: args.iter().map(|value| value.0).collect(),
         results: results.iter().map(|value| value.0).collect(),
         suspend: instruction.op.safepoint_kind() == Some(crate::lir::body::SafepointKind::Suspend),
+        callee: None,
         safepoint: instruction.safepoint.map(|_| (block, site)),
+        landing: None,
     });
     for ValueId(value) in results {
         let ty = body.values[*value as usize].kind.ty;
@@ -147,7 +151,8 @@ pub(crate) fn lower(
     b: &mut Builder<'_>,
 ) -> Result<(), Error> {
     let args = body.args(&instruction.arguments);
-    let results = body.args(&instruction.results);
+    let results: Vec<crate::lir::body::ValueId> = body.results(instruction).collect();
+    let results = results.as_slice();
     if instruction.memory.is_none() {
         return Err(crate::a64::error(
             "A64 runtime operation requires memory sequencing",
@@ -229,7 +234,9 @@ pub(crate) fn lower(
         arguments,
         results: results.iter().map(|value| value.0).collect(),
         suspend: instruction.op.safepoint_kind() == Some(crate::lir::body::SafepointKind::Suspend),
+        callee: None,
         safepoint: instruction.safepoint.map(|_| (block, site)),
+        landing: None,
     });
     for ValueId(value) in results {
         let ty = body.values[*value as usize].kind.ty;

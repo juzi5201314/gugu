@@ -260,6 +260,7 @@ fn maps(rva: u64, entry: bool) -> crate::runtime::stack::a64::FrameMetadata {
             pc_offset: 8,
             entry,
         }],
+        &[],
     )
     .unwrap();
     crate::runtime::stack::a64::FrameMetadata::decode(&maps, &unwind).unwrap()

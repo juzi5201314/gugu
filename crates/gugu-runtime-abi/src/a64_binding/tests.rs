@@ -36,6 +36,7 @@ fn fragment(root_word: u32) -> (Vec<u8>, Vec<u8>) {
                 pc_offset: 16,
                 entry: false,
             }],
+            &[],
         )
         .unwrap(),
     )

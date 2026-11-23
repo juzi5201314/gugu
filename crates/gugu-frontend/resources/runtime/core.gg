@@ -1,4 +1,4 @@
-use std.runtime.scheduler.{boot, finish_hot, heap_alloc, live_count, resume_ready, callback_gate, callback_service, callback_pending, COROUTINE_COLD_PAYLOAD_STATE_OFFSET, COROUTINE_COLD_SPAWN_PUBLISHED_BIT, COROUTINE_COLD_SUBTREE_GROUP_OFFSET, COROUTINE_COLD_PANIC_RESULT_OFFSET, COROUTINE_COLD_PANIC_WAITED, COROUTINE_COLD_PANIC_GROUPED, COROUTINE_COLD_PANIC_DETACHED, COROUTINE_COLD_JOIN_WAITER_OFFSET}
+use std.runtime.scheduler.{boot, finish_hot, heap_alloc, live_count, resume_ready, system_context_area, callback_gate, callback_service, callback_pending, COROUTINE_COLD_PAYLOAD_STATE_OFFSET, COROUTINE_COLD_SPAWN_PUBLISHED_BIT, COROUTINE_COLD_SUBTREE_GROUP_OFFSET, COROUTINE_COLD_PANIC_RESULT_OFFSET, COROUTINE_COLD_PANIC_WAITED, COROUTINE_COLD_PANIC_GROUPED, COROUTINE_COLD_PANIC_DETACHED, COROUTINE_COLD_JOIN_WAITER_OFFSET}
 use std.runtime.heap.{copy_bytes}
 use std.runtime.pressure.{pressure_service}
 use std.runtime.gc.{gc_config_check}
@@ -10,6 +10,9 @@ use std.runtime.process_context as process_context
 use std.runtime.timer as timer
 use std.runtime.control as control
 use std.runtime.signal as signal
+use std.runtime.roots.{ROOT_NO_ENTRY}
+#[cfg(arch = "aarch64")]
+use std.runtime.roots as roots
 
 /* Gugu runtime 源树的 bootstrap 编译单元。平台入口和 intrinsic 保持在明确边界内。
  *
@@ -365,8 +368,33 @@ pub fn rt0_start(params: *Rt0Params, bias: uint) uint {
         }
         let cold = state + 128
         store_word(state + 0, slot)
-        store_word(state + 32, cold)
-        store_word(state + 88, 0)
+        #[cfg(arch = "aarch64")]
+        let a64_block = std.platform.reserve_aligned(uint(4096), uint(4096))
+        #[cfg(arch = "aarch64")]
+        {
+            if a64_block == 0 { fatal_runtime() }
+            let a64_range = StackRangeDescriptor { base: a64_block, bytes: 4096 }
+            if std.platform.commit(std.mem.transmute[*StackRangeDescriptor, uint](std.ptr.addr_of(a64_range))) != 0 {
+                fatal_runtime()
+            }
+            // a64 邮箱只存指向非移动存储的指针；main 协程的 A64ControlBlock
+            // （context@+0 152 B、scratch@+152 208 B、内嵌 mailbox@+360 72 B）
+            // 与 worker 系统 context（+512 152 B）放独立保留页，不借用
+            // CoroutineCold 的字段区。内嵌 mailbox 按 a64_bind_control 契约绑定。
+            store_word(state + 32, a64_block + 152)
+            store_word(state + 40, a64_block)
+            store_word(state + 48, a64_block + 512)
+            store_word(state + 56, 0)
+            store_word(a64_block + 360, slot)
+            store_word(a64_block + 392, a64_block + 152)
+            store_word(a64_block + 400, a64_block)
+            store_word(a64_block + 408, a64_block + 512)
+        }
+        #[cfg(not(arch = "aarch64"))]
+        {
+            store_word(state + 32, cold)
+            store_word(state + 88, 0)
+        }
         let processor_page = std.platform.reserve_aligned(uint(4096), uint(4096))
         if processor_page == 0 { fatal_runtime() }
         let processor_range = StackRangeDescriptor { base: processor_page, bytes: 4096 }
@@ -381,9 +409,25 @@ pub fn rt0_start(params: *Rt0Params, bias: uint) uint {
         store_word(slot + 80, stack_high)
         store_word(slot + 88, capacity)
         let stack_top = stack_high / 16 * 16
-        store_word(cold + 8, stack_top - 8)
-        store_word(cold + 16, payload.main_entry + address_bias)
-        store_word(stack_top - 8, payload.main_return + address_bias)
+        #[cfg(arch = "aarch64")]
+        {
+            // a64 的 `ret` 读 LR 而不弹栈，x64 的栈顶哨兵约定不适用；新协程经
+            // `coroutine_enter` 片段以 `blr` 进入 main，栈顶槽位放 [code, pack]。
+            // main 无参，pack 只需指向一段可读字块。cold+8 在 a64 上保存
+            // context 区指针而不是内联 context，与邮箱的指针约定一致。
+            store_word(a64_block, stack_top - 16)
+            store_word(a64_block + 8, block.reserved_13 + bias)
+            store_word(stack_top - 16, payload.main_entry + address_bias)
+            store_word(stack_top - 8, cold)
+            store_word(cold + 8, a64_block)
+        }
+        #[cfg(not(arch = "aarch64"))]
+        {
+            store_word(cold + 8, stack_top - 8)
+            store_word(cold + 16, payload.main_entry + address_bias)
+            // x64 的 `ret` 弹栈取返回地址：新协程栈顶放 main_return 哨兵。
+            store_word(stack_top - 8, payload.main_return + address_bias)
+        }
         let processor_addr = word(state + 96)
         boot(processor_addr, state, slot, cold, block.reserved_13 + bias)
         // 收集器专用 system stack 必须在任何分配前建立：`gc_enter` 会在第一次压力时切到它。
@@ -391,7 +435,10 @@ pub fn rt0_start(params: *Rt0Params, bias: uint) uint {
         process_context.boot(payload.boot_argc, payload.boot_argv)
         mapping.pressure_enable(processor_addr)
         callback_gate(0)
-        let system_context = std.mem.transmute[uint, *()](state + 40)
+        let system_context = std.mem.transmute[uint, *()](system_context_area(state))
+        #[cfg(arch = "aarch64")]
+        let main_context = std.mem.transmute[uint, *()](word(cold + 8))
+        #[cfg(not(arch = "aarch64"))]
         let main_context = std.mem.transmute[uint, *()](cold + 8)
         let hot = std.mem.transmute[uint, *()](slot)
         let processor = std.mem.transmute[uint, *()](processor_addr)
@@ -407,7 +454,11 @@ pub fn rt0_start(params: *Rt0Params, bias: uint) uint {
                 resume_main(state)
             }
             if reason == 2 {
-                finish_hot(word(state), word(state + 88), word(state + 16))
+                #[cfg(arch = "aarch64")]
+                let finished_value = word(state + 56)
+                #[cfg(not(arch = "aarch64"))]
+                let finished_value = word(state + 88)
+                finish_hot(word(state), finished_value, word(state + 16))
                 if live_count(processor_addr) == 0 { callback_gate(5) }
                 if resume_with_io(state, processor_addr) == 0 {
                     if live_count(processor_addr) != 0 { fatal_runtime() }
@@ -445,6 +496,9 @@ fn resume_with_io(state: uint, processor: uint) uint {
 }
 unsafe fn resume_main(state: uint) {
     unsafe {
+        #[cfg(arch = "aarch64")]
+        let main_context = word(state + 40)
+        #[cfg(not(arch = "aarch64"))]
         let main_context = word(state + 32) + 8
         let main_slot = word(state)
         let processor = word(state + 96)
@@ -492,6 +546,18 @@ unsafe fn fatal_stack() {
 }
 
 /// 运行期只消费编译器验证过的封闭元数据；任何缺失或越界都属于 fatal，不转用户 panic。
+#[cfg(arch = "aarch64")]
+unsafe fn checked_safepoint(section: uint, length: uint, fragment_base: uint, return_pc: uint, kind: byte) {
+    unsafe {
+        if section == 0 || length < 72 || return_pc < fragment_base || word(section) != uint(0x31304d5355475547) || word32(section + 8) != uint(0x01080005) || word32(section + 24) != uint(183) || word(section + 64) != length {
+            fatal_runtime()
+        }
+        let (function, point) = roots.gc_metadata_lookup(section, return_pc - fragment_base, uint(kind))
+        if function == ROOT_NO_ENTRY || point == ROOT_NO_ENTRY { fatal_runtime() }
+    }
+}
+
+#[cfg(not(arch = "aarch64"))]
 unsafe fn checked_safepoint(section: uint, length: uint, fragment_base: uint, return_pc: uint, kind: byte) {
     unsafe {
         if length < 72 || return_pc < fragment_base || word(section) != uint(0x31304d5355475547) || word32(section + 8) != uint(0x01080004) {
@@ -532,6 +598,9 @@ unsafe fn checked_safepoint(section: uint, length: uint, fragment_base: uint, re
 unsafe fn morestack_handle(section: uint, length: uint, fragment_base: uint, state: uint, stack_base: uint) uint {
     unsafe {
         let slot = word(state)
+        #[cfg(arch = "aarch64")]
+        let cold = state + 128
+        #[cfg(not(arch = "aarch64"))]
         let cold = word(state + 32)
         let return_pc = word(cold + 64)
         if slot == 0 || cold == 0 { fatal_runtime() }
@@ -634,6 +703,51 @@ unsafe fn write_panic_report(message: *byte, len: uint, path: *byte, path_len: u
     }
 }
 
+/// a64 的 unwind blob 是 GUGUCF01 逐函数表拼接：blob 头 `{magic,函数数,arch=183}` +
+/// 每函数 `{first,end}` 偏移对；函数表头自带 `code_rva/code_size`，landing 记录接在
+/// 站点数组后（头内 +32 站点数、+36 landing 数），定位语义与 x64 版一致。
+#[cfg(arch = "aarch64")]
+unsafe fn panic_landing(unwind: uint, length: uint, fragment_base: uint, return_pc: uint) uint {
+    unsafe {
+        if length < 24 || return_pc <= fragment_base || word(unwind) != uint(0x3130444155475547) || word32(unwind + 12) != uint(183) { fatal_runtime() }
+        let functions = uint(word32(unwind + 8))
+        let site = return_pc - fragment_base - 1
+        let index: uint = 0
+        while index < functions {
+            let first = word(unwind + 16 + index * 8)
+            let end = word(unwind + 24 + index * 8)
+            if first > end || end > length || end - first < 40 { fatal_runtime() }
+            let table = unwind + first
+            if word(table) != uint(0x3130464355475547) || word32(table + 8) != uint(183) { fatal_runtime() }
+            let code_rva = word(table + 24)
+            let code_size = uint(word32(table + 12))
+            if site >= code_rva && site - code_rva < code_size {
+                let sites = uint(word32(table + 32))
+                let landings = uint(word32(table + 36))
+                if sites * 16 > end - first - 40 || landings * 16 > end - first - 40 - sites * 16 { fatal_runtime() }
+                let entry: uint = 0
+                let offset = site - code_rva
+                while entry < landings {
+                    let landing = table + 40 + sites * 16 + entry * 16
+                    let lo = uint(word32(landing))
+                    let hi = uint(word32(landing + 4))
+                    let target = uint(word32(landing + 8))
+                    if offset >= lo && offset < hi {
+                        if target >= code_size || hi > code_size { fatal_runtime() }
+                        return fragment_base + code_rva + target
+                    }
+                    entry = entry + 1
+                }
+                fatal_runtime()
+            }
+            index = index + 1
+        }
+        fatal_runtime()
+        0
+    }
+}
+
+#[cfg(not(arch = "aarch64"))]
 unsafe fn panic_landing(unwind: uint, length: uint, fragment_base: uint, return_pc: uint) uint {
     unsafe {
         if length < 48 || return_pc <= fragment_base || word(unwind) != uint(0x31304e5555475547) || word16(unwind + 8) != uint(1) || word(unwind + 36) != length { fatal_runtime() }
@@ -741,7 +855,7 @@ pub fn panic_unwind(message: *byte, len: uint, path: *byte, path_len: uint, line
         }
         store_word(state + 752, 2)
         std.runtime.context_restore(
-            std.mem.transmute[uint, *()](state + 40),
+            std.mem.transmute[uint, *()](system_context_area(state)),
             std.mem.transmute[uint, *()](word(processor + 4088)),
             std.mem.transmute[uint, *()](processor),
         )

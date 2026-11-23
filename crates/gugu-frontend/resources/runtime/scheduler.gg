@@ -253,6 +253,20 @@ pub fn dynamic_root_record(processor: uint, index: uint) uint = dynamic_root_ent
 
 fn state_of(processor: uint) uint = word(processor + 4080)
 
+/// 系统上下文区：x64 内联在邮箱 +40（48 B）；a64 邮箱只存指针
+/// （state+48 的 `system_context` 字段），指向独立保留页中的 152 B 区域。
+#[cfg(arch = "aarch64")]
+pub fn system_context_area(state: uint) uint = word(state + 48)
+#[cfg(not(arch = "aarch64"))]
+pub fn system_context_area(state: uint) uint = state + 40
+
+/// mutator context 区：x64 内联在 cold+8（48 B）；a64 的 cold+8 只存指针，
+/// 指向该协程 A64ControlBlock 内的 152 B context 区（与邮箱指针约定一致）。
+#[cfg(arch = "aarch64")]
+pub fn mutator_context_area(cold: uint) uint = word(cold + 8)
+#[cfg(not(arch = "aarch64"))]
+pub fn mutator_context_area(cold: uint) uint = cold + 8
+
 pub fn heap_alloc(processor: uint, bytes: uint) uint {
     let cursor = word(processor + 4048)
     let aligned = cursor / 64 * 64
@@ -395,8 +409,8 @@ fn switch_out(hot: uint) {
         let state = state_of(processor)
         let cold = word(hot + 48)
         std.runtime.context_switch(
-            std.mem.transmute[uint, *()](cold + 8),
-            std.mem.transmute[uint, *()](state + 40),
+            std.mem.transmute[uint, *()](mutator_context_area(cold)),
+            std.mem.transmute[uint, *()](system_context_area(state)),
             std.mem.transmute[uint, *()](word(processor + 4088)),
             std.mem.transmute[uint, *()](processor),
         )

@@ -33,6 +33,8 @@ pub struct RuntimeSite {
     pub instruction: Option<u32>,
     pub cfa_offset: u32,
     pub caller_lr: CallerLr,
+    // invoke 落点：(landing_pc, cleanup 链)，由 Anchor.landing 经 plan.labels 解析
+    pub landing: Option<(u32, u32)>,
 }
 
 pub fn lookup(sites: &[RuntimeSite], return_pc: u32) -> Option<&RuntimeSite> {
@@ -47,6 +49,8 @@ pub(crate) struct Anchor {
     kind: SiteKind,
     block: Option<u32>,
     instruction: Option<u32>,
+    // invoke 落点：(目标 block 标签, cleanup 链)
+    landing: Option<(u32, u32)>,
 }
 
 pub(crate) fn resolve(
@@ -64,6 +68,23 @@ pub(crate) fn resolve(
             return Err(super::error("runtime return PC is not inside code"));
         }
         let entry = anchor.kind == SiteKind::MorestackEntry;
+        let landing = match anchor.landing {
+            Some((label, cleanup)) => {
+                let target = *plan
+                    .labels
+                    .get(&label)
+                    .ok_or_else(|| super::error("missing invoke landing target label"))?;
+                if target >= plan.size || target % 4 != 0 {
+                    return Err(super::error("invoke landing target is not inside code"));
+                }
+                Some((
+                    u32::try_from(target)
+                        .map_err(|_| super::error("invoke landing PC exceeds u32"))?,
+                    cleanup,
+                ))
+            }
+            None => None,
+        };
         sites.push(RuntimeSite {
             pc_offset: u32::try_from(pc).map_err(|_| super::error("runtime PC exceeds u32"))?,
             kind: anchor.kind,
@@ -75,6 +96,7 @@ pub(crate) fn resolve(
             } else {
                 CallerLr::StackOffset(frame.record + 8)
             },
+            landing,
         });
     }
     sites.sort_by_key(|site| site.pc_offset);
@@ -136,6 +158,7 @@ impl<'a> Emitter<'a> {
         kind: SiteKind,
         block: Option<u32>,
         instruction: Option<u32>,
+        landing: Option<(u32, u32)>,
     ) -> Result<(), Error> {
         out.push(layout::Item::SymbolBranch {
             target: symbol,
@@ -148,6 +171,29 @@ impl<'a> Emitter<'a> {
             kind,
             block,
             instruction,
+            landing,
+        });
+        Ok(())
+    }
+    /// 间接调用目标（Code 参数物化后的物理寄存器）；锚点与符号调用同记录。
+    pub(super) fn call_register(
+        &mut self,
+        out: &mut Vec<layout::Item>,
+        register: u8,
+        kind: SiteKind,
+        block: Option<u32>,
+        instruction: Option<u32>,
+        landing: Option<(u32, u32)>,
+    ) -> Result<(), Error> {
+        emit(out, "blr", vec![Operand::Reg(Reg::x(register))])?;
+        let label = self.label()?;
+        out.push(layout::Item::Label(label));
+        self.anchors.push(Anchor {
+            label,
+            kind,
+            block,
+            instruction,
+            landing,
         });
         Ok(())
     }
@@ -185,7 +231,7 @@ impl<'a> Emitter<'a> {
         )?;
         Self::branch(out, "b.cond", vec![Operand::Condition(10)], ready)?;
         adjust(out, Reg::x(10), Reg::x(30), 0, false)?;
-        self.call(out, symbol, SiteKind::MorestackEntry, None, None)?;
+        self.call(out, symbol, SiteKind::MorestackEntry, None, None, None)?;
         adjust(out, Reg::x(30), Reg::x(10), 0, false)?;
         Self::branch(out, "b", vec![], retry)?;
         out.push(layout::Item::Label(ready));
@@ -222,6 +268,7 @@ impl<'a> Emitter<'a> {
             SiteKind::PollResume,
             Some(block),
             Some(instruction),
+            None,
         )?;
         out.push(layout::Item::Label(done));
         Ok(())
@@ -236,11 +283,7 @@ fn memory(base: Reg) -> Operand {
 }
 
 pub(crate) fn validate(body: &Body) -> Result<(), Error> {
-    if body.signature.sret.is_some() || !body.signature.by_value.is_empty() {
-        return Err(super::error(
-            "aggregate signature/sret requires coroutine/image integration",
-        ));
-    }
+    // 聚合签名（by_value/sret）只占用 Ptr 车道，无额外后端集成义务。
     super::locals::validate(body)?;
     let entry = body
         .blocks
@@ -308,16 +351,14 @@ pub(crate) fn validate(body: &Body) -> Result<(), Error> {
         if let Op::StackAddr(slot) = inst.op
             && (body.stack_slots.get(slot.index()).is_none()
                 || body
-                    .operands
+                    .values
                     .get(inst.results.start as usize..inst.results.end as usize)
                     .is_none_or(|results| {
                         results.len() != 1
-                            || body.values.get(results[0].index()).is_none_or(|value| {
-                                value.kind
-                                    != crate::lir::body::ValueType::pointer(
-                                        crate::lir::body::Provenance::Stack,
-                                    )
-                            })
+                            || results[0].kind
+                                != crate::lir::body::ValueType::pointer(
+                                    crate::lir::body::Provenance::Stack,
+                                )
                     }))
         {
             return Err(fail(
@@ -369,13 +410,31 @@ pub(crate) fn validate(body: &Body) -> Result<(), Error> {
             ));
         }
     }
-    if body.blocks.iter().any(|b| {
-        matches!(
-            b.terminator,
-            Terminator::Invoke { .. } | Terminator::TailCall { .. }
-        )
-    }) {
-        return Err(super::error("call terminator requires stack maps (4c.2)"));
+    for block in body.blocks.iter() {
+        match &block.terminator {
+            Terminator::Invoke {
+                call,
+                safepoint,
+                normal,
+                unwind,
+                ..
+            } => {
+                if call.poll_free_leaf || safepoint.is_none() {
+                    return Err(super::error(
+                        "invoke requires an authoritative CallReturn map",
+                    ));
+                }
+                if body.edges.get(normal.index()).is_none_or(|e| e.unwind)
+                    || body.edges.get(unwind.index()).is_none_or(|e| !e.unwind)
+                {
+                    return Err(super::error("invoke requires normal and unwind edges"));
+                }
+            }
+            Terminator::TailCall { call, .. } if super::lower::call::requires_maps(call) => {
+                return Err(super::error("tail call requires stack maps (4c.2)"));
+            }
+            _ => {}
+        }
     }
     for (index, point) in body.safepoints.iter().enumerate() {
         if !matches!(
@@ -392,11 +451,15 @@ pub(crate) fn validate(body: &Body) -> Result<(), Error> {
         ) {
             return Err(super::error("safepoint table requires stack maps (4c.2)"));
         }
-        if point
+        let referenced = point
             .instruction
             .and_then(|id| body.instructions.get(id.index()))
-            .is_none_or(|inst| inst.safepoint.is_none_or(|id| id.index() != index))
-        {
+            .is_some_and(|inst| inst.safepoint.is_some_and(|id| id.index() == index))
+            || (point.instruction.is_none()
+                && body.blocks.get(point.block.index()).is_some_and(|b| {
+                    matches!(&b.terminator, Terminator::Invoke { safepoint, .. } if safepoint.is_some_and(|id| id.index() == index))
+                }));
+        if !referenced {
             return Err(super::error("unreferenced runtime safepoint table entry"));
         }
     }

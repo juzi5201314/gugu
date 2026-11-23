@@ -132,62 +132,6 @@ pub fn ensure_runtime_glue(name: &str) -> Result<(), LoweringError> {
     }
 }
 
-/// 返回封闭 LIR opcode 的稳定域名；穷尽 match，未知组合编译期失败。
-pub fn domain(op: &Op) -> &'static str {
-    match op {
-        Op::IConst(_) => "IConst",
-        Op::FConst(_) => "FConst",
-        Op::SymbolAddr(_) => "SymbolAddr",
-        Op::StackAddr(_) => "StackAddr",
-        Op::RootInitAddr(_) => "RootInitAddr",
-        Op::PtrOffset => "PtrOffset",
-        Op::Integer(_) => "Integer",
-        Op::Float(_) => "Float",
-        Op::Compare { .. } => "Compare",
-        Op::Convert(_) => "Convert",
-        Op::Vector(_) => "Vector",
-        Op::Select => "Select",
-        Op::TrapIf => "TrapIf",
-        Op::Load(_) => "Load",
-        Op::Store(_) => "Store",
-        Op::Memcpy { .. } => "Memcpy",
-        Op::Memmove { .. } => "Memmove",
-        Op::Memset { .. } => "Memset",
-        Op::Atomic { .. } => "Atomic",
-        Op::GcAlloc { .. } => "GcAlloc",
-        Op::RegionAlloc { .. } => "RegionAlloc",
-        Op::PlatformCall(_) => "PlatformCall",
-        Op::RuntimeMachineCall(_) => "RuntimeMachineCall",
-        Op::RegionPublish { .. } => "RegionPublish",
-        Op::RegionReset { .. } => "RegionReset",
-        Op::PromoteManaged { .. } => "PromoteManaged",
-        Op::RegionTransfer { .. } => "RegionTransfer",
-        Op::MarkTicketBatch => "MarkTicketBatch",
-        Op::EdgeDeltaBatch => "EdgeDeltaBatch",
-        Op::ResolveSharedHandle => "ResolveSharedHandle",
-        Op::SharedAccessBegin { .. } => "SharedAccessBegin",
-        Op::SharedAccessEnd { .. } => "SharedAccessEnd",
-        Op::SharedFieldBarrier { .. } => "SharedFieldBarrier",
-        Op::SharedFieldBarrierReserved { .. } => "SharedFieldBarrierReserved",
-        Op::ForwardSharedHandle => "ForwardSharedHandle",
-        Op::DecodeCompressedRef => "DecodeCompressedRef",
-        Op::BarrierReserve(_) => "BarrierReserve",
-        Op::GcWriteBarrier { .. } => "GcWriteBarrier",
-        Op::GcWriteBarrierReserved { .. } => "GcWriteBarrierReserved",
-        Op::ScopedViewBegin { .. } => "ScopedViewBegin",
-        Op::ScopedViewEnd { .. } => "ScopedViewEnd",
-        Op::SafepointPoll { .. } => "SafepointPoll",
-        Op::StackCheck => "StackCheck",
-        Op::NoSafepointBegin(_) => "NoSafepointBegin",
-        Op::NoSafepointEnd(_) => "NoSafepointEnd",
-        Op::CoroutineSwitch => "CoroutineSwitch",
-        Op::Call(_) => "Call",
-        Op::ForeignCall(_) => "ForeignCall",
-        Op::InlineAsm(_) => "InlineAsm",
-        Op::CoverageCounter(_) => "CoverageCounter",
-    }
-}
-
 /// 把一条 LIR 指令 lower 成机器序列。
 pub fn lower(
     op: &Op,

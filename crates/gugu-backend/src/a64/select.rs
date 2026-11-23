@@ -124,11 +124,14 @@ fn select_mode(
                             body,
                             call,
                             body.args(&instruction.arguments),
-                            body.args(&instruction.results),
-                            false,
-                            lower::call::Mode::Runtime(
-                                instruction.safepoint.map(|_| (index as u32, site)),
-                            ),
+                            &body.results(instruction).collect::<Vec<_>>(),
+                            lower::call::CallTail {
+                                tail: false,
+                                mode: lower::call::Mode::Runtime(
+                                    instruction.safepoint.map(|_| (index as u32, site)),
+                                ),
+                                landing: None,
+                            },
                             &mut b,
                         )
                         .map_err(|e| Error(format!("{}: {e}", b.context)))?;
@@ -160,7 +163,7 @@ fn select_mode(
             "{} block {index} terminator {:?}",
             body.name, block.terminator
         );
-        let successors = terminator(body, &block.terminator, count, &mut b)
+        let successors = terminator(body, block, index, count, &mut b)
             .map_err(|e| Error(format!("{}: {e}", b.context)))?;
         b.function.blocks[index + 1] = Block {
             items: b.items,
@@ -249,12 +252,13 @@ fn jump(
 
 fn terminator(
     body: &Body,
-    term: &Terminator,
+    block: &crate::lir::body::Block,
+    index: usize,
     count: usize,
     b: &mut Builder<'_>,
 ) -> Result<Vec<usize>, Error> {
     let edge = |id: crate::lir::body::EdgeId| count + id.index() + 1;
-    match term {
+    match &block.terminator {
         Terminator::TailCall {
             call,
             arguments,
@@ -325,13 +329,63 @@ fn terminator(
             b.push(Item::Return);
             Ok(vec![])
         }
+        Terminator::Invoke {
+            call,
+            arguments,
+            results,
+            memory,
+            normal,
+            unwind,
+            safepoint,
+        } => {
+            if !values(body, arguments)
+                || !result_values(body, results)
+                || !kind(body, memory.input, Type::Mem)
+                || !kind(body, memory.output, Type::Mem)
+            {
+                return Err(super::error("invalid invoke operands/memory/results"));
+            }
+            let landing_block = body.edges[unwind.index()].to;
+            let landing = &body.blocks[landing_block.index()];
+            let cleanup = if landing.instructions.is_empty()
+                && matches!(landing.terminator, Terminator::ResumePanic { .. })
+            {
+                u32::MAX
+            } else {
+                landing_block.0
+            };
+            let result_ids: Vec<ValueId> = (results.start..results.end).map(ValueId).collect();
+            lower::call::lower_mode(
+                body,
+                call,
+                body.args(arguments),
+                &result_ids,
+                lower::call::CallTail {
+                    tail: false,
+                    mode: lower::call::Mode::Runtime(
+                        safepoint.map(|_| (index as u32, block.instructions.end)),
+                    ),
+                    landing: Some((landing_block.0 + 1, cleanup)),
+                },
+                b,
+            )?;
+            jump(b, "b", vec![], edge(*normal) as u32)?;
+            Ok(vec![edge(*normal), edge(*unwind)])
+        }
+        Terminator::ResumePanic { memory } => {
+            if !kind(body, *memory, Type::Mem) {
+                return Err(super::error("invalid resume-panic memory token"));
+            }
+            b.push(Item::TailCall {
+                target: crate::x64::mangle::mangle_runtime("panic_resume"),
+                arguments: vec![],
+            });
+            Ok(vec![])
+        }
         Terminator::Trap { .. } | Terminator::Unreachable { .. } => {
             b.emit("brk", vec![machine::fixed(Operand::Imm(0))])?;
             Ok(vec![])
         }
-        _ => Err(super::error(
-            "unsupported leaf terminator (call/unwind/runtime)",
-        )),
     }
 }
 
@@ -345,6 +399,10 @@ fn values(body: &Body, range: &Range<u32>) -> bool {
             .args(range)
             .iter()
             .all(|id| id.index() < body.values.len())
+}
+
+fn result_values(body: &Body, range: &Range<u32>) -> bool {
+    valid_range(range, body.values.len())
 }
 
 fn kind(body: &Body, id: ValueId, ty: Type) -> bool {
@@ -385,8 +443,7 @@ fn validate(body: &Body, leaf: bool, runtime: bool) -> Result<(), Error> {
         }
     }
     for (index, block) in body.blocks.iter().enumerate() {
-        if matches!(block.terminator, Terminator::Invoke { .. })
-            || matches!(&block.terminator, Terminator::TailCall { call, .. } if lower::call::requires_maps(call))
+        if matches!(&block.terminator, Terminator::TailCall { call, .. } if lower::call::requires_maps(call))
         {
             return Err(Error(format!(
                 "block {index} terminator {:?}: requires checked entry / stack maps (4c)",
@@ -404,9 +461,6 @@ fn validate(body: &Body, leaf: bool, runtime: bool) -> Result<(), Error> {
             .is_none_or(|count| count > u32::MAX as usize)
     {
         return Err(super::error("invalid leaf schema/entry/CFG size"));
-    }
-    if (leaf && body.signature.sret.is_some()) || !body.signature.by_value.is_empty() {
-        return Err(super::error("leaf aggregate/sret signature unsupported"));
     }
     super::abi::results(body.signature.results.iter().map(|p| p.ty))?;
     if let Some((bytes, alignment, _)) = body.signature.sret
@@ -471,7 +525,7 @@ fn validate(body: &Body, leaf: bool, runtime: bool) -> Result<(), Error> {
             return Err(Error(format!("site {index}: compile_leaf rejects calls")));
         }
         if !values(body, &instruction.arguments)
-            || !values(body, &instruction.results)
+            || !result_values(body, &instruction.results)
             || instruction.memory.is_some_and(|mem| {
                 !kind(body, mem.input, Type::Mem) || !kind(body, mem.output, Type::Mem)
             })
@@ -501,21 +555,30 @@ fn validate(body: &Body, leaf: bool, runtime: bool) -> Result<(), Error> {
         }
     }
     for (index, block) in body.blocks.iter().enumerate() {
-        if leaf && matches!(block.terminator, Terminator::TailCall { .. }) {
+        if leaf
+            && matches!(
+                block.terminator,
+                Terminator::TailCall { .. } | Terminator::Invoke { .. }
+            )
+        {
             return Err(Error(format!(
-                "block {index}: compile_leaf rejects tail calls"
+                "block {index}: compile_leaf rejects call terminators"
             )));
         }
-        if block.cleanup
-            || !valid_range(&block.instructions, body.instructions.len())
+        if !valid_range(&block.instructions, body.instructions.len())
             || !valid_range(&block.parameters, body.parameters.len())
             || !valid_range(&block.predecessors, body.predecessors.len())
-            || body
-                .params(crate::lir::body::BlockId(index as u32))
-                .iter()
-                .any(|p| p.value.index() >= body.values.len())
         {
             return Err(Error(format!("block {index}: invalid arena range")));
+        }
+        if body
+            .params(crate::lir::body::BlockId(index as u32))
+            .iter()
+            .any(|p| p.value.index() >= body.values.len())
+        {
+            return Err(Error(format!(
+                "block {index}: parameter value out of range"
+            )));
         }
         let edge_valid = |id: crate::lir::body::EdgeId| {
             body.edges
@@ -547,16 +610,35 @@ fn validate(body: &Body, leaf: bool, runtime: bool) -> Result<(), Error> {
             } => {
                 values(body, returned)
                     && kind(body, *memory, Type::Mem)
+                    // ABI 只要求返回车道类型与签名一致；返回值的 provenance
+                    // 是 GC 元数据，可带根标记而不改变调用契约。
                     && body
                         .args(returned)
                         .iter()
-                        .map(|id| body.values[id.index()].kind)
-                        .collect::<Vec<_>>()
-                        == body.signature.results
+                        .map(|id| body.values[id.index()].kind.ty)
+                        .eq(body.signature.results.iter().map(|r| r.ty))
             }
             Terminator::Trap { memory } | Terminator::Unreachable { memory } => {
                 kind(body, *memory, Type::Mem)
             }
+            Terminator::Invoke {
+                arguments,
+                results,
+                memory,
+                normal,
+                unwind,
+                ..
+            } => {
+                values(body, arguments)
+                    && result_values(body, results)
+                    && kind(body, memory.input, Type::Mem)
+                    && kind(body, memory.output, Type::Mem)
+                    && edge_valid(*normal)
+                    && edge_valid(*unwind)
+                    && body.edges.get(unwind.index()).is_some_and(|e| e.unwind)
+                    && body.edges.get(normal.index()).is_some_and(|e| !e.unwind)
+            }
+            Terminator::ResumePanic { memory } => kind(body, *memory, Type::Mem),
             _ => true,
         };
         if !valid {
@@ -569,7 +651,10 @@ fn validate(body: &Body, leaf: bool, runtime: bool) -> Result<(), Error> {
     for (index, edge) in body.edges.iter().enumerate() {
         if edge.from.index() >= body.blocks.len()
             || edge.to.index() >= body.blocks.len()
-            || edge.unwind
+            || (edge.unwind
+                && !body.blocks.get(edge.from.index()).is_some_and(|b| {
+                    matches!(&b.terminator, Terminator::Invoke { unwind, .. } if unwind.index() == index)
+                }))
             || !values(body, &edge.arguments)
         {
             return Err(Error(format!(

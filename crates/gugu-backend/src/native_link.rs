@@ -61,7 +61,12 @@ impl NativeLink {
         target: crate::TargetName,
         lir: &crate::lir::Validated,
     ) -> Self {
-        if target == crate::TargetName::X86_64Macos {
+        // 内建需求按目标 OS 族分派：Linux 走 libc.so.6 + PT_INTERP，Windows 走 ws2_32/kernel32，
+        // macOS 的系统绑定全部由 libSystem 桥接层解决，不补导入。
+        let os = target.descriptor().os;
+        let is_linux = matches!(os, crate::target::OperatingSystem::Linux);
+        let is_windows = matches!(os, crate::target::OperatingSystem::Windows);
+        if matches!(os, crate::target::OperatingSystem::Macos) {
             return self;
         }
         let network = lir.bodies().iter().any(|body| {
@@ -74,7 +79,7 @@ impl NativeLink {
                 )
             })
         });
-        if network && target == crate::TargetName::X86_64Windows {
+        if network && is_windows {
             for &name in crate::x64::fs_native::net::WINDOWS_SYMBOLS {
                 self.add_system_import("ws2_32.dll", name);
             }
@@ -97,15 +102,11 @@ impl NativeLink {
             })
         });
         if resolver {
-            let library = if target == crate::TargetName::X86_64Linux {
-                "libc.so.6"
-            } else {
-                "ws2_32.dll"
-            };
+            let library = if is_linux { "libc.so.6" } else { "ws2_32.dll" };
             for symbol in ["getaddrinfo", "freeaddrinfo"] {
                 self.add_system_import(library, symbol);
             }
-            if target == crate::TargetName::X86_64Linux {
+            if is_linux {
                 if self.interpreter.is_none() {
                     self.interpreter = target.descriptor().linux_interpreter.map(str::to_owned);
                 }
@@ -125,7 +126,7 @@ impl NativeLink {
             })
         });
         if environment {
-            if target == crate::TargetName::X86_64Linux {
+            if is_linux {
                 if !self.imports.iter().any(|import| {
                     import.name == "environ"
                         && import.library == "libc.so.6"
@@ -161,7 +162,7 @@ impl NativeLink {
             })
         });
         if process {
-            if target == crate::TargetName::X86_64Linux {
+            if is_linux {
                 for name in Self::THREAD_SYMBOLS {
                     self.add_system_import("libc.so.6", name);
                 }
@@ -297,14 +298,25 @@ impl NativeLink {
                 return Err(format!("native 符号 {symbol} 重复导入"));
             }
         }
-        match (target, self.interpreter.as_deref(), self.imports.is_empty()) {
-            (crate::TargetName::X86_64Linux, None, false) => Err("动态导入缺少解释器路径".into()),
-            (crate::TargetName::X86_64Linux, Some(path), _)
-                if !path.starts_with('/') || path.contains('\0') =>
-            {
+        // 动态 Linux 目标（x86_64 与 aarch64 共用 glibc 装载契约）必须有 PT_INTERP。
+        let dynamic_linux = matches!(
+            target.descriptor().os,
+            crate::target::OperatingSystem::Linux
+        ) && matches!(
+            target.descriptor().object_format,
+            crate::target::ObjectFormat::Elf64
+        );
+        match (
+            dynamic_linux,
+            target,
+            self.interpreter.as_deref(),
+            self.imports.is_empty(),
+        ) {
+            (true, _, None, false) => Err("动态导入缺少解释器路径".into()),
+            (true, _, Some(path), _) if !path.starts_with('/') || path.contains('\0') => {
                 Err("动态解释器必须是无 NUL 的绝对目标路径".into())
             }
-            (crate::TargetName::X86_64Windows, Some(_), _) => {
+            (_, crate::TargetName::X86_64Windows, Some(_), _) => {
                 Err("Windows 链接不接受 ELF 解释器".into())
             }
             _ => Ok(()),

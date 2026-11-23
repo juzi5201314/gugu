@@ -1,4 +1,6 @@
 //! A64 safepoint-only SP-based CFA/LR recovery, paired with a v5 stack-map table.
+//! 站点之后接 landing 记录（`pc_start..pc_end` 调用点范围 → `landing_pc` 落地入口 +
+//! `cleanup` 链下标），与 x64 unwind 节的 `LandingRecord` 字段一致。
 use super::{CodeLayout, DecodedSection, StackMapArchitecture};
 use crate::model::RawModelError;
 
@@ -12,6 +14,16 @@ pub struct Site {
     pub entry: bool,
 }
 
+/// invoke 调用点的 panic 落地记录；`cleanup` 语义与 x64 `LandingRecord` 相同
+///（`u32::MAX` 表示只恢复传播）。
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub struct Landing {
+    pub pc_start: u32,
+    pub pc_end: u32,
+    pub landing_pc: u32,
+    pub cleanup: u32,
+}
+
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub struct Table {
     pub code_rva: u64,
@@ -19,6 +31,7 @@ pub struct Table {
     pub frame_size: u32,
     pub fp_offset: u32,
     pub sites: Vec<Site>,
+    pub landings: Vec<Landing>,
 }
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
@@ -34,7 +47,12 @@ fn u32_at(bytes: &[u8], at: usize) -> u32 {
     u32::from_le_bytes(bytes[at..at + 4].try_into().expect("verified CFA field"))
 }
 
-pub fn encode(code: CodeLayout, fp_offset: u32, sites: &[Site]) -> Result<Vec<u8>, RawModelError> {
+pub fn encode(
+    code: CodeLayout,
+    fp_offset: u32,
+    sites: &[Site],
+    landings: &[Landing],
+) -> Result<Vec<u8>, RawModelError> {
     let mut out = MAGIC.to_vec();
     for value in [183, code.code_size, code.frame_size, fp_offset] {
         out.extend_from_slice(&value.to_le_bytes());
@@ -45,7 +63,11 @@ pub fn encode(code: CodeLayout, fp_offset: u32, sites: &[Site]) -> Result<Vec<u8
             .map_err(|_| fail("too many CFA sites"))?
             .to_le_bytes(),
     );
-    out.extend_from_slice(&0_u32.to_le_bytes());
+    out.extend_from_slice(
+        &u32::try_from(landings.len())
+            .map_err(|_| fail("too many A64 landings"))?
+            .to_le_bytes(),
+    );
     for site in sites {
         let lr = if site.entry {
             10
@@ -63,21 +85,38 @@ pub fn encode(code: CodeLayout, fp_offset: u32, sites: &[Site]) -> Result<Vec<u8
             out.extend_from_slice(&value.to_le_bytes());
         }
     }
+    let mut previous = 0_u32;
+    for landing in landings {
+        if landing.pc_start < previous
+            || landing.pc_start >= landing.pc_end
+            || landing.pc_end > code.code_size
+            || landing.landing_pc >= code.code_size
+        {
+            return Err(fail("invalid A64 landing range/order"));
+        }
+        previous = landing.pc_end;
+        for value in [
+            landing.pc_start,
+            landing.pc_end,
+            landing.landing_pc,
+            landing.cleanup,
+        ] {
+            out.extend_from_slice(&value.to_le_bytes());
+        }
+    }
     decode(&out)?;
     Ok(out)
 }
 
 pub fn decode(bytes: &[u8]) -> Result<Table, RawModelError> {
-    if bytes.len() < HEADER
-        || &bytes[..8] != MAGIC
-        || u32_at(bytes, 8) != 183
-        || u32_at(bytes, 36) != 0
-    {
+    if bytes.len() < HEADER || &bytes[..8] != MAGIC || u32_at(bytes, 8) != 183 {
         return Err(fail("invalid A64 CFA header"));
     }
     let count = u32_at(bytes, 32) as usize;
+    let landing_count = u32_at(bytes, 36) as usize;
     if count
-        .checked_mul(RECORD)
+        .checked_add(landing_count)
+        .and_then(|n| n.checked_mul(RECORD))
         .and_then(|n| n.checked_add(HEADER))
         != Some(bytes.len())
     {
@@ -123,12 +162,33 @@ pub fn decode(bytes: &[u8]) -> Result<Table, RawModelError> {
         sites.push(Site { pc_offset, entry });
         previous = pc_offset;
     }
+    let mut landings = Vec::with_capacity(landing_count);
+    let mut lo = 0_u32;
+    for index in 0..landing_count {
+        let at = HEADER + (count + index) * RECORD;
+        let landing = Landing {
+            pc_start: u32_at(bytes, at),
+            pc_end: u32_at(bytes, at + 4),
+            landing_pc: u32_at(bytes, at + 8),
+            cleanup: u32_at(bytes, at + 12),
+        };
+        if landing.pc_start < lo
+            || landing.pc_start >= landing.pc_end
+            || landing.pc_end > code_size
+            || landing.landing_pc >= code_size
+        {
+            return Err(fail("invalid A64 landing range/order"));
+        }
+        lo = landing.pc_end;
+        landings.push(landing);
+    }
     Ok(Table {
         code_rva,
         code_size,
         frame_size,
         fp_offset,
         sites,
+        landings,
     })
 }
 

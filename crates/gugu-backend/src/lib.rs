@@ -318,30 +318,75 @@ pub struct BackendPlan {
     pub macos_image: Vec<u8>,
 }
 
-#[expect(
-    clippy::too_many_arguments,
-    reason = "后端计划需要各层 world、运行时契约与原生链接配置"
-)]
-pub fn plan(
+/// `plan` 消费的已装配机器世界；按目标架构分派到 x64 片段世界或 a64 整程序产物。
+pub enum PlanCodegen<'a> {
+    /// x64 片段世界（镜像在 `plan` 内经 `link_world` 链接）。
+    X64(&'a x64::codegen::X64World),
+    /// a64 整程序装配产物（镜像在 `a64::program::build` 内已写出）。
+    A64 {
+        /// 装配产物（world + image）。
+        program: &'a a64::program::Program,
+        /// 本次编译已解析的 runtime glue 绑定表。
+        glues: &'a x64::glue::RuntimeGlueBindings,
+    },
+}
+
+/// 后端计划里与机器世界相关的统计面；x64 字段名保留，a64 侧填语义最近的真实值或 0。
+struct CodegenStats {
+    runtime_glue_bound: u32,
+    runtime_glue_stubbed: u32,
+    runtime_glue_fingerprint: [u8; 32],
+    encoder_fingerprint: [u8; 32],
+    form_count: u32,
+    lowering_revision: u32,
+    site_count: u32,
+    instruction_count: u32,
+    encoded_bytes: u32,
+    relocation_count: u32,
+    cold_edge_count: u32,
+    decode_sequence_bytes: u32,
+    fragment_fingerprint: [u8; 32],
+    rel8_count: u32,
+    hot_block_count: u32,
+    cold_block_count: u32,
+    entry_symbol: String,
+    frame_size_max: u32,
+    spill_slot_count: u32,
+    spill_bytes: u32,
+    saved_gpr_count: u32,
+    reload_count: u32,
+    spill_store_count: u32,
+    copy_move_count: u32,
+    copy_cycle_count: u32,
+    peak_live_gpr: u32,
+    peak_live_xmm: u32,
+    allocated_values: u32,
+    stackmap_name: String,
+    unwind_name: String,
+    source_name: String,
+    stackmap_section: Vec<u8>,
+    unwind_section: Vec<u8>,
+    source_section: Vec<u8>,
+    stackmap_functions: u32,
+    stackmap_safepoints: u32,
+    stackmap_maps: u32,
+    unwind_functions: u32,
+    landing_count: u32,
+    source_records: u32,
+    metadata_fingerprint: [u8; 32],
+    linux: x64::elf::LinuxImage,
+    windows: x64::pe::PeImage,
+    macos_image: Vec<u8>,
+}
+
+fn x64_stats(
     target: TargetName,
-    hir: &Validated,
-    mono: &MonoWorldV1,
-    gir: &GirWorldV1,
-    lir: &crate::lir::Validated,
+    x64: &x64::codegen::X64World,
     raw: &crate::runtime::RuntimeRawContractV1,
-    x64: &crate::x64::codegen::X64World,
-    runtime_checks_elided_count: u32,
     native_link: &NativeLink,
-) -> Result<Option<BackendPlan>, String> {
-    native_link.validate(target)?;
+) -> Result<CodegenStats, String> {
     native_link.validate_bridge(target, x64)?;
-    native_link.validate_bridge_targets(lir)?;
-    let descriptor = target.descriptor();
-    let module = hir.module();
-    let Some(entry) = module.entry else {
-        return Ok(None);
-    };
-    let (linux, windows, macos_image) = match descriptor.object_format {
+    let (linux, windows, macos_image) = match target.descriptor().object_format {
         target::ObjectFormat::Elf64 => (
             x64::elf::link_world(
                 x64,
@@ -374,8 +419,192 @@ pub fn plan(
             .bytes,
         ),
     };
-    let placement = gir.placement.counts();
     let (runtime_glue_bound, runtime_glue_stubbed) = x64.runtime_glue_counts();
+    Ok(CodegenStats {
+        runtime_glue_bound,
+        runtime_glue_stubbed,
+        runtime_glue_fingerprint: x64.glues().fingerprint(),
+        encoder_fingerprint: x64.encoder_fingerprint(),
+        form_count: u32::try_from(x64.contract.forms.len()).expect("form 数量适配 u32"),
+        lowering_revision: x64.contract.lowering_revision,
+        site_count: x64.site_count(),
+        instruction_count: x64.instruction_count(),
+        encoded_bytes: x64.encoded_bytes(),
+        relocation_count: x64.relocation_count(),
+        cold_edge_count: x64.cold_edge_count(),
+        decode_sequence_bytes: x64.decode_sequence_bytes(),
+        fragment_fingerprint: x64.fingerprint(),
+        rel8_count: x64.rel8_count(),
+        hot_block_count: x64.hot_block_count(),
+        cold_block_count: x64.cold_block_count(),
+        entry_symbol: x64.entry_symbol().to_owned(),
+        frame_size_max: x64.frame_size_max(),
+        spill_slot_count: x64.spill_slot_count(),
+        spill_bytes: x64.spill_bytes(),
+        saved_gpr_count: x64.saved_gpr_count(),
+        reload_count: x64.reload_count(),
+        spill_store_count: x64.spill_store_count(),
+        copy_move_count: x64.copy_move_count(),
+        copy_cycle_count: x64.copy_cycle_count(),
+        peak_live_gpr: x64.peak_live_gpr(),
+        peak_live_xmm: x64.peak_live_xmm(),
+        allocated_values: x64.allocated_values(),
+        stackmap_name: x64.metadata.stackmap_name.clone(),
+        unwind_name: x64.metadata.unwind_name.clone(),
+        source_name: x64.metadata.source_name.clone(),
+        stackmap_section: x64.metadata.stackmap_section.clone(),
+        unwind_section: x64.metadata.unwind_section.clone(),
+        source_section: x64.metadata.source_section.clone(),
+        stackmap_functions: x64.metadata.function_count,
+        stackmap_safepoints: x64.metadata.safepoint_count,
+        stackmap_maps: x64.metadata.map_count,
+        unwind_functions: x64.metadata.unwind_function_count,
+        landing_count: x64.metadata.landing_count,
+        source_records: x64.metadata.source_record_count,
+        metadata_fingerprint: x64.metadata.fingerprint,
+        linux,
+        windows,
+        macos_image,
+    })
+}
+
+fn a64_stats(
+    target: TargetName,
+    program: &a64::program::Program,
+    glues: &x64::glue::RuntimeGlueBindings,
+) -> CodegenStats {
+    let descriptor = target.descriptor();
+    let world = &program.world;
+    let section_bytes = |at: crate::macho::Location| -> Vec<u8> {
+        match &world.sections[at.section].content {
+            crate::macho::SectionContent::Data(bytes) => bytes[at.offset as usize..].to_vec(),
+            _ => Vec::new(),
+        }
+    };
+    let stackmap_section = section_bytes(world.maps);
+    let unwind_section = section_bytes(world.unwind);
+    let code_bytes = match &world.sections[world.code.section].content {
+        crate::macho::SectionContent::Code(bytes) | crate::macho::SectionContent::Data(bytes) => {
+            bytes.len() as u32
+        }
+        crate::macho::SectionContent::ZeroFill(_) => 0,
+    };
+    let entry_symbol = world
+        .symbols
+        .iter()
+        .find(|(_, location)| **location == world.entry)
+        .map(|(name, _)| name.clone())
+        .unwrap_or_default();
+    let mut metadata_hasher = blake3::Hasher::new_derive_key("gugu-a64-metadata-v1");
+    metadata_hasher.update(&stackmap_section);
+    metadata_hasher.update(&unwind_section);
+    let linux = match descriptor.object_format {
+        target::ObjectFormat::Elf64 => {
+            // ELF e_entry 是头部固定字段；镜像由 `link_entry_dynamic` 写完，直接读回。
+            let entry = program
+                .image
+                .get(24..32)
+                .map(|field| u64::from_le_bytes(field.try_into().expect("8 字节字段")))
+                .unwrap_or(0);
+            x64::elf::LinuxImage {
+                bytes: program.image.clone(),
+                kind: "elf".into(),
+                entry,
+                reloc_count: 0,
+                reloc_vaddr: 0,
+                load_count: 0,
+                interpreter: descriptor.linux_interpreter.unwrap_or("").to_owned(),
+                fingerprint: *blake3::hash(&program.image).as_bytes(),
+            }
+        }
+        _ => x64::elf::LinuxImage::absent(),
+    };
+    let macos_image = match descriptor.object_format {
+        target::ObjectFormat::MachO64 => program.image.clone(),
+        _ => Vec::new(),
+    };
+    CodegenStats {
+        runtime_glue_bound: glues.bound(),
+        // a64 catalog 要求所有被引用 glue 都解析到源定义；未实现项在装配期就是错误。
+        runtime_glue_stubbed: 0,
+        runtime_glue_fingerprint: glues.fingerprint(),
+        encoder_fingerprint: a64::contract::fingerprint(),
+        form_count: 0,
+        lowering_revision: 0,
+        // a64 世界尚无站点/帧/寄存器统计面；指令数按定长 4 字节编码字折算。
+        site_count: 0,
+        instruction_count: code_bytes / 4,
+        encoded_bytes: code_bytes,
+        relocation_count: (world.relocations.len() + world.pointers.len()) as u32,
+        cold_edge_count: 0,
+        decode_sequence_bytes: 0,
+        fragment_fingerprint: *blake3::hash(&program.image).as_bytes(),
+        rel8_count: 0,
+        hot_block_count: 0,
+        cold_block_count: 0,
+        entry_symbol,
+        frame_size_max: 0,
+        spill_slot_count: 0,
+        spill_bytes: 0,
+        saved_gpr_count: 0,
+        reload_count: 0,
+        spill_store_count: 0,
+        copy_move_count: 0,
+        copy_cycle_count: 0,
+        peak_live_gpr: 0,
+        peak_live_xmm: 0,
+        allocated_values: 0,
+        stackmap_name: "__gugu_maps".into(),
+        unwind_name: "__gugu_cfa".into(),
+        source_name: String::new(),
+        stackmap_section,
+        unwind_section,
+        source_section: Vec::new(),
+        stackmap_functions: 0,
+        stackmap_safepoints: 0,
+        stackmap_maps: 0,
+        unwind_functions: 0,
+        landing_count: 0,
+        source_records: 0,
+        metadata_fingerprint: *metadata_hasher.finalize().as_bytes(),
+        linux,
+        windows: x64::pe::PeImage::absent(),
+        macos_image,
+    }
+}
+
+#[expect(
+    clippy::too_many_arguments,
+    reason = "后端计划需要各层 world、运行时契约与原生链接配置"
+)]
+pub fn plan(
+    target: TargetName,
+    hir: &Validated,
+    mono: &MonoWorldV1,
+    gir: &GirWorldV1,
+    lir: &crate::lir::Validated,
+    raw: &crate::runtime::RuntimeRawContractV1,
+    codegen: PlanCodegen<'_>,
+    runtime_checks_elided_count: u32,
+    native_link: &NativeLink,
+) -> Result<Option<BackendPlan>, String> {
+    native_link.validate(target)?;
+    // 校验顺序沿用原 x64 契约：bridge 的 glibc 装载契约先于目标符号检查，
+    // 保证缺解释器/导入时报出的首要诊断不变。
+    if let PlanCodegen::X64(x64) = codegen {
+        native_link.validate_bridge(target, x64)?;
+    }
+    native_link.validate_bridge_targets(lir)?;
+    let descriptor = target.descriptor();
+    let module = hir.module();
+    let Some(entry) = module.entry else {
+        return Ok(None);
+    };
+    let stats = match codegen {
+        PlanCodegen::X64(x64) => x64_stats(target, x64, raw, native_link)?,
+        PlanCodegen::A64 { program, glues } => a64_stats(target, program, glues),
+    };
+    let placement = gir.placement.counts();
     Ok(Some(BackendPlan {
         target,
         entry: module.definitions[entry.index()].name.clone(),
@@ -556,67 +785,67 @@ pub fn plan(
             .finalize()
             .as_bytes(),
         platform_demand: *raw.platform_demand(),
-        runtime_glue_bound,
-        runtime_glue_stubbed,
-        runtime_glue_fingerprint: x64.glues().fingerprint(),
+        runtime_glue_bound: stats.runtime_glue_bound,
+        runtime_glue_stubbed: stats.runtime_glue_stubbed,
+        runtime_glue_fingerprint: stats.runtime_glue_fingerprint,
         ledger_category_count: raw.ledger_categories().len() as u32,
         target_descriptor_digest: descriptor.digest(),
         target_page_size: descriptor.page_size,
         target_cpu_baseline: descriptor.cpu_baseline,
         import_policy_revision: crate::target::IMPORT_POLICY_REVISION,
-        x64_encoder_fingerprint: x64.encoder_fingerprint(),
-        x64_form_count: u32::try_from(x64.contract.forms.len()).expect("form 数量适配 u32"),
-        x64_lowering_revision: x64.contract.lowering_revision,
-        x64_site_count: x64.site_count(),
-        x64_instruction_count: x64.instruction_count(),
-        x64_encoded_bytes: x64.encoded_bytes(),
-        x64_relocation_count: x64.relocation_count(),
-        x64_cold_edge_count: x64.cold_edge_count(),
-        x64_decode_sequence_bytes: x64.decode_sequence_bytes(),
-        x64_fragment_fingerprint: x64.fingerprint(),
-        x64_rel8_count: x64.rel8_count(),
-        x64_hot_block_count: x64.hot_block_count(),
-        x64_cold_block_count: x64.cold_block_count(),
-        x64_entry_symbol: x64.entry_symbol().to_owned(),
-        x64_frame_size_max: x64.frame_size_max(),
-        x64_spill_slot_count: x64.spill_slot_count(),
-        x64_spill_bytes: x64.spill_bytes(),
-        x64_saved_gpr_count: x64.saved_gpr_count(),
-        x64_reload_count: x64.reload_count(),
-        x64_spill_store_count: x64.spill_store_count(),
-        x64_copy_move_count: x64.copy_move_count(),
-        x64_copy_cycle_count: x64.copy_cycle_count(),
-        x64_peak_live_gpr: x64.peak_live_gpr(),
-        x64_peak_live_xmm: x64.peak_live_xmm(),
-        x64_allocated_values: x64.allocated_values(),
+        x64_encoder_fingerprint: stats.encoder_fingerprint,
+        x64_form_count: stats.form_count,
+        x64_lowering_revision: stats.lowering_revision,
+        x64_site_count: stats.site_count,
+        x64_instruction_count: stats.instruction_count,
+        x64_encoded_bytes: stats.encoded_bytes,
+        x64_relocation_count: stats.relocation_count,
+        x64_cold_edge_count: stats.cold_edge_count,
+        x64_decode_sequence_bytes: stats.decode_sequence_bytes,
+        x64_fragment_fingerprint: stats.fragment_fingerprint,
+        x64_rel8_count: stats.rel8_count,
+        x64_hot_block_count: stats.hot_block_count,
+        x64_cold_block_count: stats.cold_block_count,
+        x64_entry_symbol: stats.entry_symbol,
+        x64_frame_size_max: stats.frame_size_max,
+        x64_spill_slot_count: stats.spill_slot_count,
+        x64_spill_bytes: stats.spill_bytes,
+        x64_saved_gpr_count: stats.saved_gpr_count,
+        x64_reload_count: stats.reload_count,
+        x64_spill_store_count: stats.spill_store_count,
+        x64_copy_move_count: stats.copy_move_count,
+        x64_copy_cycle_count: stats.copy_cycle_count,
+        x64_peak_live_gpr: stats.peak_live_gpr,
+        x64_peak_live_xmm: stats.peak_live_xmm,
+        x64_allocated_values: stats.allocated_values,
         coroutine_stack_check_offset: raw.coroutine().stack_check_offset,
         scheduler_poll_flags_offset: raw.scheduler().poll_flags_offset(),
-        x64_stackmap_name: x64.metadata.stackmap_name.clone(),
-        x64_unwind_name: x64.metadata.unwind_name.clone(),
-        x64_source_name: x64.metadata.source_name.clone(),
-        x64_stackmap_section: x64.metadata.stackmap_section.clone(),
-        x64_unwind_section: x64.metadata.unwind_section.clone(),
-        x64_source_section: x64.metadata.source_section.clone(),
-        x64_stackmap_functions: x64.metadata.function_count,
-        x64_stackmap_safepoints: x64.metadata.safepoint_count,
-        x64_stackmap_maps: x64.metadata.map_count,
-        x64_unwind_functions: x64.metadata.unwind_function_count,
-        x64_landing_count: x64.metadata.landing_count,
-        x64_source_records: x64.metadata.source_record_count,
-        x64_metadata_fingerprint: x64.metadata.fingerprint,
-        linux_image: linux.bytes,
-        linux_image_kind: linux.kind,
-        linux_entry_vaddr: linux.entry,
-        linux_relative_relocs: linux.reloc_count,
-        linux_load_segments: linux.load_count,
-        linux_interpreter: linux.interpreter,
-        linux_image_fingerprint: linux.fingerprint,
-        windows_image: windows.bytes,
-        windows_image_kind: windows.kind,
-        windows_entry_rva: windows.entry_rva,
-        windows_reloc_count: windows.reloc_count,
-        windows_import_dlls: windows.import_dlls,
-        windows_image_fingerprint: windows.fingerprint,
-        macos_image,
+        x64_stackmap_name: stats.stackmap_name,
+        x64_unwind_name: stats.unwind_name,
+        x64_source_name: stats.source_name,
+        x64_stackmap_section: stats.stackmap_section,
+        x64_unwind_section: stats.unwind_section,
+        x64_source_section: stats.source_section,
+        x64_stackmap_functions: stats.stackmap_functions,
+        x64_stackmap_safepoints: stats.stackmap_safepoints,
+        x64_stackmap_maps: stats.stackmap_maps,
+        x64_unwind_functions: stats.unwind_functions,
+        x64_landing_count: stats.landing_count,
+        x64_source_records: stats.source_records,
+        x64_metadata_fingerprint: stats.metadata_fingerprint,
+        linux_image: stats.linux.bytes,
+        linux_image_kind: stats.linux.kind,
+        linux_entry_vaddr: stats.linux.entry,
+        linux_relative_relocs: stats.linux.reloc_count,
+        linux_load_segments: stats.linux.load_count,
+        linux_interpreter: stats.linux.interpreter,
+        linux_image_fingerprint: stats.linux.fingerprint,
+        windows_image: stats.windows.bytes,
+        windows_image_kind: stats.windows.kind,
+        windows_entry_rva: stats.windows.entry_rva,
+        windows_reloc_count: stats.windows.reloc_count,
+        windows_import_dlls: stats.windows.import_dlls,
+        windows_image_fingerprint: stats.windows.fingerprint,
+        macos_image: stats.macos_image,
     }))
 }

@@ -11,7 +11,7 @@ use crate::{
         foreign::Platform,
         fragments::{
             darwin_fd_imports, darwin_net_imports, darwin_process_imports, darwin_resolver_imports,
-            darwin_vm_imports, linux_import_slot_symbol, linux_import_stub_symbol,
+            darwin_vm_imports, linux_import_slot_symbol, linux_import_stub_symbol, native_imports,
         },
         world::Definition,
     },
@@ -142,9 +142,23 @@ fn runtime_imports_match_platform_import_surfaces() {
     let linux = runtime_imports(Platform::Linux);
     assert_eq!(
         linux,
-        ["getaddrinfo", "freeaddrinfo", "gettid", "__errno_location"]
-            .map(|name| NativeImport::function(LINUX_LIBC, name)),
-        "Linux imports are the resolver plus worker libc surface"
+        [
+            "getaddrinfo",
+            "freeaddrinfo",
+            "gettid",
+            "__errno_location",
+            "pthread_attr_init",
+            "pthread_attr_setstack",
+            "pthread_create",
+            "pthread_attr_destroy",
+            "pthread_tryjoin_np",
+            "environ",
+            "setenv",
+            "unsetenv",
+            "getenv",
+        ]
+        .map(|name| NativeImport::function(LINUX_LIBC, name)),
+        "Linux imports are the resolver plus worker/environment libc surface"
     );
     let darwin = runtime_imports(Platform::Darwin);
     // Darwin 面必须是各片段申报导入的完整去重并集：缺名立即失败。
@@ -154,6 +168,7 @@ fn runtime_imports_match_platform_import_surfaces() {
         darwin_net_imports(),
         darwin_process_imports(),
         darwin_resolver_imports(),
+        native_imports(Platform::Darwin),
     ]
     .concat();
     expected.extend(DARWIN_EXTRA_IMPORTS.map(|name| NativeImport::function(LIB_SYSTEM, name)));

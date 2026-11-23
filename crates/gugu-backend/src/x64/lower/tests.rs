@@ -867,15 +867,16 @@ fn poll_cost_is_positive_for_every_domain_op() {
         Op::Vector(VectorOp::Splat),
     ];
     for op in ops {
-        assert!(!lowering::domain(&op).is_empty(), "{op:?} 属于 lowering 域");
+        assert!(!op.domain().is_empty(), "{op:?} 属于 lowering 域");
         assert!(lowering::poll_cost(&op) >= 1, "{op:?} 的成本至少 1");
     }
     assert_eq!(
-        lowering::domain(&Op::Load(crate::lir::body::Access {
+        Op::Load(crate::lir::body::Access {
             alias: crate::lir::body::AliasClass::Heap,
             align: 8,
             volatile: false,
-        })),
+        })
+        .domain(),
         "Load",
         "访存已进入 lowering 域"
     );

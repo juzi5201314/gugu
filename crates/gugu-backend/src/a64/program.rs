@@ -12,7 +12,7 @@ use super::{
     glue::{ForeignBindings, RuntimeBindings},
     macho::{self, DarwinEntry, DarwinRuntime},
     runtime::Catalog,
-    world::{BuildRequest, Definition, World, build_runtime},
+    world::{BuildRequest, Definition, TypeSlot, World, build_runtime},
 };
 use crate::{
     late::universe::TypeUniverse,
@@ -40,6 +40,8 @@ pub(crate) const RUNTIME_STATE: &str = "__gugu_a64_runtime_state";
 pub(crate) const GC_TYPES: &str = "__gugu_a64_gc_types";
 /// GC metadata blob（`.ggmeta` 对应物）。
 pub(crate) const GC_META: &str = "__gugu_a64_gc_meta";
+/// cage 控制记录（`CageControlRecord` 启动字节）。
+pub(crate) const CAGE_CONTROL: &str = "__gugu_cage_control";
 
 fn rt(name: &str) -> String {
     mangle::mangle_runtime(name)
@@ -61,6 +63,8 @@ pub struct ProgramRequest<'a> {
     pub gc_meta: &'a [u8],
     /// Linux `PT_INTERP`；Darwin 忽略。
     pub interpreter: &'a str,
+    /// 压缩契约预留的 cage 字节数；未启用 cage 时为 0。
+    pub cage_bytes: u64,
     /// Darwin 镜像标识；Linux 忽略。
     pub identifier: &'a str,
     /// 类型宇宙（foreign 类型签名用）。
@@ -68,12 +72,13 @@ pub struct ProgramRequest<'a> {
 }
 
 /// 装配产物：world 留给上层消费（`plan` 需要节图与符号），image 是可执行字节。
+#[derive(Clone, Debug)]
 pub struct Program {
     pub world: World,
     pub image: Vec<u8>,
 }
 
-fn storage() -> Vec<Definition> {
+fn storage(cage_bytes: u64) -> Vec<Definition> {
     let data = |symbol: &str, bytes: Vec<u8>| Definition {
         symbol: symbol.into(),
         align: 8,
@@ -96,6 +101,10 @@ fn storage() -> Vec<Definition> {
         // `LogicalProcessor` 页必须是 4KiB 对齐的零初始化区。
         zero(PROCESSOR, PROCESSOR_PAGE_BYTES as u64, 4096),
         zero(RUNTIME_STATE, state::BYTES, 8),
+        data(
+            CAGE_CONTROL,
+            crate::runtime::cage_control::CageControlRecord::boot_bytes(cage_bytes),
+        ),
     ]
 }
 
@@ -113,7 +122,7 @@ fn bindings() -> RuntimeBindings {
 fn assemble(request: &ProgramRequest<'_>) -> Result<World, Error> {
     let definitions = runtime_definitions(request.platform)
         .into_iter()
-        .chain(storage())
+        .chain(storage(request.cage_bytes))
         .collect::<Vec<_>>();
     let imports = runtime_imports(request.platform);
     let mut world = build_runtime(
@@ -130,6 +139,7 @@ fn assemble(request: &ProgramRequest<'_>) -> Result<World, Error> {
     )?;
     // 两类 GC 元数据各独占一个只读节（与 `__gugu_maps`/`__gugu_cfa` 同法）：载荷的
     // 长度字段按节尾截断，共享 `__const` 会把后续常量误计入元数据长度。
+    let mut type_section = None;
     for (name, symbol, bytes) in [
         ("__gugutyp", GC_TYPES, request.gc_types),
         ("__ggmeta", GC_META, request.gc_meta),
@@ -141,6 +151,9 @@ fn assemble(request: &ProgramRequest<'_>) -> Result<World, Error> {
             section: world.sections.len(),
             offset: 0,
         };
+        if symbol == GC_TYPES {
+            type_section = Some(at.section);
+        }
         world.sections.push(Section {
             segment: Segment::DataConst,
             name: name.into(),
@@ -150,7 +163,54 @@ fn assemble(request: &ProgramRequest<'_>) -> Result<World, Error> {
         world.symbols.insert(symbol.into(), at);
         world.sizes.insert(symbol.into(), bytes.len() as u64);
     }
+    register_type_symbols(&mut world, type_section, request.gc_types)?;
     Ok(world)
+}
+
+/// `World::type_symbols` 记的是 `__gugutyp` 段内偏移插槽；节追加后在这里落成真实符号。
+/// Records/Names 偏移取自段头字段，避免与 gc_metadata_section 的布局常量脱同步。
+fn register_type_symbols(
+    world: &mut World,
+    section: Option<usize>,
+    gc_types: &[u8],
+) -> Result<(), Error> {
+    if world.type_symbols.is_empty() {
+        return Ok(());
+    }
+    let index = section.ok_or_else(|| fail("A64 type symbols without a type section"))?;
+    let header = |at: usize| -> Result<u64, Error> {
+        gc_types
+            .get(at..at + 8)
+            .map(|f| u64::from_le_bytes(f.try_into().expect("8 字节字段")))
+            .ok_or_else(|| fail("A64 truncated __gugutyp header"))
+    };
+    let (records, names) = (header(24)?, header(64)?);
+    for (name, slot) in &world.type_symbols {
+        let offset = match slot {
+            TypeSlot::Descriptor(offset) => *offset,
+            TypeSlot::Records => records,
+            TypeSlot::Names => names,
+        };
+        if offset >= gc_types.len() as u64 {
+            return Err(fail("A64 type symbol outside __gugutyp"));
+        }
+        world.symbols.insert(
+            name.clone(),
+            Location {
+                section: index,
+                offset,
+            },
+        );
+        // 描述符按单条记录定界；Records/Names 是区域起点，宽松到节尾（addend 仍受节界校验）。
+        let size = match slot {
+            TypeSlot::Descriptor(_) => {
+                crate::runtime::gc_metadata_section::TYPE_RECORD_BYTES as u64
+            }
+            _ => gc_types.len() as u64 - offset,
+        };
+        world.sizes.insert(name.clone(), size);
+    }
+    Ok(())
 }
 
 fn symbol(world: &World, name: &str) -> Result<Location, Error> {

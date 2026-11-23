@@ -82,7 +82,8 @@ pub fn bits(ty: Type) -> Result<u32, Error> {
 
 pub fn lower(body: &Body, instruction: &Instruction, b: &mut Builder<'_>) -> Result<(), Error> {
     let args = body.args(&instruction.arguments);
-    let results = body.args(&instruction.results);
+    let results_vec: Vec<ValueId> = body.results(instruction).collect();
+    let results = results_vec.as_slice();
     if matches!(instruction.op, crate::lir::body::Op::Atomic { .. }) {
         return atomic::lower(body, instruction, b);
     }

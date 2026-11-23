@@ -202,11 +202,14 @@ fn leaf_and_unsupported_operation_errors_are_contextual() {
     let (a, b) = (f.param(0, 0), f.param(0, 1));
     let out = f.op(Op::Integer(IntOp::DivUnsigned), &[a, b], &[Type::I64]);
     f.ret(&out);
+    // 非零非常量除数经 `TrapIf(divisor == 0)` → brk 陷阱保护后与 udiv 同层编译。
+    let fragment = codegen::compile_leaf(&f.body).unwrap();
     assert!(
-        codegen::compile_leaf(&f.body)
-            .unwrap_err()
-            .0
-            .contains("statically nonzero")
+        fragment
+            .bytes
+            .windows(4)
+            .any(|w| w == [0x00, 0x00, 0x20, 0xd4]),
+        "除零路径必须落地 brk #0 陷阱"
     );
     f.body.blocks[0].instructions.end = u32::MAX;
     assert!(codegen::compile_leaf(&f.body).is_err());

@@ -89,6 +89,7 @@ pub(crate) fn lower(
         },
         Some(safepoint.0),
         Some(safepoint.1),
+        None,
     )?;
     emitter.results()
 }

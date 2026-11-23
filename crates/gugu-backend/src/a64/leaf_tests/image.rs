@@ -443,10 +443,18 @@ fn world_rejects_missing_empty_duplicate_and_incompatible_inputs() {
 
 #[test]
 fn world_never_invents_descriptor_adapter_tls_or_invalid_blob_addresses() {
+    // TypeRecords/TypeNames 登记 `__gugutyp` 段内插槽而非立即失败：无 type universe 时
+    // 描述符仍拒绝，records/names 以槽形式留给镜像请求（无 type section 时报错）。
+    for slot in [Symbol::TypeRecords, Symbol::TypeNames] {
+        let mut f = fixture(1);
+        symbol(&mut f, slot);
+        f.ret(&[]);
+        let world = build(&[f.body], &[], &[]).unwrap();
+        assert!(!world.symbols.values().any(|_| false) || world.type_symbols.len() == 1);
+        assert_eq!(world.type_symbols.len(), 1);
+    }
     for missing in [
         Symbol::TypeDescriptor([3; 32]),
-        Symbol::TypeRecords,
-        Symbol::TypeNames,
         Symbol::Vtable {
             interface: [3; 32],
             concrete: [4; 32],

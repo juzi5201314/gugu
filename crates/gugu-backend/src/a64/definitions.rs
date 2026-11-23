@@ -19,7 +19,21 @@ fn rt(name: &str) -> String {
 pub const LINUX_LIBC: &str = "libc.so.6";
 
 /// Linux 侧经 GOT 桩调用的全部 C 入口：DNS resolver 两个 + 外调工作线程的 gettid/errno。
-const LINUX_C_IMPORTS: [&str; 4] = ["getaddrinfo", "freeaddrinfo", "gettid", "__errno_location"];
+const LINUX_C_IMPORTS: [&str; 13] = [
+    "getaddrinfo",
+    "freeaddrinfo",
+    "gettid",
+    "__errno_location",
+    "pthread_attr_init",
+    "pthread_attr_setstack",
+    "pthread_create",
+    "pthread_attr_destroy",
+    "pthread_tryjoin_np",
+    "environ",
+    "setenv",
+    "unsetenv",
+    "getenv",
+];
 
 /// Darwin 侧经 libSystem 调用的额外入口（VM/FD/NET/进程/resolver 导入各自申报）。
 pub(crate) const DARWIN_EXTRA_IMPORTS: [&str; 3] = ["exit", "write", "pthread_threadid_np"];
@@ -64,6 +78,11 @@ pub fn runtime_definitions(platform: Platform) -> Vec<Definition> {
         Definition::fragment(rt("current_slot"), fragments::current_slot()),
         Definition::fragment(rt("runtime_poll_defer"), fragments::runtime_poll_defer()),
         Definition::fragment(rt("process_exit"), fragments::process_exit(platform)),
+        Definition::fragment(rt("panic"), fragments::panic(&rt("panic_dispatch"))),
+        Definition::fragment(
+            rt("panic_resume"),
+            fragments::panic_resume(&rt("panic_unwind"), &rt("process_exit")),
+        ),
         Definition::fragment(
             rt("main_return"),
             fragments::main_return(&switch, context.restore_offset),
@@ -104,6 +123,25 @@ pub fn runtime_definitions(platform: Platform) -> Vec<Definition> {
             ));
         }
     }
+    let shared = [
+        // 镜像私有退出桩：未绑定 runtime glue 的死路径引用兜底到这里（与 x64
+        // `resolve_target` 的 `__gugu_stub_exit` 语义一致）；符号不走 glue 命名空间。
+        Definition::fragment("__gugu_stub_exit", fragments::process_exit(platform)),
+        Definition::fragment(rt("cage_control"), fragments::cage_control()),
+        Definition::fragment(rt("callback_control"), fragments::callback_control()),
+        Definition::fragment(rt("callback_queue"), fragments::callback_queue()),
+        Definition::fragment(
+            rt("callback_file_worker"),
+            fragments::callback_file_worker(),
+        ),
+        Definition::fragment(
+            rt("process_native_worker"),
+            fragments::process_native_worker(),
+        ),
+        Definition::fragment(rt("stack_read_word"), fragments::stack_read_word()),
+        Definition::fragment(rt("stack_copy_raw"), fragments::stack_copy_raw()),
+    ];
+    definitions.extend(shared);
     match platform {
         Platform::Linux => definitions.extend(
             [
@@ -112,6 +150,20 @@ pub fn runtime_definitions(platform: Platform) -> Vec<Definition> {
                 Definition::fragment(rt("resolver_symbol"), fragments::linux_resolver_symbol()),
                 Definition::fragment(rt("process_call"), fragments::linux_process_call()),
                 Definition::fragment(rt("process_worker"), fragments::linux_process_worker()),
+                Definition::fragment(rt("fs_start"), fragments::linux_fs_start()),
+                Definition::fragment(rt("fs_poll"), fragments::linux_fs_poll()),
+                Definition::fragment(rt("monotonic_nanos"), fragments::linux_monotonic_nanos()),
+                Definition::fragment(rt("wall_nanos"), fragments::linux_wall_nanos()),
+                Definition::fragment(
+                    rt("parallelism_probe"),
+                    fragments::linux_parallelism_probe(),
+                ),
+                Definition::fragment(rt("startup_call"), fragments::linux_startup_call()),
+                Definition::fragment(
+                    rt("environment_symbol"),
+                    fragments::linux_environment_symbol(),
+                ),
+                Definition::fragment(rt("net_close"), fragments::linux_net_close()),
             ]
             .into_iter()
             .chain(linux_import_definitions()),
@@ -122,6 +174,20 @@ pub fn runtime_definitions(platform: Platform) -> Vec<Definition> {
             Definition::fragment(rt("resolver_symbol"), fragments::darwin_resolver_symbol()),
             Definition::fragment(rt("process_call"), fragments::darwin_process_call()),
             Definition::fragment(rt("process_worker"), fragments::darwin_process_worker()),
+            Definition::fragment(rt("fs_start"), fragments::darwin_fs_start()),
+            Definition::fragment(rt("fs_poll"), fragments::darwin_fs_poll()),
+            Definition::fragment(rt("monotonic_nanos"), fragments::darwin_monotonic_nanos()),
+            Definition::fragment(rt("wall_nanos"), fragments::darwin_wall_nanos()),
+            Definition::fragment(
+                rt("parallelism_probe"),
+                fragments::darwin_parallelism_probe(),
+            ),
+            Definition::fragment(rt("startup_call"), fragments::darwin_startup_call()),
+            Definition::fragment(
+                rt("environment_symbol"),
+                fragments::darwin_environment_symbol(),
+            ),
+            Definition::fragment(rt("net_close"), fragments::darwin_net_close()),
         ]),
     }
     definitions
@@ -165,6 +231,7 @@ pub fn runtime_imports(platform: Platform) -> Vec<NativeImport> {
                 fragments::darwin_net_imports(),
                 fragments::darwin_process_imports(),
                 fragments::darwin_resolver_imports(),
+                fragments::native_imports(Platform::Darwin),
             ]
             .concat();
             imports

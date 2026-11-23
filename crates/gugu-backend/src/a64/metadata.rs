@@ -48,7 +48,12 @@ pub(crate) fn logical(body: &Body) -> Result<Vec<LogicalSafepoint>, Error> {
             Definition::Instruction { instruction, .. } => {
                 body.instructions.get(instruction.index()).is_some()
             }
-            Definition::Invoke { .. } => false,
+            Definition::Invoke { block, result } => {
+                body.blocks.get(block.index()).is_some_and(|b| {
+                    matches!(&b.terminator, crate::lir::body::Terminator::Invoke { results, .. }
+                        if result <= results.end - results.start)
+                })
+            }
         };
         if !valid {
             return Err(super::error("invalid value definition for logical roots"));
@@ -159,12 +164,11 @@ pub(crate) fn build(
                             }
                             place_value(allocation, frame, &mut map, class, *value, position)?;
                             if site.kind == SiteKind::SuspendResume {
-                                let inst = &body.instructions[anchor.instruction as usize];
-                                for (index, argument) in
-                                    body.args(&inst.arguments).iter().enumerate()
-                                {
+                                let (call, arguments) = call_parts(body, anchor)?;
+                                for (index, argument) in arguments.iter().enumerate() {
                                     if argument.0 == *value
-                                        && let Some(offset) = argument_offset(body, inst, index)?
+                                        && let Some(offset) =
+                                            argument_offset(body, call, arguments, index)?
                                     {
                                         set_slot(&mut map, class, offset)?;
                                     }
@@ -172,13 +176,14 @@ pub(crate) fn build(
                             }
                         }
                         LogicalRoot::Argument { index } => {
-                            let inst = &body.instructions[anchor.instruction as usize];
-                            let value = body
-                                .args(&inst.arguments)
+                            let (call, arguments) = call_parts(body, anchor)?;
+                            let value = arguments
                                 .get(*index as usize)
                                 .ok_or_else(|| super::error("unknown call root argument"))?;
                             place_value(allocation, frame, &mut map, class, value.0, position)?;
-                            if let Some(offset) = argument_offset(body, inst, *index as usize)? {
+                            if let Some(offset) =
+                                argument_offset(body, call, arguments, *index as usize)?
+                            {
                                 set_slot(&mut map, class, offset)?;
                             }
                         }
@@ -225,15 +230,29 @@ pub(crate) fn build(
                 "mapped runtime site requires an authoritative logical root anchor",
             ));
         }
+        // 逐根初始化条目按帧内字下标与初始化字节严格递增（stackmap_codec 编码契约）。
+        map.typed.sort_by_key(|root| (root.word, root.init_byte));
         points.push((0, map));
     }
+    let landings = sites
+        .iter()
+        .filter_map(|site| {
+            site.landing
+                .map(|(landing_pc, cleanup)| a64_unwind::Landing {
+                    pc_start: site.pc_offset - 4,
+                    pc_end: site.pc_offset,
+                    landing_pc,
+                    cleanup,
+                })
+        })
+        .collect::<Vec<_>>();
     let code = runtime::CodeLayout {
         code_rva: 0,
         code_size: u32::try_from(size).map_err(fail)?,
         frame_size: frame.size,
         unwind_index: 0,
         runtime_bridge: false,
-        panic_landing: false,
+        panic_landing: !landings.is_empty(),
         has_stack_interior: points.iter().any(|(_, map)| {
             map.registers[4] != 0
                 || map.slots[4].iter().any(|word| *word != 0)
@@ -249,7 +268,7 @@ pub(crate) fn build(
             entry: site.kind == SiteKind::MorestackEntry,
         })
         .collect::<Vec<_>>();
-    let unwind = a64_unwind::encode(code, frame.record, &unwind_sites).map_err(fail)?;
+    let unwind = a64_unwind::encode(code, frame.record, &unwind_sites, &landings).map_err(fail)?;
     a64_unwind::decode(&unwind)
         .and_then(|table| table.verify_joint(&runtime::decode_tables(&stackmaps)?))
         .map_err(fail)?;
@@ -301,20 +320,38 @@ fn set_slot(
     Ok(())
 }
 
+fn call_parts<'a>(
+    body: &'a crate::lir::body::Body,
+    anchor: &LogicalSafepoint,
+) -> Result<(&'a crate::lir::body::Call, &'a [crate::lir::body::ValueId]), Error> {
+    // 终结符锚点约定：`anchor.instruction == block.instructions.end`（块内指令区间终点）。
+    let block = &body.blocks[anchor.block as usize];
+    if anchor.instruction < block.instructions.end {
+        let inst = &body.instructions[anchor.instruction as usize];
+        return match &inst.op {
+            Op::Call(call) | Op::ForeignCall(call) => Ok((call, body.args(&inst.arguments))),
+            _ => Err(super::error("runtime site is not a call instruction")),
+        };
+    }
+    match &block.terminator {
+        crate::lir::body::Terminator::Invoke {
+            call, arguments, ..
+        } => Ok((call, body.args(arguments))),
+        _ => Err(super::error("runtime site is not a call terminator")),
+    }
+}
+
 fn argument_offset(
     body: &crate::lir::body::Body,
-    inst: &crate::lir::body::Instruction,
+    call: &crate::lir::body::Call,
+    arguments: &[crate::lir::body::ValueId],
     index: usize,
 ) -> Result<Option<u32>, Error> {
-    if matches!(&inst.op,Op::Call(call) | Op::ForeignCall(call) if call.kind != crate::gir::body::CallKind::Managed)
-    {
+    if call.kind != crate::gir::body::CallKind::Managed {
         return Ok(None);
     }
-    let (locations, _) = super::abi::arguments(
-        body.args(&inst.arguments)
-            .iter()
-            .map(|id| body.values[id.index()].kind.ty),
-    )?;
+    let (locations, _) =
+        super::abi::arguments(arguments.iter().map(|id| body.values[id.index()].kind.ty))?;
     Ok(match locations.get(index) {
         Some(super::abi::Argument::Stack(offset)) => Some(*offset),
         _ => None,
