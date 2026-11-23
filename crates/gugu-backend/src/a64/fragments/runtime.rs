@@ -16,7 +16,7 @@ use crate::runtime::entry::state;
 use crate::runtime::processor::{PROCESSOR_STATE_OFFSET, PROCESSOR_SYSTEM_SLOT_OFFSET};
 
 use super::linux_syscall::syscall;
-use super::{AddressMode, Builder, Fragment, HOT, PROCESSOR, SP, add_imm, imm, mem, movz, reg};
+use super::{AddressMode, Builder, Fragment, HOT, LR, PROCESSOR, SP, add_imm, imm, mem, movz, reg};
 
 /// main/协程返回登记的调度原因：2 = 协程返回（与 x64 哨兵同值）。
 const REASON_COROUTINE_RETURN: u16 = 2;
@@ -174,10 +174,14 @@ pub fn coroutine_enter(context_switch: &str, restore_offset: u32) -> Fragment {
 
 /// x0 = GC 请求；切到系统栈调用 `gc_dispatch(request, entry_rsp)`，恢复后返回 x0。
 /// 切换面与 x64 `gc_enter` 相同：HOT 存 coordinator 槽，SP 走 ENTRY_RSP/SAVED_RSP。
+/// a64 的 `bl` 不落栈：入口先把调用方返回地址压到 mutator 栈顶，让
+/// `entry_rsp` 仍按 x64 约定指向发起帧 PC；返回前再弹回 LR。
 pub fn gc_enter(gc_dispatch: &str) -> Fragment {
     let mut b = Builder::default();
     let coordinator = Reg::x(9);
     let temp = Reg::x(10);
+    b.emit("sub.X.imm", [reg(SP), reg(SP), add_imm(16)]);
+    b.memory("str.X.Unsigned", LR, SP, 0);
     mailbox(&mut b, coordinator);
     b.memory(
         "ldr.X.Unsigned",
@@ -244,6 +248,8 @@ pub fn gc_enter(gc_dispatch: &str) -> Fragment {
         COORDINATOR_SAVED_RSP_OFFSET as usize,
     );
     b.add(SP, temp, 0);
+    b.memory("ldr.X.Unsigned", LR, SP, 0);
+    b.emit("add.X.imm", [reg(SP), reg(SP), add_imm(16)]);
     b.ret();
     b.finish()
 }
@@ -276,9 +282,11 @@ pub fn thread_id(platform: Platform) -> Fragment {
         }
         Platform::Darwin => {
             b.emit("sub.X.imm", [reg(SP), reg(SP), add_imm(16)]);
+            b.memory("str.X.Unsigned", LR, SP, 8);
             b.emit("movz.X", [reg(Reg::x(0)), movz(0)]);
             b.add(Reg::x(1), SP, 0);
             b.external_branch("bl", &import_stub_symbol("pthread_threadid_np"));
+            b.memory("ldr.X.Unsigned", LR, SP, 8);
             b.memory("ldr.X.Unsigned", Reg::x(0), SP, 0);
             b.emit("add.X.imm", [reg(SP), reg(SP), add_imm(16)]);
             b.ret();

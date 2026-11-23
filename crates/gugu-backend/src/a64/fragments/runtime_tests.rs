@@ -215,53 +215,61 @@ fn gc_enter_swaps_to_system_stack_calls_dispatch_and_restores() {
     let fragment = gc_enter("dispatch");
     branch(&fragment, RelocKind::Call26, "dispatch", 0);
     let code = instructions(&fragment);
+    // 前缀：mutator 栈顶压调用方返回地址，entry_rsp 与 x64 `call` 落栈契约一致。
+    assert_eq!(form(&code[0]), "sub.X.imm");
+    assert_eq!(code[0].operands, [reg(SP), reg(SP), add_imm(16)]);
+    assert!(memory(&code[1..2], "str.X.Unsigned", LR, SP, 0));
     // 前段：coordinator → SAVED_R14=HOT，HOT=SYSTEM_DESCRIPTOR，ENTRY_RSP/SAVED_RSP=SP，SP=SYSTEM_TOP。
     assert!(memory(
-        &code[1..3],
+        &code[3..5],
         "ldr.X.Unsigned",
         X9,
         X9,
         state::COORDINATOR as usize
     ));
     assert!(memory(
-        &code[2..4],
+        &code[4..6],
         "str.X.Unsigned",
         Reg::x(27),
         X9,
         COORDINATOR_SAVED_R14_OFFSET as usize
     ));
     assert!(memory(
-        &code[3..5],
+        &code[5..7],
         "ldr.X.Unsigned",
         Reg::x(27),
         X9,
         COORDINATOR_SYSTEM_DESCRIPTOR_OFFSET as usize
     ));
     assert!(memory(
-        &code[5..8],
+        &code[7..10],
         "str.X.Unsigned",
         X10,
         X9,
         COORDINATOR_ENTRY_RSP_OFFSET as usize
     ));
     assert!(memory(
-        &code[5..8],
+        &code[7..10],
         "str.X.Unsigned",
         X10,
         X9,
         COORDINATOR_SAVED_RSP_OFFSET as usize
     ));
     assert!(memory(
-        &code[7..9],
+        &code[9..11],
         "ldr.X.Unsigned",
         X10,
         X9,
         COORDINATOR_SYSTEM_TOP_OFFSET as usize
     ));
-    // call site：bl 之后恢复 HOT/SP 并返回。
+    // call site：bl 之后恢复 HOT/SP、弹回 LR 并返回。
     let call = fragment.relocations[0].offset as usize / 4;
     assert_eq!(form(&code[call]), "bl");
-    assert_eq!(form(code.last().unwrap()), "ret");
+    let tail = &code[code.len() - 3..];
+    assert!(memory(&tail[..1], "ldr.X.Unsigned", LR, SP, 0));
+    assert_eq!(form(&tail[1]), "add.X.imm");
+    assert_eq!(tail[1].operands, [reg(SP), reg(SP), add_imm(16)]);
+    assert_eq!(form(&tail[2]), "ret");
 }
 
 #[test]
@@ -310,9 +318,11 @@ fn thread_id_syscalls_on_linux_and_calls_pthread_on_darwin() {
     let code = instructions(&darwin);
     assert_eq!(form(&code[0]), "sub.X.imm");
     assert_eq!(code[0].operands, [reg(SP), reg(SP), add_imm(16)]);
-    assert_eq!(code[1].operands, [reg(Reg::x(0)), movz(0)]);
-    assert_eq!(form(&code[3]), "bl");
-    assert!(memory(&code[4..5], "ldr.X.Unsigned", Reg::x(0), SP, 0));
-    assert_eq!(form(&code[5]), "add.X.imm");
-    assert_eq!(form(&code[6]), "ret");
+    assert!(memory(&code[1..2], "str.X.Unsigned", LR, SP, 8));
+    assert_eq!(code[2].operands, [reg(Reg::x(0)), movz(0)]);
+    assert_eq!(form(&code[4]), "bl");
+    assert!(memory(&code[5..6], "ldr.X.Unsigned", LR, SP, 8));
+    assert!(memory(&code[6..7], "ldr.X.Unsigned", Reg::x(0), SP, 0));
+    assert_eq!(form(&code[7]), "add.X.imm");
+    assert_eq!(form(&code[8]), "ret");
 }
