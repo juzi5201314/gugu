@@ -6,7 +6,7 @@ use crate::{
     hir,
     lir::{
         self,
-        body::{Body, Call, CallTarget, Op, Signature, ValueType},
+        body::{Body, Call, CallTarget, Op, ValueType},
     },
     runtime::RuntimeResources,
     x64::{glue::RuntimeGlueBindings, mangle},
@@ -121,7 +121,8 @@ impl<'a> Catalog<'a> {
         integer_lanes: bool,
     ) -> Result<(&'a Body, String), Error> {
         let body = self.function(name)?;
-        let Signature { sret, by_value, .. } = &body.signature;
+        // 源定义的 sret/by_value 不占额外交互：车道上仍是 caller 侧的 Ptr 参数，
+        // 与 x64 `runtime_abi_types_match` 同层校验，不做额外拒绝。
         let compatible = |actual: &[ValueType], expected: &[ValueType]| {
             if !integer_lanes {
                 return crate::x64::glue::runtime_abi_types_match(actual, expected);
@@ -134,9 +135,7 @@ impl<'a> Catalog<'a> {
                         && a.ty.bytes() == b.ty.bytes()
                 })
         };
-        if sret.is_some()
-            || !by_value.is_empty()
-            || !compatible(parameters, &body.signature.parameters)
+        if !compatible(parameters, &body.signature.parameters)
             || !compatible(results, &body.signature.results)
         {
             return Err(super::error(&format!(

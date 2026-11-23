@@ -378,17 +378,17 @@ pub fn rt0_start(params: *Rt0Params, bias: uint) uint {
                 fatal_runtime()
             }
             // a64 邮箱只存指向非移动存储的指针；main 协程的 A64ControlBlock
-            // （context@+0 152 B、scratch@+152 208 B、内嵌 mailbox@+360 72 B）
-            // 与 worker 系统 context（+512 152 B）放独立保留页，不借用
+            // （context@+0 152 B、scratch@+160 224 B、内嵌 mailbox@+384 72 B，
+            // 共 464 B）与 worker 系统 context（+512 152 B）放独立保留页，不借用
             // CoroutineCold 的字段区。内嵌 mailbox 按 a64_bind_control 契约绑定。
-            store_word(state + 32, a64_block + 152)
+            store_word(state + 32, a64_block + 160)
             store_word(state + 40, a64_block)
             store_word(state + 48, a64_block + 512)
             store_word(state + 56, 0)
-            store_word(a64_block + 360, slot)
-            store_word(a64_block + 392, a64_block + 152)
-            store_word(a64_block + 400, a64_block)
-            store_word(a64_block + 408, a64_block + 512)
+            store_word(a64_block + 384, slot)
+            store_word(a64_block + 416, a64_block + 160)
+            store_word(a64_block + 424, a64_block)
+            store_word(a64_block + 432, a64_block + 512)
         }
         #[cfg(not(arch = "aarch64"))]
         {
@@ -598,10 +598,17 @@ unsafe fn checked_safepoint(section: uint, length: uint, fragment_base: uint, re
 unsafe fn morestack_handle(section: uint, length: uint, fragment_base: uint, state: uint, stack_base: uint) uint {
     unsafe {
         let slot = word(state)
+        // cold 必须取当前运行协程的冷记录（state+0 是 hot），不能只认 main 的
+        // state+128。return_pc：x64 在 cold 内嵌 MorestackScratch@64；
+        // a64 由共享邮箱 scratch 字段（state+32，resume 时已指向当前协程控制块内
+        // A64MorestackScratch）的首字给出。
         #[cfg(arch = "aarch64")]
-        let cold = state + 128
+        let cold = word(slot + 48)
         #[cfg(not(arch = "aarch64"))]
         let cold = word(state + 32)
+        #[cfg(arch = "aarch64")]
+        let return_pc = word(word(state + 32))
+        #[cfg(not(arch = "aarch64"))]
         let return_pc = word(cold + 64)
         if slot == 0 || cold == 0 { fatal_runtime() }
         checked_safepoint(section, length, fragment_base, return_pc, byte(4))

@@ -395,7 +395,9 @@ fragment relocation 封闭为：
 
 `a64::elf::link_entry` 接收 `LinuxEntry`（`rt0_start`、可写载荷、初始槽与 processor），追加只读参数块、Linux `_start` 和共享 `a64::fragments::rt0`。参数块保存链接期值，入口由参数块运行时地址减去 `bias_baseline` 得到加载偏移，遍历 RELA 表把 `bias + addend` 写入 `bias + slot`。零条目跳过循环；内核不负责这批自重定位。入口从原始 sp 读取 argc，以 `sp + 8` 为 argv、`argv + 8 * (argc + 1)` 为 envp，保留它们直到以 x0–x4 = params、bias、envp、argc、argv 调用 rt0。rt0 初始化 x27/x28，写入载荷启动参数并调用 `rt0_start`，返回的 x0 直接交给 `exit_group`（x8 = 94，`svc #0`）。入口写入载荷 revision，并为载荷的 `initial_slot` 字段自动登记一项 RELATIVE；其他载荷指针由调用方提供。`LinuxEntry::runtime` 为 `Some(LinuxRuntime)` 时由链接器补齐其余启动契约，与 Darwin 侧同构：参数块追加写入 main `entry`、`runtime_state` 与 `coroutine_enter` 三个链接期 VA（rt0_start 运行时加加载偏移），`Rt0Payload` 的 `main_entry`/`runtime_state`/`main_return`/`stackmap`/`fragment_base`/`unwind`/`gc_types`/`gc_meta` 地址字段登记为 RELATIVE（rt0 的 RELATIVE 循环把它们补成运行时地址），对应长度字段按偏移截到节尾写出；`fragment_base` 必须是代码节偏移 0 的起点，空 GC blob 记为指针和长度皆 0。`runtime_state` 必须落在可写 Data 节且容下 `state::BYTES`；`None` 保留只含 `rt0_start` 的探针形态。`examples/a64_linux_image.rs` 在默认测试之外生成读取已重定位指针槽、经 Linux write 输出消息并返回 42 的验证镜像；单元测试只在进程内检查结构与指令。
 
-`a64::fragments::linux_fd_dispatch` 是无导入、无外部重定位的 Builder 片段，在原生栈上保留 x19/x20/x29/x30，并预留 128 字节 arm64 kernel stat 暂存区。它接收 x0 = `NativeRequest*`，加载 `foreign_schema` 的 operation/arguments，按 Linux x86_64 请求号翻译为 asm-generic syscall：read/write/close/lseek = 63/64/57/62，open→openat 56，stat/lstat/newfstatat→newfstatat 79，fstat→80，fcntl→25，fsync/fdatasync/ftruncate→82/83/46，rename/mkdir/rmdir/link/unlink/symlink/readlink→38/34/35/37/35/36/78，getdents64→61。*at 转换插入 -100、`AT_REMOVEDIR` 或 `AT_SYMLINK_NOFOLLOW`；传入 newfstatat 的 dirfd/flags 原样保留。open 的 flags 与 fcntl 的 `F_SETFL` 输入、`F_GETFL` 输出交换位组 14–15 和 16–17，其他 flags 保持不变。负返回值转成正 errno，原返回值保留在 VALUE；未支持请求为 EINVAL。信号请求委派给同一片段内的共享信号分派生成器；此层不实现调度与完成发布。
+`a64::fragments::linux_fd_dispatch(exit_thread)` 是无导入、无外部重定位的 Builder 片段，在原生栈上保留 x19/x20/x29/x30，并预留 128 字节 arm64 kernel stat 暂存区。`exit_thread = true` 的变体注册为 `fs_native_worker`（`linux_fs_start` clone 子的 `b` 入口），写出结果后以 `exit(93)` 终结线程，内核清 `CLONE_CHILD_CLEARTID` 的 tid 字完成发布；`false` 变体注册为 `fd_dispatch`，恢复寄存器后 `ret`，作 `callback_file_worker` 尾巴。它接收 x0 = `NativeRequest*`，加载 `foreign_schema` 的 operation/arguments，按 Linux x86_64 请求号翻译为 asm-generic syscall：read/write/close/lseek = 63/64/57/62，open→openat 56，stat/lstat/newfstatat→newfstatat 79，fstat→80，fcntl→25，fsync/fdatasync/ftruncate→82/83/46，rename/mkdir/rmdir/link/unlink/symlink/readlink→38/34/35/37/35/36/78，getdents64→61。*at 转换插入 -100、`AT_REMOVEDIR` 或 `AT_SYMLINK_NOFOLLOW`；传入 newfstatat 的 dirfd/flags 原样保留。open 的 flags 与 fcntl 的 `F_SETFL` 输入、`F_GETFL` 输出交换位组 14–15 和 16–17，其他 flags 保持不变。负返回值转成正 errno，原返回值保留在 VALUE；未支持请求为 EINVAL。信号请求委派给同一片段内的共享信号分派生成器；此层不实现调度与完成发布。
+
+`linux_fs_start` 以 x64 相同标志位（VM|FS|FILES|SIGHAND|THREAD|SYSVSEM|PARENT_SETTID|CHILD_CLEARTID）发 clone 220，parent/child tid 指针都指向 packet 首字（`thread_id` 字段即 tid 字），子线程从栈上取 packet 后 `b fs_native_worker`；`op == −1` 的 foreign 请求改为 `pthread_create` + `foreign_native_worker`，线程属性在原生栈上构造。`linux_fs_poll` 先按 `OPERATION`（+8）分流：−1 走 `pthread_tryjoin_np`，join 成功清 `THREAD_HANDLE` 并完成、EBUSY 返回 pending、其余错误 `exit_group(2)`；其余操作读 packet 首字 tid：非零 pending、清零完成。operation 与 tid 字是两个字段，不能用首字同时判断两者。
 
 stat 成功后把暂存区复制为 x86_64 kernel stat：mode/nlink/uid/gid/rdev 调整偏移，32 位 nlink 零扩展、blksize 符号扩展，dev/ino/size/blocks/时间戳保持偏移，填充和保留字段清零。Linux `fs_platform::linux_stat` 从 +88/+96 读取修改时间秒/纳秒。解码往返与确定性 syscall 替身执行测试覆盖请求翻译、flags、完整 stat、负返回、零字节读取/目录 EOF 和不支持请求；不进行真实 I/O。`examples/a64_linux_fd_image.rs` 在默认测试之外生成经 worker 以 `O_EXCL` 创建 /tmp 文件（已存在则失败，不覆盖或删除已有文件）并写/关/stat/重开/读、目录 getdents、unlink 和 errno 检查的镜像；所有检查成功返回 0，失败返回 1。
 
@@ -894,11 +896,17 @@ function assembler 同时保留 ADRP/ADD 地址重定位与 call 重定位；无
 - `Invoke`/`ResumePanic` 已接入：invoke 发射调用、landing 记录进入 unwind 表，
   `ResumePanic` 走 panic glue；结构化跳转、条件跳转、switch、return、tail
   managed call、trap 和 unreachable 均已支持。
-- 普通 managed 调用支持直接实例、绑定 runtime 目标与恰一个 Code-provenance
-  参数的间接调用；aggregate/sret 按 caller 临时副本/结果缓冲地址处理。`Vtable`
-  目标、`captures_arguments`（runtime 目标除外）与 `foreign_arguments` 仍拒绝，
-  依赖 runtime/adapter 路径。整数除余仍要求静态非零除数证明；窄宽度
-  的非法 carry/wide、非法转换和超帧范围显式拒绝。
+- 普通 managed 调用支持直接实例、绑定 runtime 目标、恰一个 Code-provenance
+  参数的间接调用，与 `Vtable` 动态派发；aggregate/sret 按 caller 临时副本/结果
+  缓冲地址处理。间接 callee 不占 ABI 槽，vtable 接收者照常作为实参传递；派发
+  源同 x64 `dispatch_source`：`Metadata` lane 直接是 vtable（偏移 0），否则首个
+  非 sret 的 `Ptr` 参数是指向胖对的指针，vtable 在其 `+8`（`dyn` 布局 `data@0`、
+  `vtable@8`），槽地址为 vtable `+ slot*8`。目标入口在参数装填前物化到 x8：
+  x16/x17 是并行拷贝组的破环与槽间暂存，不能承载跨拷贝的调用目标；间接 callee
+  车道虽不在 `arguments` 中，也登记为 `Item::Call` 的 Read 事件，否则 regalloc
+  会在调用点前回收其位置。间接/派发的 tail call、`captures_arguments`（runtime
+  目标除外）与 `foreign_arguments` 仍拒绝。整数除余仍要求静态非零除数证明；
+  窄宽度的非法 carry/wide、非法转换和超帧范围显式拒绝。
 
 这些拒绝不隐藏为 no-op；特别是泛型 SIMD 与动态除零检查不是已实现的 PR 6/8 能力。
 

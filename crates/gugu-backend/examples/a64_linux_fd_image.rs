@@ -157,7 +157,7 @@ struct Probe {
 
 impl Probe {
     fn new() -> Self {
-        let worker = linux_fd_dispatch();
+        let worker = linux_fd_dispatch(false);
         assert!(worker.relocations.is_empty());
         let sections = vec![
             section(Segment::Text, SectionContent::Code(Vec::new())),

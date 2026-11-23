@@ -3,9 +3,23 @@ use super::*;
 use super::linux_vm::{REQUEST, Vm};
 
 fn code() -> Vec<Inst> {
-    let fragment = linux_fd_dispatch();
+    let fragment = linux_fd_dispatch(false);
     assert!(fragment.relocations.is_empty());
     instructions(&fragment)
+}
+
+#[test]
+fn worker_entry_variant_exits_the_clone_child_via_syscall() {
+    let code = instructions(&linux_fd_dispatch(true));
+    let mut vm = Vm::new(0, [11, 22, 33, 0, 0, 0]);
+    let mut calls = Vec::new();
+    let result = vm.run_result(&code, |vm| {
+        calls.push(vm.registers[8]);
+        vm.registers[0] = if vm.registers[8] == 93 { 0 } else { 7 };
+    });
+    assert_eq!(calls, [63, 93]);
+    assert_eq!(result, 0);
+    assert_eq!(vm.read(REQUEST + 64, 8), 7);
 }
 
 #[test]
@@ -102,6 +116,15 @@ fn open_and_fcntl_translate_each_architecture_specific_flag() {
         get.run(&code(), |vm| vm.registers[0] = arm | common);
         assert_eq!(get.read(REQUEST + 64, 8), x86 | common);
     }
+}
+
+#[test]
+fn callback_variant_restores_registers_and_returns() {
+    let code = code();
+    let mut vm = Vm::new(0, [11, 22, 33, 0, 0, 0]);
+    vm.run(&code, |vm| vm.registers[0] = 9);
+    assert_eq!(vm.read(REQUEST + 64, 8), 9);
+    assert_eq!(vm.read(REQUEST + 72, 8), 0);
 }
 
 fn native_stat(vm: &mut Vm, at: u64) {

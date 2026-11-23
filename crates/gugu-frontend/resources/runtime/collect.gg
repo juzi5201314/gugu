@@ -952,11 +952,17 @@ pub fn gc_append_parked_roots(processor: uint, current: uint, combined: uint, sc
         let hot = heap_word(node + 8)
         if hot != current {
             let cold = heap_word(hot + 48)
-            let pc = heap_word(cold + 16)
+            // mutator_context_area 约定：x64 context 内联在 cold+8；
+            // a64 的 cold+8 是指向控制块内 152B context 区的指针。
+            #[cfg(arch = "aarch64")]
+            let context = heap_word(cold + 8)
+            #[cfg(not(arch = "aarch64"))]
+            let context = cold + 8
+            let pc = heap_word(context + 8)
             if pc != heap_word(processor + 4072) {
                 heap_store_word(scratch, 0)
                 heap_store_word(scratch + 8, 0)
-                let needed = gc_walk_roots(scratch, GC_ROOT_RECORDS, heap_word(cold + 8), pc, SAFEPOINT_KIND_CALL_RETURN, 0, 0)
+                let needed = gc_walk_roots(scratch, GC_ROOT_RECORDS, heap_word(context), pc, SAFEPOINT_KIND_CALL_RETURN, 0, 0)
                 let previous = heap_word(combined + 8)
                 if needed > GC_ROOT_RECORDS || previous > GC_ROOT_RECORDS - needed { heap_fail() }
                 copy_bytes(combined + ROOT_SCAN_HEADER_BYTES + previous * GC_ROOT_RECORD_BYTES,

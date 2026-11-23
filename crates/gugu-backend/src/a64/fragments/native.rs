@@ -77,13 +77,14 @@ pub fn process_native_worker() -> Fragment {
     b.finish()
 }
 
-/// `callback_file_worker`：request x0；op==-1 转 foreign worker，其余走文件分派。
+/// `callback_file_worker`：request x0；op==-1 转 foreign worker，其余走不发布
+/// DONE 的文件分派变体（对应 x64 `worker(false)`；完成由 callback 协议自身发布）。
 pub fn callback_file_worker() -> Fragment {
     let mut b = Builder::default();
     load(&mut b, A, Reg::x(0), OPERATION);
     b.emit("adds.X.imm", [reg(XZR), reg(A), add_imm(1)]);
     let foreign = cond(&mut b, EQ);
-    b.external_branch("b", &rt("fs_native_worker"));
+    b.external_branch("b", &rt("fd_dispatch"));
     patch(&mut b, foreign, EQ);
     b.external_branch("b", &rt("foreign_native_worker"));
     b.finish()
@@ -197,10 +198,11 @@ fn linux_foreign_start(b: &mut Builder) {
 /// `fs_poll`：x0 = packet；op==−1 用 pthread_tryjoin_np，否则查 tid 字。
 pub fn linux_fs_poll() -> Fragment {
     let mut b = Builder::default();
-    load(&mut b, A, Reg::x(0), 0);
-    b.emit("adds.X.imm", [reg(XZR), reg(A), add_imm(1)]);
+    load(&mut b, B, Reg::x(0), OPERATION);
+    b.emit("adds.X.imm", [reg(XZR), reg(B), add_imm(1)]);
     let foreign = cond(&mut b, EQ);
     // tid 是内核 32 位字；提交前高 32 位已清零。
+    load(&mut b, A, Reg::x(0), 0);
     compare(&mut b, A, 0);
     let pending = cond(&mut b, NE);
     b.emit("movz.X", [reg(Reg::x(0)), movz(1)]);
@@ -219,6 +221,7 @@ fn linux_foreign_poll(b: &mut Builder) {
     load(b, Reg::x(0), Reg::x(19), THREAD_HANDLE);
     b.emit("movz.X", [reg(Reg::x(1)), movz(0)]);
     linux_call(b, "pthread_tryjoin_np");
+    compare(b, Reg::x(0), 0);
     let pending = cond(b, NE);
     store(b, Reg::x(19), THREAD_HANDLE, XZR);
     b.emit("movz.X", [reg(Reg::x(0)), movz(1)]);

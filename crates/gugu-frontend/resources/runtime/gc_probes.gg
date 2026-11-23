@@ -499,8 +499,14 @@ pub fn root_map_probe() uint {
         let node = probe_word(control + 64)
         if node == 0 { return 54 }
         let cold = probe_word(probe_word(node) + 48)
-        let frame = probe_word(cold + 8)
-        let pc = probe_word(cold + 16)
+        // mutator_context_area 约定：x64 context 内联在 cold+8；
+        // a64 的 cold+8 是指向控制块内 152B context 区的指针。
+        #[cfg(arch = "aarch64")]
+        let context = probe_word(cold + 8)
+        #[cfg(not(arch = "aarch64"))]
+        let context = cold + 8
+        let frame = probe_word(context)
+        let pc = probe_word(context + 8)
         let call_return = SAFEPOINT_KIND_CALL_RETURN
         if gc_roots_section() == 0 || gc_roots_base() == 0 || gc_roots_length() < 72 { return 61 }
         if root_function(pc) == ROOT_NO_ENTRY { return 62 }

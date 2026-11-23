@@ -41,6 +41,15 @@ pub fn layout(body: &Body, allocation: &Allocation) -> Result<Frame, Error> {
             }
             _ => None,
         })
+        .chain(
+            body.blocks
+                .iter()
+                .filter_map(|block| match &block.terminator {
+                    // invoke 与普通调用一样需要 out 区实参空间；尾调复用入参区，不计入。
+                    crate::lir::body::Terminator::Invoke { call, .. } => Some(call),
+                    _ => None,
+                }),
+        )
         .collect::<Vec<_>>();
     let outgoing = calls
         .iter()
@@ -52,6 +61,10 @@ pub fn layout(body: &Body, allocation: &Allocation) -> Result<Frame, Error> {
             ) {
                 return super::foreign_packet::plan(call, super::foreign_packet::platform(body)?)
                     .map(|plan| plan.bytes);
+            }
+            if matches!(call.kind, crate::gir::body::CallKind::ForeignLeaf { .. }) {
+                // leaf 直调用 C ABI 的栈实参区 + 结果映像 + 间接副本，不走内部 ABI。
+                return super::foreign_leaf::outgoing(call, super::foreign_packet::platform(body)?);
             }
             super::abi::arguments(call.parameters.iter().map(|p| p.ty)).map(|(_, size)| size)
         })
@@ -192,8 +205,38 @@ pub(crate) fn runtime_policy(body: &Body, frame: &mut Frame) -> Result<(), Error
             return Err(super::error("poll-free leaf frame exceeds the 4096-byte caller reserve"));
         }
         frame.unchecked_leaf = true;
-    } else if implicit_calls || body.instructions.iter().any(|inst| matches!(&inst.op, crate::lir::body::Op::Call(call) if call.kind == crate::gir::body::CallKind::Managed && call.poll_free_leaf)) {
+    } else if implicit_calls
+        || body.instructions.iter().any(|inst| {
+            matches!(&inst.op, crate::lir::body::Op::Call(call) if call.kind == crate::gir::body::CallKind::Managed && call.poll_free_leaf)
+        })
+    {
         frame.max_leaf_reserve = POLL_FREE_LEAF_RESERVE;
+    }
+    // direct `ForeignLeaf { stack }` 调用的声明预算取最大；间接目标不计（与 x64 同口径）。
+    let mut consider = |call: &crate::lir::body::Call| -> Result<(), Error> {
+        if matches!(call.target, crate::lir::body::CallTarget::Indirect) {
+            return Ok(());
+        }
+        if let crate::gir::body::CallKind::ForeignLeaf { stack } = call.kind {
+            frame.max_leaf_reserve = frame
+                .max_leaf_reserve
+                .max(u32::try_from(stack).map_err(|_| super::error("ForeignLeaf 栈预算超出 u32"))?);
+        }
+        Ok(())
+    };
+    for instruction in &body.instructions {
+        if let crate::lir::body::Op::Call(call) | crate::lir::body::Op::ForeignCall(call) =
+            &instruction.op
+        {
+            consider(call)?;
+        }
+    }
+    for block in &body.blocks {
+        if let crate::lir::body::Terminator::Invoke { call, .. }
+        | crate::lir::body::Terminator::TailCall { call, .. } = &block.terminator
+        {
+            consider(call)?;
+        }
     }
     frame.required_frame = frame
         .size

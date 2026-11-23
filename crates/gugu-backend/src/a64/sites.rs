@@ -366,11 +366,8 @@ pub(crate) fn validate(body: &Body) -> Result<(), Error> {
             ));
         }
         if let Op::Call(ref call) | Op::ForeignCall(ref call) = inst.op {
-            if (call.sret.is_some() && call.kind == crate::gir::body::CallKind::Managed)
-                || (call.poll_free_leaf
-                    && (call.may_allocate || call.may_unwind || call.may_suspend))
-            {
-                return Err(fail("sret or inconsistent poll-free proof is unsupported"));
+            if call.poll_free_leaf && (call.may_allocate || call.may_unwind || call.may_suspend) {
+                return Err(fail("inconsistent poll-free proof is unsupported"));
             }
             if !call.poll_free_leaf && inst.safepoint.is_none() {
                 return Err(fail(
@@ -419,7 +416,11 @@ pub(crate) fn validate(body: &Body) -> Result<(), Error> {
                 unwind,
                 ..
             } => {
-                if call.poll_free_leaf || safepoint.is_none() {
+                // leaf invoke 与 LIR 同口径：不产生 CallReturn 安全点，也无需栈图；
+                // 可能 suspend/unwind 的托管调用必须带权威 safepoint。
+                let leaf = call.poll_free_leaf
+                    || matches!(call.kind, crate::gir::body::CallKind::ForeignLeaf { .. });
+                if !leaf && safepoint.is_none() {
                     return Err(super::error(
                         "invoke requires an authoritative CallReturn map",
                     ));

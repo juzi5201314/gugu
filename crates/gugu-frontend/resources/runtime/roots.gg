@@ -5,8 +5,9 @@
  * 逐根初始化条目。找不到函数或安全点、帧越界、初始化字节越界一律走 RuntimeInvariant
  * fatal（退出 2），既不猜相邻 map，也不退回保守扫描。
  *
- * 帧链契约来自同一份机器规范：`return address` 固定在 `[frame_base + frame_size]`，
- * caller frame = `frame_base + frame_size + 8`。首帧由调用方给出精确 `(frame, pc, kind)`：
+ * 帧链契约按架构由 `roots_caller_slot` 给出：x64 是 `[frame_base + frame_size]` 的压栈
+ * 返回地址与 `+8` 步进；a64 是 `[frame_base + fp_offset + 8]` 的保存 LR 与 `+frame_size`
+ * 步进。首帧由调用方给出精确 `(frame, pc, kind)`：
  * 停驻协程传保存上下文里的 rsp/rip（kind 取 `call-return`），已停点的活动协程传发起者
  * frame 的 rsp/rip。
  *
@@ -60,7 +61,11 @@ pub const SAFEPOINT_KIND_MORESTACK_ENTRY: uint = 4
 
 /// section 魔数 `GUGUSM01` 的小端字。
 pub const ROOT_SECTION_MAGIC: uint = 0x31304d5355475547
-/// section 头部的第二字：版本 4、指针宽度 8、小端 1，按小端打包成一个 u32。
+/// section 头部的第二字：版本、指针宽度 8、小端 1，按小端打包成一个 u32；
+/// 栈图版本随架构：x64 为 4，a64 为 5（header tag 183 另占一字，由 codec 校验）。
+#[cfg(arch = "aarch64")]
+pub const ROOT_SECTION_VERSION_WORD: uint = 0x01080005
+#[cfg(not(arch = "aarch64"))]
 pub const ROOT_SECTION_VERSION_WORD: uint = 0x01080004
 /// section 头字节数。
 pub const ROOT_SECTION_HEADER_BYTES: uint = 72
@@ -78,15 +83,25 @@ pub const ROOT_RECORD_BYTES: uint = 32
 pub const ROOT_SCAN_HEADER_BYTES: uint = 96
 /// 帧轨迹槽数：每帧记录一个代码段偏移，便于失败时定位帧链。
 pub const ROOT_SCAN_TRACE_SLOTS: uint = 8
-/// map 记录的固定头：槽数 4 + 五个寄存器掩码 10 + 保留 2。
+/// map 记录的固定头：槽数 4 + 五个寄存器掩码 + 对齐填充。
+/// 掩码宽度随架构：x64 掩码是 u16（头 4+10+2=16），a64 是 u32（头 4+20=24）。
+#[cfg(arch = "aarch64")]
+pub const ROOT_MAP_HEAD_BYTES: uint = 24
+#[cfg(not(arch = "aarch64"))]
 pub const ROOT_MAP_HEAD_BYTES: uint = 16
 /// 每次 fatal 只报告一行同长度文本：前缀 26 + 站点标签 17 + 换行 1。
 pub const ROOT_FAIL_BYTES: uint = 44
 /// 没有匹配记录时的哨兵；函数下标与 map 下标都是 u32。
 pub const ROOT_NO_ENTRY: uint = 4294967295
-/// 保存的通用寄存器文件槽数（bit0..14 对应 rax..r15，bit15 保留）。
+/// 寄存器保存文件槽数：x64 是 16 个 GPR（bit0..14 对应 rax..r15），a64 是 31（bit31 保留为 SP）。
+#[cfg(arch = "aarch64")]
+pub const ROOT_GPR_LANES: uint = 31
+#[cfg(not(arch = "aarch64"))]
 pub const ROOT_GPR_LANES: uint = 16
 /// 保存的通用寄存器文件字节数。
+#[cfg(arch = "aarch64")]
+pub const ROOT_GPR_BYTES: uint = 248
+#[cfg(not(arch = "aarch64"))]
 pub const ROOT_GPR_BYTES: uint = 128
 
 /// `Rt0Payload` 内 `stackmap`/`fragment_base`/`stackmap_len` 字段偏移与 runtime 状态区
@@ -100,6 +115,10 @@ pub const ROOT_PAYLOAD_GC_TYPES_OFFSET: uint = 88
 pub const ROOT_PAYLOAD_GC_TYPES_LEN_OFFSET: uint = 96
 pub const ROOT_PAYLOAD_GC_META_OFFSET: uint = 104
 pub const ROOT_PAYLOAD_GC_META_LEN_OFFSET: uint = 112
+/// `Rt0Payload.unwind`/`unwind_len` 字段偏移；a64 是 CFA 目录节，由 `entry.rs`
+/// 与 a64 镜像写入端唯一持有，这里只按同一份契约读取。
+pub const ROOT_PAYLOAD_UNWIND_OFFSET: uint = 72
+pub const ROOT_PAYLOAD_UNWIND_LEN_OFFSET: uint = 80
 /// 类型 section 头内字段偏移：记录表偏移、trace program 偏移与长度。
 pub const ROOT_TYPES_RECORDS_OFFSET_FIELD: uint = 24
 pub const ROOT_TYPES_TRACE_OFFSET_FIELD: uint = 32
@@ -271,6 +290,32 @@ fn roots_base() uint {
     roots_word(roots_word(state + ROOT_STATE_PAYLOAD_OFFSET) + ROOT_PAYLOAD_BASE_OFFSET) + roots_word(state + ROOT_STATE_BIAS_OFFSET)
 }
 
+/// a64 CFA 目录节的绝对地址：目录头 `magic(8)+count(4)+183(4)`，其后 `count+1`
+/// 个 u64 表偏移，每个表 +20 是该函数的 `fp_offset`（fp/LR 保存槽相对帧基址）。
+#[cfg(arch = "aarch64")]
+fn roots_unwind() uint {
+    let state = roots_state()
+    roots_word(roots_word(state + ROOT_STATE_PAYLOAD_OFFSET) + ROOT_PAYLOAD_UNWIND_OFFSET) + roots_word(state + ROOT_STATE_BIAS_OFFSET)
+}
+
+/// a64 函数 `function` 的 fp 保存槽偏移；目录下标与栈图函数记录同序（都按 code_rva 升序）。
+#[cfg(arch = "aarch64")]
+fn roots_fp_offset(function: uint) uint {
+    let unwind = roots_unwind()
+    roots_word32(unwind + roots_word(unwind + 16 + function * 8) + 20)
+}
+
+/// 帧链规则 `(返回地址槽偏移, 调用方帧基址步进)`，都相对当前帧基址。
+/// x64：`call` 把返回地址压到 `frame + frame_size`，caller 帧再 +8。
+/// a64：`bl` 不落栈；prologue 把 fp/LR 存在 `frame + fp_offset/+8`，caller 帧就是 `frame + frame_size`。
+#[cfg(arch = "aarch64")]
+fn roots_caller_slot(function: uint, frame_size: uint) (uint, uint) =
+    (roots_fp_offset(function) + 8, frame_size)
+
+#[cfg(not(arch = "aarch64"))]
+fn roots_caller_slot(function: uint, frame_size: uint) (uint, uint) =
+    (frame_size, frame_size + 8)
+
 fn roots_verify(section: uint, length: uint) {
     if section == 0 || length < ROOT_SECTION_HEADER_BYTES { roots_fail(uint(1), section, length, 0, 0, 0) }
     if roots_word(section) != ROOT_SECTION_MAGIC { roots_fail(uint(1), section, length, 1, 0, 0) }
@@ -417,7 +462,7 @@ fn roots_emit_words(out: uint, capacity: uint, frame: uint, map: uint, frame_siz
 fn roots_emit_registers(out: uint, capacity: uint, map: uint, gpr: uint, gpr_valid: uint) {
     let class: uint = 0
     while class < 5 {
-        let mask = roots_word16(map + 4 + class * 2)
+        let mask = roots_mask(map, class)
         let bit: uint = 0
         while bit < ROOT_GPR_LANES {
             if mask & (uint(1) << bit) != uint(0) {
@@ -453,6 +498,13 @@ fn roots_emit_typed(out: uint, capacity: uint, frame: uint, map: uint, frame_siz
         left = left - 1
     }
 }
+
+/// map 记录里 `class` 的寄存器掩码：x64 掩码是 u16、a64 是 u32，都从 +4 起连续排。
+#[cfg(arch = "aarch64")]
+fn roots_mask(map: uint, class: uint) uint = roots_word32(map + 4 + class * 4)
+
+#[cfg(not(arch = "aarch64"))]
+fn roots_mask(map: uint, class: uint) uint = roots_word16(map + 4 + class * 2)
 
 /// 栈图 section 的只读视图；collector 与探针按同一份来源取代码基址与长度。
 pub fn gc_roots_section() uint = roots_section()
@@ -546,11 +598,12 @@ pub fn gc_walk_roots(
             roots_emit_words(out, capacity, cursor, map, frame_size)
             roots_emit_registers(out, capacity, map, gpr, gpr_valid)
             roots_emit_typed(out, capacity, cursor, map, frame_size)
-            let ra = roots_word(cursor + frame_size)
+            let chain = roots_caller_slot(function, frame_size)
+            let ra = roots_word(cursor + chain.0)
             if ra < base {
                 running = false
             } else {
-                cursor = cursor + frame_size + 8
+                cursor = cursor + chain.1
                 at = ra - base
                 start_frame = false
             }
@@ -679,32 +732,34 @@ pub fn gc_type_trace(section: uint, type_index: uint) uint {
 pub fn gc_type_trace_length(section: uint, type_index: uint) uint =
     roots_word32(gc_type_record(section, type_index) + ROOT_TYPE_TRACE_LEN_OFFSET)
 
-/// 包含 `pc` 的函数的局部帧尺寸；`pc` 不在任何函数记录内时返回 0。
+/// 包含 `pc` 的函数下标与局部帧尺寸；`pc` 不在任何函数记录内时返回 `(ROOT_NO_ENTRY, 0)`。
 ///
-/// 帧链的口径与 `gc_walk_roots` 一致：`frame` 是进入函数后、分配完局部量时的 RSP，
-/// 返回地址位于 `frame + frame_size`。runtime 入口帧没有安全点 map，因此收集器需要先
-/// 用本函数跳过它们，才能定位到发起者的精确 `(frame, pc)`。
-pub fn gc_function_frame_size(pc: uint) uint {
+/// 帧链的口径与 `gc_walk_roots` 一致：`frame` 是进入函数后、分配完局部量时的 RSP/SP，
+/// 返回地址槽与 caller 帧步进由 `roots_caller_slot` 按架构给出。
+fn gc_function_frame(pc: uint) (uint, uint) {
     // 单一出口：runtime 源的早退路径会错用返回值寄存器，因此结果只经一个尾部表达式返回。
     let base = roots_base()
     let section = roots_section()
-    let result: uint = 0
+    let result: (uint, uint) = (ROOT_NO_ENTRY, 0)
     if pc < base {
-        result = 0
+        result = (ROOT_NO_ENTRY, 0)
     } else {
         let function = roots_find_function(section, pc - base)
         if function == ROOT_NO_ENTRY {
-            result = 0
+            result = (ROOT_NO_ENTRY, 0)
         } else {
-            result = roots_word32(roots_functions(section) + function * ROOT_FUNCTION_BYTES + 12)
+            result = (function, roots_word32(roots_functions(section) + function * ROOT_FUNCTION_BYTES + 12))
         }
     }
     result
 }
+
+/// 包含 `pc` 的函数的局部帧尺寸；`pc` 不在任何函数记录内时返回 0。
+pub fn gc_function_frame_size(pc: uint) uint = gc_function_frame(pc).1
 /// 从 runtime 入口帧的 RSP 出发，跳过 runtime 侧帧后定位发起者帧。
 ///
-/// 帧链口径与 `gc_walk_roots` 完全一致：一个函数的返回地址槽在 `frame + frame_size`，
-/// 因此调用者的帧基址就是返回地址槽再加 8。`entry_rsp` 是 `gc_enter` 片段保存的入口帧 RSP，
+/// 帧链口径与 `gc_walk_roots` 一致：返回地址槽与调用方帧步进按 `roots_caller_slot` 取。
+/// `entry_rsp` 是 `gc_enter` 片段保存的入口帧 RSP/SP，
 /// 它指向 `call gc_enter` 压入的返回地址，所以入口函数的帧基址是 `entry_rsp + 8`。
 ///
 /// runtime 侧函数（分配盒、hind 盒）没有安全点 map，因此不能按帧链直接扫描；这里逐帧上移
@@ -726,12 +781,13 @@ pub fn gc_initiator_frame(entry_rsp: uint) (uint, uint) {
     let steps: uint = 0
     let done: uint = 0
     while steps < ROOT_INITIATOR_FRAME_LIMIT && done == 0 {
-        let frame_size = gc_function_frame_size(at)
-        if frame_size == 0 {
+        let found = gc_function_frame(at)
+        if found.1 == 0 {
             done = 1
         } else {
-            let caller_ra = roots_word(frame + frame_size)
-            frame = frame + frame_size + 8
+            let chain = roots_caller_slot(found.0, found.1)
+            let caller_ra = roots_word(frame + chain.0)
+            frame = frame + chain.1
             at = caller_ra
             if gc_root_map(at, SAFEPOINT_KIND_CALL_RETURN) != ROOT_NO_ENTRY {
                 found_frame = frame

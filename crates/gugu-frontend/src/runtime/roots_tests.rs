@@ -11,9 +11,29 @@ use super::stackmap_schema::{
 };
 use std::mem::offset_of;
 
-/// 解析 `roots.gg` 里的无符号常量。
+/// 解析 `roots.gg` 里的无符号常量；成对的 `#[cfg(arch = "aarch64")]` 声明取 x64 变体，
+/// 因为这个镜像测试对照的是 x64 codec 常量。
 fn roots_constant(name: &str) -> u64 {
-    super::tests::source_uint_constant(super::RUNTIME_ROOTS_SOURCE, name)
+    let prefixes = [
+        format!("pub const {name}: uint = "),
+        format!("const {name}: uint = "),
+        format!("{name}: uint = "),
+    ];
+    let mut gated_a64 = false;
+    for line in super::RUNTIME_ROOTS_SOURCE.lines() {
+        let trimmed = line.trim();
+        let literal = prefixes
+            .iter()
+            .find_map(|prefix| trimmed.strip_prefix(prefix.as_str()));
+        if let Some(literal) = literal
+            && !gated_a64
+        {
+            return super::tests::parse_uint_literal(literal)
+                .unwrap_or_else(|| panic!("{name} 不是可解析的无符号字面量：{literal}"));
+        }
+        gated_a64 = trimmed == "#[cfg(arch = \"aarch64\")]";
+    }
+    panic!("Gugu 源缺少 x64 变体常量 {name}");
 }
 
 /// 解析 `gc_probes.gg` 里的无符号常量。
