@@ -605,12 +605,13 @@ fn validate(body: &Body, leaf: bool, runtime: bool) -> Result<(), Error> {
             } => {
                 values(body, returned)
                     && kind(body, *memory, Type::Mem)
+                    // ABI 只要求返回车道类型与签名一致；返回值的 provenance
+                    // 是 GC 元数据，可带根标记而不改变调用契约。
                     && body
                         .args(returned)
                         .iter()
-                        .map(|id| body.values[id.index()].kind)
-                        .collect::<Vec<_>>()
-                        == body.signature.results
+                        .map(|id| body.values[id.index()].kind.ty)
+                        .eq(body.signature.results.iter().map(|r| r.ty))
             }
             Terminator::Trap { memory } | Terminator::Unreachable { memory } => {
                 kind(body, *memory, Type::Mem)

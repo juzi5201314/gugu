@@ -231,6 +231,9 @@ pub(crate) fn build(
                 "mapped runtime site requires an authoritative logical root anchor",
             ));
         }
+        // 逐根初始化条目按帧内字下标与初始化字节严格递增（stackmap_codec 编码契约）。
+        map.typed
+            .sort_by_key(|root| (root.word, root.init_byte));
         points.push((0, map));
     }
     let landings = sites

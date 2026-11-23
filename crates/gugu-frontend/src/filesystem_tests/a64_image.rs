@@ -67,9 +67,10 @@ fn aarch64_targets_have_distinct_action_keys() {
 }
 
 
-/// 探测缺口：带 println 的真实程序在当前 a64 后端是否全链路可编译。
+/// 使用 std runtime（println → report_write glue、堆分配、格式化）的完整程序
+/// 在 aarch64-linux 上端到端装配成功。
 #[test]
-fn probe_println() {
+fn aarch64_runtime_program_assembles() {
     let output = Compiler::shared().compile(CompileRequest::single_file(
         "main.gg",
         "use std.io.{println}\nfn main() { println(\"hello\") }\n",
