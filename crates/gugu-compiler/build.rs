@@ -41,6 +41,8 @@ fn main() {
             gugu_compiler_core::TargetName::X86_64Linux => "runtime-x86_64-linux",
             gugu_compiler_core::TargetName::X86_64Windows => "runtime-x86_64-windows",
             gugu_compiler_core::TargetName::X86_64Macos => "runtime-x86_64-macos",
+            gugu_compiler_core::TargetName::Aarch64Linux => "runtime-aarch64-linux",
+            gugu_compiler_core::TargetName::Aarch64Macos => "runtime-aarch64-macos",
         };
         let name = format!("{name}{flavor}.gbc");
         fs::write(out_dir.join(&name), &bytes).expect("write runtime artifact");
@@ -54,5 +56,7 @@ fn frontend_target(target: gugu_compiler_core::TargetName) -> gugu_frontend::Tar
         gugu_compiler_core::TargetName::X86_64Linux => gugu_frontend::TargetName::X86_64Linux,
         gugu_compiler_core::TargetName::X86_64Windows => gugu_frontend::TargetName::X86_64Windows,
         gugu_compiler_core::TargetName::X86_64Macos => gugu_frontend::TargetName::X86_64Macos,
+        gugu_compiler_core::TargetName::Aarch64Linux => gugu_frontend::TargetName::Aarch64Linux,
+        gugu_compiler_core::TargetName::Aarch64Macos => gugu_frontend::TargetName::Aarch64Macos,
     }
 }

@@ -29,6 +29,10 @@ pub enum TargetName {
     X86_64Windows,
     /// x86_64 macOS 的内部构建产物。
     X86_64Macos,
+    /// aarch64 Linux 的内部构建产物。
+    Aarch64Linux,
+    /// aarch64 macOS 的内部构建产物。
+    Aarch64Macos,
 }
 
 impl TargetName {
@@ -38,6 +42,8 @@ impl TargetName {
             Self::X86_64Linux => "x86_64-linux",
             Self::X86_64Windows => "x86_64-windows",
             Self::X86_64Macos => "x86_64-macos",
+            Self::Aarch64Linux => "aarch64-linux",
+            Self::Aarch64Macos => "aarch64-macos",
         }
     }
 }

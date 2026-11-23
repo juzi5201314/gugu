@@ -261,17 +261,17 @@ fn target_dir_name(kind: TargetKind) -> &'static str {
 
 fn image_bytes(target: TargetName, plan: &gugu_compiler::ImagePlan) -> &[u8] {
     match target {
-        TargetName::X86_64Linux => plan.linux_image(),
+        TargetName::X86_64Linux | TargetName::Aarch64Linux => plan.linux_image(),
         TargetName::X86_64Windows => plan.windows_image(),
-        TargetName::X86_64Macos => plan.macos_image(),
+        TargetName::X86_64Macos | TargetName::Aarch64Macos => plan.macos_image(),
     }
 }
 
 fn image_kind<'a>(target: TargetName, linux: &'a str, windows: &'a str) -> &'a str {
     match target {
-        TargetName::X86_64Linux => linux,
+        TargetName::X86_64Linux | TargetName::Aarch64Linux => linux,
         TargetName::X86_64Windows => windows,
-        TargetName::X86_64Macos => "macho",
+        TargetName::X86_64Macos | TargetName::Aarch64Macos => "macho",
     }
 }
 
@@ -280,8 +280,12 @@ fn artifact_extension(target: TargetName, kind: &str) -> &'static str {
         (TargetName::X86_64Windows, kind) if kind.contains("dll") => ".dll",
         (TargetName::X86_64Windows, kind) if kind.contains("lib") => ".lib",
         (TargetName::X86_64Windows, _) => ".exe",
-        (TargetName::X86_64Linux, kind) if kind.contains("dll") || kind.contains("so") => ".so",
-        (TargetName::X86_64Linux, kind) if kind.contains("lib") => ".a",
+        (TargetName::X86_64Linux | TargetName::Aarch64Linux, kind)
+            if kind.contains("dll") || kind.contains("so") =>
+        {
+            ".so"
+        }
+        (TargetName::X86_64Linux | TargetName::Aarch64Linux, kind) if kind.contains("lib") => ".a",
         _ => "",
     }
 }

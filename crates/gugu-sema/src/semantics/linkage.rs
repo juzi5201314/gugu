@@ -135,7 +135,7 @@ impl Model<'_> {
             }
             let reserved = section.starts_with(".gugu")
                 || match target {
-                    TargetName::X86_64Linux => {
+                    TargetName::X86_64Linux | TargetName::Aarch64Linux => {
                         matches!(
                             section.as_str(),
                             ".eh_frame"
@@ -160,7 +160,7 @@ impl Model<'_> {
                         section.as_str(),
                         ".pdata" | ".xdata" | ".idata" | ".edata" | ".reloc" | ".tls"
                     ),
-                    TargetName::X86_64Macos => true,
+                    TargetName::X86_64Macos | TargetName::Aarch64Macos => true,
                 };
             if reserved {
                 return Err(self.trait_error(

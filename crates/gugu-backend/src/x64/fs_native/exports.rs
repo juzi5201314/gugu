@@ -212,6 +212,9 @@ fn wait_thread(b: &mut Builder, target: TargetName, scratch: i32) {
             number(b, Rsi, 0);
             darwin::c_call(b, "nanosleep");
         }
+        TargetName::Aarch64Linux | TargetName::Aarch64Macos => {
+            unreachable!("aarch64 目标不进入 x64 平台片段")
+        }
     }
 }
 

@@ -14,6 +14,9 @@ pub(super) fn test_call(target: TargetName) -> Builder {
         TargetName::X86_64Linux => linux::call(),
         TargetName::X86_64Windows => windows::call(),
         TargetName::X86_64Macos => darwin::call(),
+        TargetName::Aarch64Linux | TargetName::Aarch64Macos => {
+            unreachable!("aarch64 目标不进入 x64 平台片段")
+        }
     }
 }
 #[cfg(test)]
@@ -23,6 +26,9 @@ pub(super) fn test_worker(target: TargetName) -> Builder {
         TargetName::X86_64Linux => linux::worker(&mut b),
         TargetName::X86_64Windows => windows::worker(&mut b),
         TargetName::X86_64Macos => darwin::worker(&mut b),
+        TargetName::Aarch64Linux | TargetName::Aarch64Macos => {
+            unreachable!("aarch64 目标不进入 x64 平台片段")
+        }
     }
     b
 }
@@ -34,6 +40,9 @@ pub(super) fn call(target: TargetName) -> FragmentBlob {
             TargetName::X86_64Linux => linux::call(),
             TargetName::X86_64Windows => windows::call(),
             TargetName::X86_64Macos => darwin::call(),
+            TargetName::Aarch64Linux | TargetName::Aarch64Macos => {
+                unreachable!("aarch64 目标不进入 x64 平台片段")
+            }
         },
     )
 }
@@ -57,6 +66,9 @@ pub(super) fn worker(target: TargetName) -> FragmentBlob {
         TargetName::X86_64Linux => linux::worker(&mut b),
         TargetName::X86_64Windows => windows::worker(&mut b),
         TargetName::X86_64Macos => darwin::worker(&mut b),
+        TargetName::Aarch64Linux | TargetName::Aarch64Macos => {
+            unreachable!("aarch64 目标不进入 x64 平台片段")
+        }
     }
     let encoded = encode::assemble(&b.finish().sequence).expect("进程 worker 片段编码");
     let offset = encoded

@@ -169,6 +169,9 @@ pub fn fragments(target: TargetName) -> Vec<FragmentBlob> {
             darwin::clock(0),
             darwin::parallelism(),
         ],
+        TargetName::Aarch64Linux | TargetName::Aarch64Macos => {
+            unreachable!("aarch64 目标不进入 x64 平台片段")
+        }
     };
     [
         "fs_start",
@@ -192,6 +195,9 @@ pub fn fragments(target: TargetName) -> Vec<FragmentBlob> {
                 TargetName::X86_64Linux => linux_file_worker(false),
                 TargetName::X86_64Windows => windows_worker(),
                 TargetName::X86_64Macos => darwin::worker(false),
+                TargetName::Aarch64Linux | TargetName::Aarch64Macos => {
+                    unreachable!("aarch64 目标不进入 x64 平台片段")
+                }
             },
         ),
         blob("thread_id", thread_id(target)),
@@ -251,6 +257,9 @@ fn thread_id(target: TargetName) -> Builder {
             adjust(&mut b, "add", Rsp, 40);
         }
         TargetName::X86_64Macos => unreachable!(),
+        TargetName::Aarch64Linux | TargetName::Aarch64Macos => {
+            unreachable!("aarch64 目标不进入 x64 平台片段")
+        }
     }
     ret(&mut b);
     b

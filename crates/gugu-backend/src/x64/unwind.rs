@@ -96,6 +96,9 @@ pub fn encode(
     let platform = match target {
         TargetName::X86_64Linux | TargetName::X86_64Macos => encode_eh_frame(functions, landings)?,
         TargetName::X86_64Windows => encode_windows(functions, landings, saves)?,
+        TargetName::Aarch64Linux | TargetName::Aarch64Macos => {
+            unreachable!("aarch64 目标不进入 x64 unwind")
+        }
     };
     let mut output = vec![0_u8; HEADER_BYTES];
     output[..8].copy_from_slice(b"GUGUUN01");

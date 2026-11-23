@@ -15,6 +15,9 @@ pub(super) fn symbols(target: TargetName) -> FragmentBlob {
         TargetName::X86_64Linux => LINUX_SYMBOLS,
         TargetName::X86_64Windows => WINDOWS_SYMBOLS,
         TargetName::X86_64Macos => &["_NSGetEnviron", "setenv", "unsetenv", "getenv"],
+        TargetName::Aarch64Linux | TargetName::Aarch64Macos => {
+            unreachable!("aarch64 目标不进入 x64 平台片段")
+        }
     };
     for (op, &name) in names.iter().enumerate() {
         let next = b.label();
@@ -57,6 +60,9 @@ pub(super) fn symbols(target: TargetName) -> FragmentBlob {
                 adjust(&mut b, "add", Rsp, 8);
             }
             TargetName::X86_64Macos => darwin::c_address(&mut b, Rax, name),
+            TargetName::Aarch64Linux | TargetName::Aarch64Macos => {
+                unreachable!("aarch64 目标不进入 x64 平台片段")
+            }
         }
         ret(&mut b);
         b.define(next);
@@ -174,6 +180,9 @@ pub(super) fn startup(target: TargetName) -> FragmentBlob {
             store(&mut b, R12, 24, Rax);
             b.define(cleanup);
             adjust(&mut b, "add", Rsp, 32);
+        }
+        TargetName::Aarch64Linux | TargetName::Aarch64Macos => {
+            unreachable!("aarch64 目标不进入 x64 平台片段")
         }
     }
     b.define(done);

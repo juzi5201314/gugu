@@ -94,9 +94,9 @@ impl std::fmt::Display for PlatformProfile {
 impl From<TargetName> for PlatformProfile {
     fn from(value: TargetName) -> Self {
         match value {
-            TargetName::X86_64Linux => Self::Linux,
+            TargetName::X86_64Linux | TargetName::Aarch64Linux => Self::Linux,
             TargetName::X86_64Windows => Self::Windows,
-            TargetName::X86_64Macos => Self::Macos,
+            TargetName::X86_64Macos | TargetName::Aarch64Macos => Self::Macos,
         }
     }
 }

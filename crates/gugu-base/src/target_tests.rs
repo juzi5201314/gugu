@@ -51,6 +51,58 @@ fn dimension_values_do_not_register_targets() {
 }
 
 #[test]
+fn internal_aarch64_targets_carry_descriptors_without_registration() {
+    // 内部目标标识经编译器产物命名解析，但不进入公开注册表或宿主选择。
+    for (name, expected) in [
+        ("aarch64-linux", TargetName::Aarch64Linux),
+        ("aarch64-macos", TargetName::Aarch64Macos),
+    ] {
+        assert_eq!(
+            TargetName::from_compiler_artifact(name).expect("internal target"),
+            expected
+        );
+    }
+
+    let linux = TargetName::Aarch64Linux.descriptor();
+    assert_eq!(linux.arch, Architecture::Aarch64);
+    assert_eq!(linux.os, OperatingSystem::Linux);
+    assert_eq!(linux.object_format, ObjectFormat::Elf64);
+    assert_eq!(linux.rt0, Rt0Kind::LinuxSyscall);
+    assert_eq!(linux.page_size, TARGET_PAGE_SIZE);
+    assert_eq!(linux.cpu_baseline, CpuBaseline::Armv8A);
+    assert_eq!(linux.linux_interpreter, Some("/lib/ld-linux-aarch64.so.1"));
+    assert_eq!(linux.pointer_compression, PointerCompression::aarch64());
+
+    let macos = TargetName::Aarch64Macos.descriptor();
+    assert_eq!(macos.arch, Architecture::Aarch64);
+    assert_eq!(macos.os, OperatingSystem::Macos);
+    assert_eq!(macos.object_format, ObjectFormat::MachO64);
+    assert_eq!(macos.rt0, Rt0Kind::MacosLibSystem);
+    assert_eq!(macos.page_size, 16 * 1024);
+    assert_eq!(macos.cpu_baseline, CpuBaseline::Armv8A);
+    assert_eq!(macos.linux_interpreter, None);
+    assert_eq!(macos.pointer_compression, PointerCompression::aarch64());
+
+    // 内部目标 sysroot 身份必须互不相同，且不同于已登记目标。
+    let digests = [
+        target_sysroot_digest(TargetName::X86_64Linux),
+        target_sysroot_digest(TargetName::X86_64Windows),
+        target_sysroot_digest(TargetName::X86_64Macos),
+        target_sysroot_digest(TargetName::Aarch64Linux),
+        target_sysroot_digest(TargetName::Aarch64Macos),
+    ];
+    for (index, digest) in digests.iter().enumerate() {
+        for other in &digests[index + 1..] {
+            assert_ne!(digest, other);
+        }
+    }
+
+    // 宿主目标选择永不返回未登记目标。
+    assert_ne!(TargetName::host(), Some(TargetName::Aarch64Linux));
+    assert_ne!(TargetName::host(), Some(TargetName::Aarch64Macos));
+}
+
+#[test]
 fn registered_targets_have_distinct_stable_descriptor_digests() {
     let linux = TargetName::X86_64Linux.descriptor();
     let windows = TargetName::X86_64Windows.descriptor();

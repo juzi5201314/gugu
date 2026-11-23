@@ -67,6 +67,7 @@ fn check(target: TargetName) {
         TargetName::X86_64Linux => plan.linux_image(),
         TargetName::X86_64Windows => plan.windows_image(),
         TargetName::X86_64Macos => plan.macos_image(),
+        TargetName::Aarch64Linux | TargetName::Aarch64Macos => unreachable!(),
     };
     assert!(!bytes.is_empty());
     let lir = output.dump_lir().expect("LIR");

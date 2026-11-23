@@ -424,6 +424,9 @@ impl ProcessExitCode {
                     vec![Operand::Rip(RelocTarget::Lir(iat_symbol("ExitProcess")), 0)],
                 );
             }
+            TargetName::Aarch64Linux | TargetName::Aarch64Macos => {
+                unreachable!("aarch64 目标不进入 x64 平台片段")
+            }
         }
         let encoded = finish(builder);
         Self {
@@ -695,6 +698,9 @@ impl ReportWriteCode {
                     vec![reg(gpr(Gpr::Rsp)), imm(0x38)],
                 );
                 builder.emit("ret", &[], Access::Read, Vec::new());
+            }
+            TargetName::Aarch64Linux | TargetName::Aarch64Macos => {
+                unreachable!("aarch64 目标不进入 x64 平台片段")
             }
         }
         let encoded = finish(builder);

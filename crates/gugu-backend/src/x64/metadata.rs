@@ -129,6 +129,9 @@ pub fn required_names(target: TargetName) -> &'static [&'static str] {
         TargetName::X86_64Linux => &[".gugu.stackmap", ".eh_frame", ".gugu.src"],
         TargetName::X86_64Macos => &["__gugu_stackmap", "__gugu_unwind", "__gugu_source"],
         TargetName::X86_64Windows => &[".gugustk", ".xdata", ".gugusrc"],
+        TargetName::Aarch64Linux | TargetName::Aarch64Macos => {
+            unreachable!("aarch64 目标不进入 x64 元数据路径")
+        }
     }
 }
 
@@ -137,6 +140,9 @@ fn source_section_name(target: TargetName) -> &'static str {
         TargetName::X86_64Linux => ".gugu.src",
         TargetName::X86_64Macos => "__gugu_source",
         TargetName::X86_64Windows => ".gugusrc",
+        TargetName::Aarch64Linux | TargetName::Aarch64Macos => {
+            unreachable!("aarch64 目标不进入 x64 元数据路径")
+        }
     }
 }
 
@@ -165,6 +171,9 @@ fn stackmap_name(target: TargetName) -> &'static str {
         TargetName::X86_64Linux => ".gugu.stackmap",
         TargetName::X86_64Macos => "__gugu_stackmap",
         TargetName::X86_64Windows => ".gugustk",
+        TargetName::Aarch64Linux | TargetName::Aarch64Macos => {
+            unreachable!("aarch64 目标不进入 x64 元数据路径")
+        }
     }
 }
 
@@ -173,6 +182,9 @@ fn unwind_name(target: TargetName) -> &'static str {
         TargetName::X86_64Linux => ".eh_frame",
         TargetName::X86_64Macos => "__gugu_unwind",
         TargetName::X86_64Windows => ".xdata",
+        TargetName::Aarch64Linux | TargetName::Aarch64Macos => {
+            unreachable!("aarch64 目标不进入 x64 元数据路径")
+        }
     }
 }
 

@@ -39,6 +39,8 @@ const fn core_target(target: TargetName) -> gugu_compiler_core::TargetName {
         TargetName::X86_64Linux => gugu_compiler_core::TargetName::X86_64Linux,
         TargetName::X86_64Windows => gugu_compiler_core::TargetName::X86_64Windows,
         TargetName::X86_64Macos => gugu_compiler_core::TargetName::X86_64Macos,
+        TargetName::Aarch64Linux => gugu_compiler_core::TargetName::Aarch64Linux,
+        TargetName::Aarch64Macos => gugu_compiler_core::TargetName::Aarch64Macos,
     }
 }
 
@@ -66,6 +68,10 @@ pub fn embedded_artifact(
         TargetName::X86_64Linux => decode(&LINUX, target),
         TargetName::X86_64Windows => decode(&WINDOWS, target),
         TargetName::X86_64Macos => decode(&MACOS, target),
+        // aarch64 的 runtime artifact 尚未构建：内建块物化仍只覆盖 x64 目标。
+        TargetName::Aarch64Linux | TargetName::Aarch64Macos => Err(RuntimeArtifactError::Manifest(
+            "aarch64 目标的 runtime artifact 尚未构建".to_owned(),
+        )),
     }
 }
 
