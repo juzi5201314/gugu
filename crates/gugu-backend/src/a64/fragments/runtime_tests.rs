@@ -262,13 +262,14 @@ fn gc_enter_swaps_to_system_stack_calls_dispatch_and_restores() {
         X9,
         COORDINATOR_SYSTEM_TOP_OFFSET as usize
     ));
-    // call site：bl 之后恢复 HOT/SP、弹回 LR 并返回。
+    // call site：bl 之后恢复 HOT/SP、弹回 LR 并返回；LR 以 temp=entry_rsp 为基址，
+    // SP 一步归位到 entry_rsp+8，全程保持 16 字节对齐。
     let call = fragment.relocations[0].offset as usize / 4;
     assert_eq!(form(&code[call]), "bl");
     let tail = &code[code.len() - 3..];
-    assert!(memory(&tail[..1], "ldr.X.Unsigned", LR, SP, 0));
+    assert!(memory(&tail[..1], "ldr.X.Unsigned", LR, X10, 0));
     assert_eq!(form(&tail[1]), "add.X.imm");
-    assert_eq!(tail[1].operands, [reg(SP), reg(SP), add_imm(8)]);
+    assert_eq!(tail[1].operands, [reg(SP), reg(X10), add_imm(8)]);
     assert_eq!(form(&tail[2]), "ret");
 }
 

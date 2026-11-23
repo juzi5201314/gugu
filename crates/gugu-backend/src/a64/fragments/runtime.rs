@@ -175,8 +175,8 @@ pub fn coroutine_enter(context_switch: &str, restore_offset: u32) -> Fragment {
 /// x0 = GC 请求；切到系统栈调用 `gc_dispatch(request, entry_rsp)`，恢复后返回 x0。
 /// 切换面与 x64 `gc_enter` 相同：HOT 存 coordinator 槽，SP 走 ENTRY_RSP/SAVED_RSP。
 /// a64 的 `bl` 不落栈：入口在 mutator 栈上开辟 16 字节槽并把 LR 写到高 8 字节，
-/// `entry_rsp` 取该槽起点，使 poll 慢路的 `heap_word(entry_rsp)`/`entry_rsp+8` 与
-/// x64 `call` 压栈后的布局一致；返回前再弹回 LR。
+/// `entry_rsp` 取 LR 所在地址（SP+8），使 poll 慢路的 `heap_word(entry_rsp)`/
+/// `entry_rsp+8` 与 x64 `call` 压栈后的布局一致；返回前再弹回 LR。
 pub fn gc_enter(gc_dispatch: &str) -> Fragment {
     let mut b = Builder::default();
     let coordinator = Reg::x(9);
@@ -248,9 +248,10 @@ pub fn gc_enter(gc_dispatch: &str) -> Fragment {
         coordinator,
         COORDINATOR_SAVED_RSP_OFFSET as usize,
     );
-    b.add(SP, temp, 0);
-    b.memory("ldr.X.Unsigned", LR, SP, 0);
-    b.emit("add.X.imm", [reg(SP), reg(SP), add_imm(8)]);
+    // SP 必须保持 16 字节对齐：用 temp（=SAVED_RSP=entry_rsp）作基址取回 LR，
+    // 再把 SP 一步恢复到 entry_rsp+8（即调用方帧顶）。
+    b.memory("ldr.X.Unsigned", LR, temp, 0);
+    b.add(SP, temp, 8);
     b.ret();
     b.finish()
 }
