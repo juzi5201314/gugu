@@ -11,6 +11,7 @@ use std.runtime.timer as timer
 use std.runtime.control as control
 use std.runtime.signal as signal
 use std.runtime.roots.{ROOT_NO_ENTRY}
+#[cfg(arch = "aarch64")]
 use std.runtime.roots as roots
 
 /* Gugu runtime 源树的 bootstrap 编译单元。平台入口和 intrinsic 保持在明确边界内。
@@ -369,8 +370,6 @@ pub fn rt0_start(params: *Rt0Params, bias: uint) uint {
         store_word(state + 0, slot)
         #[cfg(arch = "aarch64")]
         let a64_block = std.platform.reserve_aligned(uint(4096), uint(4096))
-        #[cfg(not(arch = "aarch64"))]
-        let a64_block: uint = 0
         #[cfg(arch = "aarch64")]
         {
             if a64_block == 0 { fatal_runtime() }

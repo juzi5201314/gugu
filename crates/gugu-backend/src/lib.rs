@@ -589,6 +589,11 @@ pub fn plan(
     native_link: &NativeLink,
 ) -> Result<Option<BackendPlan>, String> {
     native_link.validate(target)?;
+    // 校验顺序沿用原 x64 契约：bridge 的 glibc 装载契约先于目标符号检查，
+    // 保证缺解释器/导入时报出的首要诊断不变。
+    if let PlanCodegen::X64(x64) = codegen {
+        native_link.validate_bridge(target, x64)?;
+    }
     native_link.validate_bridge_targets(lir)?;
     let descriptor = target.descriptor();
     let module = hir.module();
