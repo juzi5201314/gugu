@@ -29,7 +29,7 @@ pub mod metadata;
 mod print;
 pub mod program;
 pub mod reg;
-mod relocation;
+pub(crate) mod relocation;
 pub mod rewrite;
 mod rows;
 pub mod runtime;

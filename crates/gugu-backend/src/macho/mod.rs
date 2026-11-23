@@ -140,6 +140,17 @@ pub struct Symbol {
     pub at: Location,
 }
 
+/// arm64 指令修补点：`at` 处的占位指令在写出时按 `kind` 编码为指向
+/// `target + addend` 的形式。与 [`Fixup`] 一样依赖链接期地址，由 [`link`] 在最终
+/// 布局上应用——节图后续追加的启动节会移动部分节的地址，提前修补会过期。
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct Arm64Relocation {
+    pub at: Location,
+    pub target: Location,
+    pub addend: i64,
+    pub kind: crate::a64::inst::RelocKind,
+}
+
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub struct MachORequest {
     pub arch: Arch,
@@ -150,6 +161,8 @@ pub struct MachORequest {
     pub libraries: Vec<String>,
     pub imports: Vec<Import>,
     pub fixups: Vec<Fixup>,
+    /// arm64 指令修补点；其他架构必须为空。
+    pub relocations: Vec<Arm64Relocation>,
     pub symbols: Vec<Symbol>,
     /// `LC_MAIN` 入口；必须落在代码节内。
     pub entry: Location,
@@ -185,6 +198,7 @@ pub fn link(request: &MachORequest) -> Result<MachImage, String> {
             file[at..at + bytes.len()].copy_from_slice(bytes);
         }
     }
+    apply_relocations(&mut file, request, &layout)?;
     fixups::apply(&mut file, request, &layout)?;
     commands::write_linkedit(&mut file, request, &layout)?;
     commands::write_uuid(&mut file, &layout);
@@ -196,8 +210,48 @@ pub fn link(request: &MachORequest) -> Result<MachImage, String> {
     })
 }
 
+/// arm64 指令修补在最终布局上应用；与 ELF 写入器的 `relocations` 同法。
+fn apply_relocations(
+    file: &mut [u8],
+    request: &MachORequest,
+    layout: &Layout,
+) -> Result<(), String> {
+    for relocation in &request.relocations {
+        let valid = request
+            .sections
+            .get(relocation.at.section)
+            .is_some_and(|s| {
+                matches!(s.content, SectionContent::Code(_))
+                    && relocation.at.offset % 4 == 0
+                    && relocation
+                        .at
+                        .offset
+                        .checked_add(4)
+                        .is_some_and(|end| end <= s.content.size())
+            });
+        if !valid {
+            return Err("Mach-O arm64 relocation site is not aligned code".into());
+        }
+        let pc = layout.address(relocation.at)?;
+        let target = layout
+            .address(relocation.target)?
+            .checked_add_signed(relocation.addend)
+            .ok_or("Mach-O arm64 relocation target overflow")?;
+        let at = (layout.sections[relocation.at.section].fileoff + relocation.at.offset) as usize;
+        let word = u32::from_le_bytes(file[at..at + 4].try_into().unwrap());
+        file[at..at + 4].copy_from_slice(
+            &crate::a64::relocation::patch(word, relocation.kind, pc, target)
+                .map_err(|error| error.to_string())?,
+        );
+    }
+    Ok(())
+}
+
 fn validate(request: &MachORequest) -> Result<(), String> {
     check_name("identifier", &request.identifier)?;
+    if request.arch != Arch::Arm64 && !request.relocations.is_empty() {
+        return Err("Mach-O instruction relocations require arm64".to_owned());
+    }
     for section in &request.sections {
         validate_section(request.arch, section)?;
     }

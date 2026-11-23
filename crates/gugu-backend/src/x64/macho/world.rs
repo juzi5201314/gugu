@@ -80,6 +80,7 @@ impl WorldImage {
                 libraries: Vec::new(),
                 imports: Vec::new(),
                 fixups: Vec::new(),
+                relocations: Vec::new(),
                 symbols: Vec::new(),
                 entry: Location {
                     section: 0,

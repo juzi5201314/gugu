@@ -62,6 +62,7 @@ fn request(arch: Arch) -> MachORequest {
                 target: at(1, 1),
             },
         ],
+        relocations: vec![],
         symbols: vec![Symbol {
             name: "_main".to_owned(),
             at: at(0, 0),

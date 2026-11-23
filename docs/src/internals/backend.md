@@ -742,8 +742,10 @@ Definition；显式 blob 的 Pointer 保留 offset、target 与 addend。该阶�
 
 所有 compiled body 仍走 runtime 选择、分配、frame、site 与 metadata 路径。world 将其放进
 同一代码节，用真实函数偏移聚合 `a64_binding::Sections`，追加独立 maps/CFA 节；fragment
-base 是代码节起点，不是 Mach-O image base。`World::macho_request` 先固定全部节、导入、
-fixup 和符号形状，再调用已有 import stubs 与 writer layout，最后原长回填指令重定位。
+base 是代码节起点，不是 Mach-O image base。`World::macho_request` 固定全部节、导入、fixup 和符号形状，
+指令重定位不就地回填——目标解析后转为请求携带的 `macho::Arm64Relocation` 记录，
+由 `macho::link` 在最终布局上编码（`link_entry` 追加的启动节会移动部分节地址，
+提前修补会过期），x86_64 请求必须保持该列表为空。
 native data 的 SymbolAddr 多一次槽读取，blob 中的 native data 指针用 chained bind。
 请求入口目前是所选 managed body；`a64::program::build` 把 world、`DarwinRuntime`/
 `LinuxRuntime` 启动契约（见 `link_entry` 条目）与 `runtime_definitions` 的哨兵/平台
