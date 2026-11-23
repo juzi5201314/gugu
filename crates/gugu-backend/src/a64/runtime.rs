@@ -204,6 +204,14 @@ pub(crate) fn machine_binding(op: &Op) -> Option<String> {
     }
 }
 
+/// lowering 后是否变成一次真实调用：源绑定 glue、机器/平台片段或分配慢路。
+/// 帧布局与 safepoint 审计必须把这些隐式调用点计入。
+pub(crate) fn implicit_call(op: &Op) -> bool {
+    machine_binding(op).is_some()
+        || matches!(op, Op::GcAlloc { .. } | Op::RegionAlloc { .. })
+        || operation_name(op).is_some()
+}
+
 pub(crate) fn operation_name(op: &Op) -> Option<&'static str> {
     if matches!(op, Op::GcAlloc { .. } | Op::RegionAlloc { .. }) {
         return None;
