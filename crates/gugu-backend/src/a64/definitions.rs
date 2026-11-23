@@ -165,6 +165,7 @@ pub fn runtime_definitions(platform: Platform) -> Vec<Definition> {
                     fragments::linux_environment_symbol(),
                 ),
                 Definition::fragment(rt("net_close"), fragments::linux_net_close()),
+                Definition::fragment(rt("page_size"), fragments::linux_page_size()),
             ]
             .into_iter()
             .chain(linux_import_definitions()),

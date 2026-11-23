@@ -303,7 +303,7 @@ fn zero_range(processor: uint, start: uint, end: uint) {
 
 fn map_span(bytes: uint) uint {
     unsafe {
-        let base = mapping.reserve_aligned(bytes, uint(4096))
+        let base = mapping.reserve_aligned(bytes, mapping.os_page_bytes())
         if base == 0 { fail() }
         commit_stack(base, bytes)
         base

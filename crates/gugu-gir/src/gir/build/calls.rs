@@ -778,6 +778,7 @@ fn runtime_machine_op(
         Source::CallbackControl => Target::CallbackControl,
         Source::CallbackQueue => Target::CallbackQueue,
         Source::ThreadId => Target::ThreadId,
+        Source::PageSize => Target::PageSize,
         Source::AllocBytes | Source::StringBytes | Source::StringFromUtf8Unchecked => return None,
         Source::AtomicLoadAcquire
         | Source::AtomicStoreRelease

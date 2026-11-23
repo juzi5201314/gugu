@@ -26,7 +26,7 @@ fn shared_new_table() uint { unsafe {
     let owner = coordinator()
     let id = heap_word(owner + SHARED_NEXT_TABLE_OFFSET) + 1
     if id >= 4096 { heap_fail() }
-    let base = mapping.reserve_aligned(SHARED_TABLE_BYTES, 4096)
+    let base = mapping.reserve_aligned(SHARED_TABLE_BYTES, mapping.os_page_bytes())
     if base == 0 { heap_fail() }
     let extent = SharedExtent { base, bytes: SHARED_TABLE_BYTES }
     if mapping.commit(std.mem.transmute[*SharedExtent, uint](std.ptr.addr_of(extent))) != 0 {

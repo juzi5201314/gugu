@@ -119,11 +119,13 @@ pub enum RuntimeMachineIntrinsic {
     CallbackControl,
     CallbackQueue,
     ThreadId,
+    /// 从进程入口 envp 扫 auxv 取 AT_PAGESZ；缺失返回 0，调用方不得回退到固定页大小。
+    PageSize,
 }
 
 impl RuntimeMachineIntrinsic {
     /// 全部操作的稠密登记顺序；`from_path` 按 `name()` 匹配（与 `PlatformIntrinsic` 同法）。
-    pub const ALL: [Self; 33] = [
+    pub const ALL: [Self; 34] = [
         Self::ContextSwitch,
         Self::ContextRestore,
         Self::CurrentSlot,
@@ -157,6 +159,7 @@ impl RuntimeMachineIntrinsic {
         Self::CallbackControl,
         Self::CallbackQueue,
         Self::ThreadId,
+        Self::PageSize,
     ];
 
     /// 按规范路径识别 runtime 机器原语；导入别名与再导出保留同一身份。
@@ -201,6 +204,7 @@ impl RuntimeMachineIntrinsic {
             Self::CallbackControl => "callback_control",
             Self::CallbackQueue => "callback_queue",
             Self::ThreadId => "thread_id",
+            Self::PageSize => "page_size",
         }
     }
 
@@ -228,7 +232,8 @@ impl RuntimeMachineIntrinsic {
             | Self::FsPoll
             | Self::StackReadWord
             | Self::EnvironmentSymbol
-            | Self::ResolverSymbol => 1,
+            | Self::ResolverSymbol
+            | Self::PageSize => 1,
             Self::AtomicStoreRelease
             | Self::AtomicFetchOrAcqRel
             | Self::AtomicFetchAndAcqRel
@@ -266,6 +271,7 @@ impl RuntimeMachineIntrinsic {
                 | Self::CallbackControl
                 | Self::CallbackQueue
                 | Self::ThreadId
+                | Self::PageSize
         )
     }
 
@@ -293,6 +299,7 @@ impl RuntimeMachineIntrinsic {
                 | Self::CallbackControl
                 | Self::CallbackQueue
                 | Self::ThreadId
+                | Self::PageSize
         ) || self.is_atomic()
             || self.is_buffer()
     }
