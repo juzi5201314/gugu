@@ -174,14 +174,15 @@ pub fn coroutine_enter(context_switch: &str, restore_offset: u32) -> Fragment {
 
 /// x0 = GC 请求；切到系统栈调用 `gc_dispatch(request, entry_rsp)`，恢复后返回 x0。
 /// 切换面与 x64 `gc_enter` 相同：HOT 存 coordinator 槽，SP 走 ENTRY_RSP/SAVED_RSP。
-/// a64 的 `bl` 不落栈：入口先把调用方返回地址压到 mutator 栈顶，让
-/// `entry_rsp` 仍按 x64 约定指向发起帧 PC；返回前再弹回 LR。
+/// a64 的 `bl` 不落栈：入口在 mutator 栈上开辟 16 字节槽并把 LR 写到高 8 字节，
+/// `entry_rsp` 取该槽起点，使 poll 慢路的 `heap_word(entry_rsp)`/`entry_rsp+8` 与
+/// x64 `call` 压栈后的布局一致；返回前再弹回 LR。
 pub fn gc_enter(gc_dispatch: &str) -> Fragment {
     let mut b = Builder::default();
     let coordinator = Reg::x(9);
     let temp = Reg::x(10);
     b.emit("sub.X.imm", [reg(SP), reg(SP), add_imm(16)]);
-    b.memory("str.X.Unsigned", LR, SP, 0);
+    b.memory("str.X.Unsigned", LR, SP, 8);
     mailbox(&mut b, coordinator);
     b.memory(
         "ldr.X.Unsigned",
@@ -201,7 +202,7 @@ pub fn gc_enter(gc_dispatch: &str) -> Fragment {
         coordinator,
         COORDINATOR_SYSTEM_DESCRIPTOR_OFFSET as usize,
     );
-    b.add(temp, SP, 0);
+    b.add(temp, SP, 8);
     b.memory(
         "str.X.Unsigned",
         temp,
@@ -249,7 +250,7 @@ pub fn gc_enter(gc_dispatch: &str) -> Fragment {
     );
     b.add(SP, temp, 0);
     b.memory("ldr.X.Unsigned", LR, SP, 0);
-    b.emit("add.X.imm", [reg(SP), reg(SP), add_imm(16)]);
+    b.emit("add.X.imm", [reg(SP), reg(SP), add_imm(8)]);
     b.ret();
     b.finish()
 }

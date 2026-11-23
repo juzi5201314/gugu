@@ -215,10 +215,10 @@ fn gc_enter_swaps_to_system_stack_calls_dispatch_and_restores() {
     let fragment = gc_enter("dispatch");
     branch(&fragment, RelocKind::Call26, "dispatch", 0);
     let code = instructions(&fragment);
-    // 前缀：mutator 栈顶压调用方返回地址，entry_rsp 与 x64 `call` 落栈契约一致。
+    // 前缀：16 字节槽高 8 字节压调用方返回地址，entry_rsp=SP+8 与 x64 `call` 落栈契约一致。
     assert_eq!(form(&code[0]), "sub.X.imm");
     assert_eq!(code[0].operands, [reg(SP), reg(SP), add_imm(16)]);
-    assert!(memory(&code[1..2], "str.X.Unsigned", LR, SP, 0));
+    assert!(memory(&code[1..2], "str.X.Unsigned", LR, SP, 8));
     // 前段：coordinator → SAVED_R14=HOT，HOT=SYSTEM_DESCRIPTOR，ENTRY_RSP/SAVED_RSP=SP，SP=SYSTEM_TOP。
     assert!(memory(
         &code[3..5],
@@ -268,7 +268,7 @@ fn gc_enter_swaps_to_system_stack_calls_dispatch_and_restores() {
     let tail = &code[code.len() - 3..];
     assert!(memory(&tail[..1], "ldr.X.Unsigned", LR, SP, 0));
     assert_eq!(form(&tail[1]), "add.X.imm");
-    assert_eq!(tail[1].operands, [reg(SP), reg(SP), add_imm(16)]);
+    assert_eq!(tail[1].operands, [reg(SP), reg(SP), add_imm(8)]);
     assert_eq!(form(&tail[2]), "ret");
 }
 
