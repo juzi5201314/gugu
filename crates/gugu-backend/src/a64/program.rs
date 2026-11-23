@@ -29,17 +29,17 @@ use super::Error;
 use super::error as fail;
 
 /// rt0 启动载荷。
-const PAYLOAD: &str = "__gugu_a64_payload";
+pub(crate) const PAYLOAD: &str = "__gugu_a64_payload";
 /// 初始协程槽（rt0 装入 r14 的地址）。
-const INITIAL_SLOT: &str = "__gugu_a64_initial_slot";
+pub(crate) const INITIAL_SLOT: &str = "__gugu_a64_initial_slot";
 /// 初始 `LogicalProcessor` 页。
-const PROCESSOR: &str = "__gugu_a64_processor";
+pub(crate) const PROCESSOR: &str = "__gugu_a64_processor";
 /// runtime 状态区（首部为 `MorestackMailbox`）。
-const RUNTIME_STATE: &str = "__gugu_a64_runtime_state";
+pub(crate) const RUNTIME_STATE: &str = "__gugu_a64_runtime_state";
 /// 类型段（`.gugutyp` 对应物）。
-const GC_TYPES: &str = "__gugu_a64_gc_types";
+pub(crate) const GC_TYPES: &str = "__gugu_a64_gc_types";
 /// GC metadata blob（`.ggmeta` 对应物）。
-const GC_META: &str = "__gugu_a64_gc_meta";
+pub(crate) const GC_META: &str = "__gugu_a64_gc_meta";
 
 fn rt(name: &str) -> String {
     mangle::mangle_runtime(name)
