@@ -363,13 +363,8 @@ fn arm64_darwin_entry_rejects_a_payload_outside_writable_data() {
     );
 }
 
-#[test]
-fn arm64_darwin_entry_writes_the_full_runtime_contract() {
-    use crate::{
-        a64::macho::{DarwinRuntime, link_entry},
-        runtime::entry::{Rt0Payload, rt0_params, state},
-    };
-    use std::mem::offset_of;
+fn arm64_darwin_runtime_fixture() -> (MachORequest, crate::a64::macho::DarwinEntry) {
+    use crate::{a64::macho::DarwinRuntime, runtime::entry::state};
 
     let (mut request, mut entry) = arm64_darwin_entry_fixture();
     request.sections[4].content = SectionContent::ZeroFill(128 + 4096 + state::BYTES);
@@ -396,6 +391,18 @@ fn arm64_darwin_entry_writes_the_full_runtime_contract() {
         gc_types: Some(at(7, 0)),
         gc_meta: None,
     });
+    (request, entry)
+}
+
+#[test]
+fn arm64_darwin_entry_writes_the_full_runtime_contract() {
+    use crate::{
+        a64::macho::link_entry,
+        runtime::entry::{Rt0Payload, rt0_params},
+    };
+    use std::mem::offset_of;
+
+    let (request, entry) = arm64_darwin_runtime_fixture();
     let file = link_entry(request, entry).unwrap().bytes;
     let rva = |name: &str, offset: u64| {
         let (address, _) = section_address(&file, name);
@@ -435,6 +442,41 @@ fn arm64_darwin_entry_writes_the_full_runtime_contract() {
             u64_at(&file, payload_file + 8 + field),
             expected,
             "payload field {field}"
+        );
+    }
+}
+
+#[test]
+fn arm64_darwin_entry_rejects_invalid_runtime_locations() {
+    use crate::a64::macho::link_entry;
+
+    for (mutate, name) in [
+        // 状态区必须可写：__got 是 __DATA_CONST。
+        (
+            Box::new(|runtime: &mut crate::a64::macho::DarwinRuntime| {
+                runtime.runtime_state = at(2, 0);
+            }) as Box<dyn FnOnce(&mut crate::a64::macho::DarwinRuntime)>,
+            "runtime_state",
+        ),
+        (Box::new(|runtime| runtime.entry = at(0, 12)), "entry"),
+        (Box::new(|runtime| runtime.entry = at(0, 2)), "entry"),
+        (
+            Box::new(|runtime| runtime.fragment_base = at(0, 4)),
+            "fragment_base",
+        ),
+        (
+            Box::new(|runtime| runtime.gc_types = Some(at(7, 32))),
+            "gc_types",
+        ),
+    ] {
+        let (request, mut entry) = arm64_darwin_runtime_fixture();
+        let mut runtime = entry.runtime.unwrap();
+        mutate(&mut runtime);
+        entry.runtime = Some(runtime);
+        let error = link_entry(request, entry).unwrap_err();
+        assert!(
+            error.contains(&format!("invalid arm64 Mach-O {name} location")),
+            "{name}: {error}"
         );
     }
 }

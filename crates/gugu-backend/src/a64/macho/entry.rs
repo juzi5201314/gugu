@@ -208,37 +208,57 @@ fn validate_entry(request: &MachORequest, entry: DarwinEntry) -> Result<(), Stri
             ("coroutine_enter", runtime.coroutine_enter),
             ("main_return", runtime.main_return),
         ] {
-            let valid = request
-                .sections
-                .get(at.section)
-                .is_some_and(|section| matches!(section.content, SectionContent::Code(_)));
+            let valid = request.sections.get(at.section).is_some_and(|section| {
+                matches!(section.content, SectionContent::Code(_))
+                    && at.offset % 4 == 0
+                    && at.offset < section.content.size()
+            });
             if !valid {
                 return Err(format!("invalid arm64 Mach-O {name} location {at:?}"));
             }
         }
-        for (name, at, size) in [
+        let valid = request
+            .sections
+            .get(runtime.fragment_base.section)
+            .is_some_and(|section| {
+                matches!(section.content, SectionContent::Code(_))
+                    && runtime.fragment_base.offset == 0
+            });
+        if !valid {
+            return Err(format!(
+                "invalid arm64 Mach-O fragment_base location {:?}",
+                runtime.fragment_base
+            ));
+        }
+        for (name, at, size, writable) in [
             (
                 "runtime_state",
                 runtime.runtime_state,
                 crate::runtime::entry::state::BYTES,
+                true,
             ),
-            ("stackmap", runtime.stackmap, 0),
-            ("unwind", runtime.unwind, 0),
-            ("fragment_base", runtime.fragment_base, 0),
+            ("stackmap", runtime.stackmap, 0, false),
+            ("unwind", runtime.unwind, 0, false),
         ] {
             let valid = request.sections.get(at.section).is_some_and(|section| {
-                at.offset
-                    .checked_add(size)
-                    .is_some_and(|end| end <= section.content.size())
+                (!writable || section.segment == Segment::Data)
+                    && at
+                        .offset
+                        .checked_add(size)
+                        .is_some_and(|end| end <= section.content.size())
             });
             if !valid {
                 return Err(format!("invalid arm64 Mach-O {name} location {at:?}"));
             }
         }
         for (name, at) in [("gc_types", runtime.gc_types), ("gc_meta", runtime.gc_meta)] {
-            if let Some(at) = at
-                && request.sections.get(at.section).is_none()
-            {
+            let valid = at.is_none_or(|at| {
+                request
+                    .sections
+                    .get(at.section)
+                    .is_some_and(|section| at.offset <= section.content.size())
+            });
+            if !valid {
                 return Err(format!("invalid arm64 Mach-O {name} location {at:?}"));
             }
         }
