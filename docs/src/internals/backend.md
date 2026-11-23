@@ -777,8 +777,10 @@ TLS 与普通 global 同形落 `__bss` 零初始化块（mangle 不消费 thread
 所有者绑定仍是 runtime 层 coroutine_locals 的职责，world 不再整类拒绝。
 `a64::program::build` 消费该 catalog：`runtime_definitions(platform)` 与四个启动保留区
 （`__gugu_a64_payload`/`__gugu_a64_initial_slot`/`__gugu_a64_processor` 4KiB 对齐零初始化
-页/`__gugu_a64_runtime_state`）、可选 `__gugu_a64_gc_types`/`__gugu_a64_gc_meta` 数据段和
-`runtime_imports(platform)` 一起交给 `world::build_runtime`；随后 Darwin 走
+页/`__gugu_a64_runtime_state`）和 `runtime_imports(platform)` 一起交给
+`world::build_runtime`；非空的 `__gugu_a64_gc_types`/`__gugu_a64_gc_meta` 在装配时各自
+独占一个只读节（与 `__gugu_maps`/`__gugu_cfa` 同法，Mach-O 名为 `__gugutyp`/`__ggmeta`），
+使载荷的长度字段精确等于 blob 大小，不吞掉共享 `__const` 的后续常量。随后 Darwin 走
 `world.macho_request` + `macho::link_entry(DarwinRuntime)`，Linux 走新加的
 `world.elf_request`（经 world 符号表解析指令重定位目标、数据指针转 RELATIVE）+
 `elf::link_entry_dynamic(LinuxRuntime)`，`Import::slot` 取 `linux_import_slot_symbol` 的

@@ -17,7 +17,7 @@ use super::{
 use crate::{
     late::universe::TypeUniverse,
     lir::body::Body,
-    macho::{Location, SectionContent, Segment},
+    macho::{Location, Section, SectionContent, Segment},
     runtime::{
         entry::{INITIAL_SLOT_BYTES, Rt0Payload, state},
         processor::PROCESSOR_PAGE_BYTES,
@@ -73,7 +73,7 @@ pub struct Program {
     pub image: Vec<u8>,
 }
 
-fn storage(request: &ProgramRequest<'_>) -> Vec<Definition> {
+fn storage() -> Vec<Definition> {
     let data = |symbol: &str, bytes: Vec<u8>| Definition {
         symbol: symbol.into(),
         align: 8,
@@ -90,26 +90,13 @@ fn storage(request: &ProgramRequest<'_>) -> Vec<Definition> {
         relocations: vec![],
         pointers: vec![],
     };
-    let mut definitions = vec![
+    vec![
         data(PAYLOAD, vec![0; Rt0Payload::bytes() as usize]),
         data(INITIAL_SLOT, vec![0; INITIAL_SLOT_BYTES as usize]),
         // `LogicalProcessor` 页必须是 4KiB 对齐的零初始化区。
         zero(PROCESSOR, PROCESSOR_PAGE_BYTES as u64, 4096),
         zero(RUNTIME_STATE, state::BYTES, 8),
-    ];
-    for (symbol, bytes) in [(GC_TYPES, request.gc_types), (GC_META, request.gc_meta)] {
-        if !bytes.is_empty() {
-            definitions.push(Definition {
-                symbol: symbol.into(),
-                align: 8,
-                segment: Segment::DataConst,
-                content: SectionContent::Data(bytes.to_vec()),
-                relocations: vec![],
-                pointers: vec![],
-            });
-        }
-    }
-    definitions
+    ]
 }
 
 fn bindings() -> RuntimeBindings {
@@ -126,10 +113,10 @@ fn bindings() -> RuntimeBindings {
 fn assemble(request: &ProgramRequest<'_>) -> Result<World, Error> {
     let definitions = runtime_definitions(request.platform)
         .into_iter()
-        .chain(storage(request))
+        .chain(storage())
         .collect::<Vec<_>>();
     let imports = runtime_imports(request.platform);
-    build_runtime(
+    let mut world = build_runtime(
         BuildRequest {
             bodies: request.bodies,
             entry: request.entry,
@@ -140,7 +127,30 @@ fn assemble(request: &ProgramRequest<'_>) -> Result<World, Error> {
             universe: request.universe,
         },
         request.catalog,
-    )
+    )?;
+    // 两类 GC 元数据各独占一个只读节（与 `__gugu_maps`/`__gugu_cfa` 同法）：载荷的
+    // 长度字段按节尾截断，共享 `__const` 会把后续常量误计入元数据长度。
+    for (name, symbol, bytes) in [
+        ("__gugutyp", GC_TYPES, request.gc_types),
+        ("__ggmeta", GC_META, request.gc_meta),
+    ] {
+        if bytes.is_empty() {
+            continue;
+        }
+        let at = Location {
+            section: world.sections.len(),
+            offset: 0,
+        };
+        world.sections.push(Section {
+            segment: Segment::DataConst,
+            name: name.into(),
+            align: 8,
+            content: SectionContent::Data(bytes.to_vec()),
+        });
+        world.symbols.insert(symbol.into(), at);
+        world.sizes.insert(symbol.into(), bytes.len() as u64);
+    }
+    Ok(world)
 }
 
 fn symbol(world: &World, name: &str) -> Result<Location, Error> {
