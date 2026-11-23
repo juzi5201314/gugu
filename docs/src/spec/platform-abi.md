@@ -490,6 +490,8 @@ rt0 和 runtime 通过 PE 导入表调用目标注册表允许的系统 DLL；�
 
 调用方可以通过 `DarwinRuntime` 启动契约让链接器补齐其余启动数据：参数块写入 main `entry`、可写 `runtime_state` 和 `coroutine_enter` 的镜像相对地址，载荷写入 `main_entry`、`runtime_state`、`main_return`、`stackmap`、`unwind`、`gc_types`、`gc_meta` 与各自从指定偏移到节尾的字节数，以及 `fragment_base`（代码节起点的相对地址）。`RELOC_TABLE`、`PROTECT_*` 参数保持 0——镜像重基址由 dyld chained fixups 完成；不存在的 GC blob 记为指针和长度皆 0。`runtime_state` 必须位于 `__DATA` 可写节且容下运行期状态区；`entry`、`coroutine_enter`、`main_return` 必须是代码节内 4 字节对齐且不越界的地址；`fragment_base` 必须是代码节偏移 0 的起点；不提供该契约时载荷只写版本号与初始槽，维持验证探针形态。
 
+arm64 指令重定位随 Mach-O 请求以记录传递（站点与目标均为节内偏移），在链接的最终布局上按指令形式编码；构造请求时必须先把附加偏移并入目标节内偏移，记录不再单独携带，写出时不再另行累加。非 arm64 的 Mach-O 请求必须携带空的指令重定位列表。
+
 rt0 和运行时通过 libSystem 调用 Darwin 接口；文件系统、套接字、进程和信号订阅使用同一标准库语义，但原生结构、信号编号和错误码不与 Linux 互换。普通信号由 kqueue 收集；订阅期间的原生处理器不执行用户代码，也不把忽略信号的 disposition 传给通过 exec 启动的子进程。
 
 内部 arm64 文件适配器在原生栈上处理描述符、目录和路径请求。传给 `open` 和文件描述符 `fcntl` 的可变整数实参位于栈上，而非固定参数寄存器；`stat`、`lstat`、`fstat`、`opendir` 和 `readdir` 绑定到 arm64 的无后缀 libSystem 导出。失败把 Darwin errno 写回请求；适配器不负责调度或发布请求完成。
