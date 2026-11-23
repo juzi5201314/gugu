@@ -363,13 +363,13 @@ fn unsafe_call_and_checked_entry_rejections_are_contextual() {
             "{error}"
         );
     }
-    for target in [CallTarget::External {
-        key: [0; 32],
-        name: "foreign".into(),
-    }] {
+    {
         let mut f = caller(&[], &[]);
         let mut call = safe.clone();
-        call.target = target;
+        call.target = CallTarget::External {
+            key: [0; 32],
+            name: "foreign".into(),
+        };
         f.op(Op::Call(call), &[], &[]);
         let error = codegen::compile_function(&f.body).unwrap_err().0;
         assert!(

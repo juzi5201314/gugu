@@ -25,11 +25,11 @@ fn roots_constant(name: &str) -> u64 {
         let literal = prefixes
             .iter()
             .find_map(|prefix| trimmed.strip_prefix(prefix.as_str()));
-        if let Some(literal) = literal {
-            if !gated_a64 {
-                return super::tests::parse_uint_literal(literal)
-                    .unwrap_or_else(|| panic!("{name} 不是可解析的无符号字面量：{literal}"));
-            }
+        if let Some(literal) = literal
+            && !gated_a64
+        {
+            return super::tests::parse_uint_literal(literal)
+                .unwrap_or_else(|| panic!("{name} 不是可解析的无符号字面量：{literal}"));
         }
         gated_a64 = trimmed == "#[cfg(arch = \"aarch64\")]";
     }
