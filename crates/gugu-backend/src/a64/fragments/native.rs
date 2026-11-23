@@ -14,8 +14,8 @@ use crate::{
         macho::import_stub_symbol,
         reg::{Reg, Width},
     },
-    runtime::foreign_schema as bridge,
     macho::LIB_SYSTEM,
+    runtime::foreign_schema as bridge,
     x64::mangle,
 };
 
@@ -146,12 +146,30 @@ fn linux_foreign_start(b: &mut Builder) {
     let done = cond(b, NE);
     b.add(Reg::x(0), SP, 0);
     // 栈底 = 顶 − 64KiB；65536 = 1 << 16 走 Wide 移位，立即数车道放不进 imm12。
-    b.emit("movz.X", [reg(A), Operand::Wide { imm16: 1, shift: 16 }]);
+    b.emit(
+        "movz.X",
+        [
+            reg(A),
+            Operand::Wide {
+                imm16: 1,
+                shift: 16,
+            },
+        ],
+    );
     b.emit(
         "sub.X.shift",
         [reg(Reg::x(1)), reg(Reg::x(20)), reg(A), unshifted()],
     );
-    b.emit("movz.X", [reg(Reg::x(2)), Operand::Wide { imm16: 1, shift: 16 }]);
+    b.emit(
+        "movz.X",
+        [
+            reg(Reg::x(2)),
+            Operand::Wide {
+                imm16: 1,
+                shift: 16,
+            },
+        ],
+    );
     linux_call(b, "pthread_attr_setstack");
     compare(b, Reg::x(0), 0);
     let destroy = cond(b, NE);
@@ -295,7 +313,10 @@ fn linux_clock(clock_id: u16) -> Fragment {
             },
         ],
     );
-    b.emit("madd.X", [reg(Reg::x(0)), reg(Reg::x(0)), reg(Reg::x(10)), reg(C)]);
+    b.emit(
+        "madd.X",
+        [reg(Reg::x(0)), reg(Reg::x(0)), reg(Reg::x(10)), reg(C)],
+    );
     b.add(SP, SP, 16);
     b.ret();
     patch(&mut b, failed, NE);
@@ -345,10 +366,7 @@ pub fn linux_parallelism_probe() -> Fragment {
     load(&mut b, B, SP, 0);
     b.emit("movz.X", [reg(Reg::x(0)), movz(0)]);
     let bits = b.offset();
-    b.emit(
-        "ands.X.imm",
-        [reg(XZR), reg(B), Operand::Bits(1)],
-    );
+    b.emit("ands.X.imm", [reg(XZR), reg(B), Operand::Bits(1)]);
     let clear = cond(&mut b, EQ);
     b.emit("add.X.imm", [reg(Reg::x(0)), reg(Reg::x(0)), add_imm(1)]);
     patch(&mut b, clear, EQ);
@@ -382,7 +400,6 @@ pub fn darwin_parallelism_probe() -> Fragment {
     b.ret();
     b.finish()
 }
-
 
 // ---- startup_call / environment_symbol ----
 
@@ -587,8 +604,14 @@ pub fn stack_copy_raw() -> Fragment {
     let body = b.offset();
     b.emit("cbz.X", [reg(C), next()]);
     let done = b.offset();
-    b.emit("ldrb.W.Post", [reg(Reg::w(12)), mem(A, AddressMode::Post(1))]);
-    b.emit("strb.W.Post", [reg(Reg::w(12)), mem(B, AddressMode::Post(1))]);
+    b.emit(
+        "ldrb.W.Post",
+        [reg(Reg::w(12)), mem(A, AddressMode::Post(1))],
+    );
+    b.emit(
+        "strb.W.Post",
+        [reg(Reg::w(12)), mem(B, AddressMode::Post(1))],
+    );
     b.emit("sub.X.imm", [reg(C), reg(C), add_imm(1)]);
     b.branch("b", &[], body);
     patch(&mut b, done, EQ);

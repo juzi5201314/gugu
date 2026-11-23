@@ -160,8 +160,7 @@ impl Fixture {
             .collect::<Vec<_>>();
         let arguments = self.args(args);
         // `results` 是 values 表的连续区间（刚 push 的 output 值），不是 operands 区间。
-        let results = (self.body.values.len() - output.len()) as u32
-            ..self.body.values.len() as u32;
+        let results = (self.body.values.len() - output.len()) as u32..self.body.values.len() as u32;
         let memory = if op.has_memory() {
             let next = self.value(
                 Type::Mem,

@@ -44,7 +44,10 @@ fn aarch64_linux_emits_elf_image() {
     );
     // ELF e_machine 字段（offset 18）必须是 EM_AARCH64（183）。
     let machine = u16::from_le_bytes(program.image[18..20].try_into().expect("e_machine 字段"));
-    assert_eq!(machine, 183, "aarch64-linux 镜像的 e_machine 必须是 EM_AARCH64");
+    assert_eq!(
+        machine, 183,
+        "aarch64-linux 镜像的 e_machine 必须是 EM_AARCH64"
+    );
     let plan = output.image_plan().expect("可执行编译必须有镜像计划");
     assert_eq!(&plan.linux_image()[..4], &[0x7f, 0x45, 0x4c, 0x46]);
     assert_eq!(
@@ -65,7 +68,6 @@ fn aarch64_targets_have_distinct_action_keys() {
         "aarch64-macos 与 aarch64-linux 的 action key 必须不同"
     );
 }
-
 
 /// 使用 std runtime（println → report_write glue、堆分配、格式化）的完整程序
 /// 在 aarch64-linux 上端到端装配成功。

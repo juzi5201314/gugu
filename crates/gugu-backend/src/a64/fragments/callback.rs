@@ -76,10 +76,7 @@ fn compare_regs(b: &mut Builder, left: Reg, right: Reg) {
 }
 
 fn compare(b: &mut Builder, left: Reg, value: i32) {
-    b.emit(
-        "subs.X.imm",
-        [reg(XZR), reg(left), add_imm(value as usize)],
-    );
+    b.emit("subs.X.imm", [reg(XZR), reg(left), add_imm(value as usize)]);
 }
 
 /// `__gugu_callback_control` 返回运行时保留区中的回调控制块；不依赖 managed 寄存器。
@@ -107,7 +104,10 @@ pub fn callback_queue() -> Fragment {
     let busy = b.offset();
     b.emit("cbnz.X", [reg(A), next()]);
     b.emit("movz.X", [reg(B), movz(1)]);
-    b.emit("stlxr.X", [reg(Reg::w(14)), reg(B), mem(CTL, AddressMode::Base)]);
+    b.emit(
+        "stlxr.X",
+        [reg(Reg::w(14)), reg(B), mem(CTL, AddressMode::Base)],
+    );
     b.branch("cbnz.X", &[reg(C)], retry);
     let mut cases = Vec::new();
     for action in 0..6i32 {
@@ -124,6 +124,7 @@ pub fn callback_queue() -> Fragment {
     invalid.push(when(&mut b, NE));
     store(&mut b, CTL, q::PROCESSOR, NODE);
     set(&mut b, CTL, q::ACCEPTING, 1);
+    b.emit("movz.X", [reg(Reg::x(0)), movz(q::OK as u16)]);
     done.push(jump(&mut b));
     // SUBMIT。
     land(&mut b, cases[q::SUBMIT as usize]);

@@ -231,7 +231,10 @@ pub const BLOCK_RECORD_COMMITTED: uint = 1
 pub const LARGE_MAPPING_TABLE_BYTES: uint = 3072
 pub const LARGE_MAPPING_STATE_FREE: uint = 0
 pub const LARGE_MAPPING_STATE_ACTIVE: uint = 1
+#[cfg(not(all(os = "macos", arch = "aarch64")))]
 pub const LARGE_MAPPING_PAGE_BYTES: uint = 4096
+#[cfg(all(os = "macos", arch = "aarch64"))]
+pub const LARGE_MAPPING_PAGE_BYTES: uint = 16384
 pub const PROCESSOR_EDGE_SCRATCH_OFFSET: uint = 3560
 pub const EDGE_SCRATCH_BYTES: uint = 20480
 pub const EDGE_BUFFER_CAPACITY: uint = 512

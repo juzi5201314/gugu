@@ -174,7 +174,12 @@ impl Sections {
                 point.function = index;
             }
             let table = a64_unwind::decode(function.unwind)?;
-            tables.push(a64_unwind::encode(code[0], table.fp_offset, &table.sites, &table.landings)?);
+            tables.push(a64_unwind::encode(
+                code[0],
+                table.fp_offset,
+                &table.sites,
+                &table.landings,
+            )?);
             layouts.extend(code);
             points.extend(sites);
         }

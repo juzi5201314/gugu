@@ -7,6 +7,8 @@ fn main() {
     let target = match env::args().nth(2).as_deref() {
         Some("windows") => TargetName::X86_64Windows,
         Some("macos") => TargetName::X86_64Macos,
+        Some("aarch64-linux") => TargetName::Aarch64Linux,
+        Some("aarch64-macos") => TargetName::Aarch64Macos,
         _ => TargetName::X86_64Linux,
     };
     let text = fs::read_to_string(source).expect("读取手工输入");

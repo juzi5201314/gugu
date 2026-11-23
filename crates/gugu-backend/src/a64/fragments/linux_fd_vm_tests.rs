@@ -110,15 +110,24 @@ impl Vm {
                 "bl" => call(self, pc as u64),
                 "adr" => self.set(&args[0], jump(pc, &args[1]) as u64),
                 "adrp" => self.set(&args[0], jump(pc & !4095, &args[1]) as u64),
-                "cbnz.X" if self.get(&args[0]) != 0 => next = jump(pc, &args[1]),
-                "cbnz.X" => {}
+                "cbnz.X" | "cbnz.W" if self.get(&args[0]) != 0 => next = jump(pc, &args[1]),
+                "cbnz.X" | "cbnz.W" => {}
                 "brk" => panic!("native protocol trap"),
                 "ret" => {
                     assert_eq!(self.registers[19..31], saved);
                     assert_eq!(self.registers[31], STACK);
                     return self.registers[0];
                 }
-                key if key.starts_with("ldr") || key.starts_with("str") => self.transfer(key, args),
+                key if key.starts_with("ldr")
+                    || key.starts_with("str")
+                    || key.starts_with("ldaxr")
+                    || key.starts_with("stlxr")
+                    || key.starts_with("stlr")
+                    || key.starts_with("ldxr")
+                    || key.starts_with("stxr") =>
+                {
+                    self.transfer(key, args)
+                }
                 key => self.calculate(key, args),
             }
             pc = next;
@@ -140,19 +149,25 @@ impl Vm {
     }
 
     fn transfer(&mut self, key: &str, args: &[Operand]) {
-        let Operand::Address(Address { base, ref mode }) = args[1] else {
+        let Operand::Address(Address { base, mode }) = args
+            .iter()
+            .find(|operand| matches!(operand, Operand::Address(_)))
+            .unwrap()
+        else {
             panic!("address")
         };
-        let (AddressMode::Unsigned(offset) | AddressMode::Unscaled(offset)) = mode else {
-            panic!("address mode")
+        let offset = match mode {
+            AddressMode::Unsigned(offset) | AddressMode::Unscaled(offset) => *offset,
+            AddressMode::Base => 0,
+            _ => panic!("address mode"),
         };
-        let address = self.get(&reg(base)).wrapping_add(*offset as u64);
+        let address = self.get(&reg(*base)).wrapping_add(offset as u64);
         let size = if key.contains(".W.") || key.starts_with("ldrsw.") {
             4
         } else {
             8
         };
-        if key.starts_with("ldr") {
+        if key.starts_with("ldr") || key.starts_with("ldaxr") || key.starts_with("ldxr") {
             let value = self.read(address, size);
             self.set(
                 &args[0],
@@ -162,6 +177,9 @@ impl Vm {
                     value
                 },
             );
+        } else if key.starts_with("stlxr") || key.starts_with("stxr") {
+            self.put(address, self.get(&args[1]), size);
+            self.set(&args[0], 0);
         } else {
             self.put(address, self.get(&args[0]), size);
         }
@@ -174,6 +192,12 @@ impl Vm {
             "add.X.shift" | "sub.X.shift" | "subs.X.shift" | "adds.X.shift" | "adds.X.imm"
             | "subs.X.imm" => self.arithmetic(key, args),
             "and.X.shift" => self.set(&args[0], self.get(&args[1]) & self.get(&args[2])),
+            "orr.X.imm" | "orr.W.imm" => {
+                let Operand::Bits(mask) = args[2] else {
+                    panic!("bits")
+                };
+                self.set(&args[0], self.get(&args[1]) | mask);
+            }
             "movz.X" | "movn.X" | "movk.X" => {
                 let Operand::Wide { imm16, shift } = args[1] else {
                     panic!("wide")

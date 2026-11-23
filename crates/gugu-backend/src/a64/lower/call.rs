@@ -145,9 +145,7 @@ pub(crate) fn lower_mode(
     if call.captures_arguments && !matches!(call.target, CallTarget::Runtime(_))
         || !call.foreign_arguments.is_empty()
     {
-        return Err(crate::a64::error(
-            "capturing/foreign call unsupported",
-        ));
+        return Err(crate::a64::error("capturing/foreign call unsupported"));
     }
     // by_value/sret 参数是 caller 侧临时副本/结果缓冲的地址：一个 Ptr 车道，聚合读写
     // 由 LIR 自身完成，与 x64 内部 ABI 同层语义。

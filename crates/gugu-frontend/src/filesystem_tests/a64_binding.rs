@@ -241,7 +241,9 @@ fn review_image(slot_count: u32, scan_allowed: bool) -> Sections {
         &[a64_unwind::Site {
             pc_offset: 16,
             entry: false,
-        }], &[])
+        }],
+        &[],
+    )
     .unwrap();
     let directory = Sections::encode(&[Function {
         code_rva: 0,
@@ -441,7 +443,9 @@ fn fragment_size(roots: bool, frame_size: u32) -> (Vec<u8>, Vec<u8>) {
                     pc_offset: 16,
                     entry: false,
                 },
-            ], &[])
+            ],
+            &[],
+        )
         .unwrap(),
     )
 }

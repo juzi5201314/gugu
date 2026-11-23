@@ -352,8 +352,7 @@ fn terminator(
             } else {
                 landing_block.0
             };
-            let result_ids: Vec<ValueId> =
-                (results.start..results.end).map(ValueId).collect();
+            let result_ids: Vec<ValueId> = (results.start..results.end).map(ValueId).collect();
             lower::call::lower_mode(
                 body,
                 call,
@@ -573,7 +572,9 @@ fn validate(body: &Body, leaf: bool, runtime: bool) -> Result<(), Error> {
             .iter()
             .any(|p| p.value.index() >= body.values.len())
         {
-            return Err(Error(format!("block {index}: parameter value out of range")));
+            return Err(Error(format!(
+                "block {index}: parameter value out of range"
+            )));
         }
         let edge_valid = |id: crate::lir::body::EdgeId| {
             body.edges
@@ -630,14 +631,8 @@ fn validate(body: &Body, leaf: bool, runtime: bool) -> Result<(), Error> {
                     && kind(body, memory.output, Type::Mem)
                     && edge_valid(*normal)
                     && edge_valid(*unwind)
-                    && body
-                        .edges
-                        .get(unwind.index())
-                        .is_some_and(|e| e.unwind)
-                    && body
-                        .edges
-                        .get(normal.index())
-                        .is_some_and(|e| !e.unwind)
+                    && body.edges.get(unwind.index()).is_some_and(|e| e.unwind)
+                    && body.edges.get(normal.index()).is_some_and(|e| !e.unwind)
             }
             Terminator::ResumePanic { memory } => kind(body, *memory, Type::Mem),
             _ => true,

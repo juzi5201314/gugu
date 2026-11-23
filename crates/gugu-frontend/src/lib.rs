@@ -774,7 +774,7 @@ impl Compiler {
                 lir: None,
                 raw_contract: None,
                 x64: None,
-                    a64: None,
+                a64: None,
                 action_key: None,
                 docs: Some(frontend.docs),
             };
@@ -837,7 +837,7 @@ impl Compiler {
                         lir: Some(lir),
                         raw_contract: None,
                         x64: None,
-                    a64: None,
+                        a64: None,
                         action_key: None,
                         docs: Some(frontend.docs),
                     };
@@ -994,13 +994,7 @@ impl Compiler {
                             program.world.relocations.len() + program.world.pointers.len()
                         ),
                     );
-                    (
-                        None,
-                        Some(A64Codegen {
-                            program,
-                            glues,
-                        }),
-                    )
+                    (None, Some(A64Codegen { program, glues }))
                 }
                 Err(errors) => {
                     for error in errors {
@@ -1227,9 +1221,9 @@ struct CodegenKey {
 /// aarch64 复用 a64 lowering 的同一分派（见 `a64::oracle::A64Oracle`）。
 fn target_oracle(target: TargetName) -> Box<dyn lir::target::TargetOracle> {
     match target.descriptor().arch {
-        crate::target::Architecture::Aarch64 => Box::new(backend::a64::oracle::A64Oracle::new(
-            target.name(),
-        )),
+        crate::target::Architecture::Aarch64 => {
+            Box::new(backend::a64::oracle::A64Oracle::new(target.name()))
+        }
         _ => Box::new(backend::x64::oracle::X64Oracle::new(
             target.descriptor().cpu_baseline,
         )),

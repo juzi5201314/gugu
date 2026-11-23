@@ -134,11 +134,7 @@ fn probe(
     source: &SourceInfo,
 ) -> (Body, Instruction) {
     let sentinel = ValueType::scalar(Type::I64);
-    let operand_top = operands
-        .iter()
-        .map(|id| id.index() + 1)
-        .max()
-        .unwrap_or(0);
+    let operand_top = operands.iter().map(|id| id.index() + 1).max().unwrap_or(0);
     // 值定义依赖型约束（如 Integer div 要求静态非零除数）不在 oracle API 面上：
     // legality 按「类型组合有没有序列」回答，操作数呈现为 IConst 定义即可走真实路径；
     // 变量除数等真实缺口在 codegen 以同一错误拒绝。
@@ -160,7 +156,11 @@ fn probe(
             let id = ValueId(crate::lir::body::id(index));
             Value {
                 definition: sentinel_definition(id),
-                kind: if operands.contains(&id) { kind(id) } else { sentinel },
+                kind: if operands.contains(&id) {
+                    kind(id)
+                } else {
+                    sentinel
+                },
                 origin: Origin::None,
                 uses: 0..0,
             }

@@ -35,7 +35,9 @@ fn fragment(root_word: u32) -> (Vec<u8>, Vec<u8>) {
             &[a64_unwind::Site {
                 pc_offset: 16,
                 entry: false,
-            }], &[])
+            }],
+            &[],
+        )
         .unwrap(),
     )
 }

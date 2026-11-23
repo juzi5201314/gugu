@@ -48,13 +48,12 @@ pub(crate) fn logical(body: &Body) -> Result<Vec<LogicalSafepoint>, Error> {
             Definition::Instruction { instruction, .. } => {
                 body.instructions.get(instruction.index()).is_some()
             }
-            Definition::Invoke { block, result } => body
-                .blocks
-                .get(block.index())
-                .is_some_and(|b| {
+            Definition::Invoke { block, result } => {
+                body.blocks.get(block.index()).is_some_and(|b| {
                     matches!(&b.terminator, crate::lir::body::Terminator::Invoke { results, .. }
                         if result <= results.end - results.start)
-                }),
+                })
+            }
         };
         if !valid {
             return Err(super::error("invalid value definition for logical roots"));
@@ -232,19 +231,19 @@ pub(crate) fn build(
             ));
         }
         // 逐根初始化条目按帧内字下标与初始化字节严格递增（stackmap_codec 编码契约）。
-        map.typed
-            .sort_by_key(|root| (root.word, root.init_byte));
+        map.typed.sort_by_key(|root| (root.word, root.init_byte));
         points.push((0, map));
     }
     let landings = sites
         .iter()
         .filter_map(|site| {
-            site.landing.map(|(landing_pc, cleanup)| a64_unwind::Landing {
-                pc_start: site.pc_offset - 4,
-                pc_end: site.pc_offset,
-                landing_pc,
-                cleanup,
-            })
+            site.landing
+                .map(|(landing_pc, cleanup)| a64_unwind::Landing {
+                    pc_start: site.pc_offset - 4,
+                    pc_end: site.pc_offset,
+                    landing_pc,
+                    cleanup,
+                })
         })
         .collect::<Vec<_>>();
     let code = runtime::CodeLayout {
@@ -269,8 +268,7 @@ pub(crate) fn build(
             entry: site.kind == SiteKind::MorestackEntry,
         })
         .collect::<Vec<_>>();
-    let unwind =
-        a64_unwind::encode(code, frame.record, &unwind_sites, &landings).map_err(fail)?;
+    let unwind = a64_unwind::encode(code, frame.record, &unwind_sites, &landings).map_err(fail)?;
     a64_unwind::decode(&unwind)
         .and_then(|table| table.verify_joint(&runtime::decode_tables(&stackmaps)?))
         .map_err(fail)?;
@@ -352,11 +350,8 @@ fn argument_offset(
     if call.kind != crate::gir::body::CallKind::Managed {
         return Ok(None);
     }
-    let (locations, _) = super::abi::arguments(
-        arguments
-            .iter()
-            .map(|id| body.values[id.index()].kind.ty),
-    )?;
+    let (locations, _) =
+        super::abi::arguments(arguments.iter().map(|id| body.values[id.index()].kind.ty))?;
     Ok(match locations.get(index) {
         Some(super::abi::Argument::Stack(offset)) => Some(*offset),
         _ => None,

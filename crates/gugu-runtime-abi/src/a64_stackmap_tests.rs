@@ -320,7 +320,9 @@ fn a64_cfa_decoder_rejects_corruption_and_accepts_empty_sites() {
                 pc_offset: 12,
                 entry: false,
             },
-        ], &[])
+        ],
+        &[],
+    )
     .unwrap();
     for length in [0, 7, 39, bytes.len() - 1] {
         assert!(a64_unwind::decode(&bytes[..length]).is_err());

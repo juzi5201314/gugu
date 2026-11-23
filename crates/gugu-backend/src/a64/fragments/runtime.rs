@@ -16,7 +16,10 @@ use crate::runtime::entry::state;
 use crate::runtime::processor::{PROCESSOR_STATE_OFFSET, PROCESSOR_SYSTEM_SLOT_OFFSET};
 
 use super::linux_syscall::syscall;
-use super::{AddressMode, Builder, Fragment, HOT, LR, PROCESSOR, SP, add_imm, condition, imm, mem, movz, next, reg};
+use super::{
+    AddressMode, Builder, Fragment, HOT, LR, PROCESSOR, SP, add_imm, condition, imm, mem, movz,
+    next, reg,
+};
 
 /// main/协程返回登记的调度原因：2 = 协程返回（与 x64 哨兵同值）。
 const REASON_COROUTINE_RETURN: u16 = 2;

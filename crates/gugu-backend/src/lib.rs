@@ -477,9 +477,7 @@ fn a64_stats(
     let world = &program.world;
     let section_bytes = |at: crate::macho::Location| -> Vec<u8> {
         match &world.sections[at.section].content {
-            crate::macho::SectionContent::Data(bytes) => {
-                bytes[at.offset as usize..].to_vec()
-            }
+            crate::macho::SectionContent::Data(bytes) => bytes[at.offset as usize..].to_vec(),
             _ => Vec::new(),
         }
     };

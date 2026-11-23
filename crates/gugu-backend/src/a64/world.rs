@@ -364,9 +364,9 @@ fn build_with_catalog(
                     .ok_or_else(|| fail("A64 type descriptor outside the frozen table"))?;
                 world.type_symbols.push((
                     name,
-                    TypeSlot::Descriptor(
-                        crate::runtime::gc_metadata_section::descriptor_offset(type_id),
-                    ),
+                    TypeSlot::Descriptor(crate::runtime::gc_metadata_section::descriptor_offset(
+                        type_id,
+                    )),
                 ));
                 continue;
             }

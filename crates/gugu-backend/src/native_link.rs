@@ -102,11 +102,7 @@ impl NativeLink {
             })
         });
         if resolver {
-            let library = if is_linux {
-                "libc.so.6"
-            } else {
-                "ws2_32.dll"
-            };
+            let library = if is_linux { "libc.so.6" } else { "ws2_32.dll" };
             for symbol in ["getaddrinfo", "freeaddrinfo"] {
                 self.add_system_import(library, symbol);
             }
@@ -306,11 +302,10 @@ impl NativeLink {
         let dynamic_linux = matches!(
             target.descriptor().os,
             crate::target::OperatingSystem::Linux
-        )
-            && matches!(
-                target.descriptor().object_format,
-                crate::target::ObjectFormat::Elf64
-            );
+        ) && matches!(
+            target.descriptor().object_format,
+            crate::target::ObjectFormat::Elf64
+        );
         match (
             dynamic_linux,
             target,

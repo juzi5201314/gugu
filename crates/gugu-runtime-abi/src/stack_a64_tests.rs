@@ -58,7 +58,9 @@ fn metadata(rva: u64, entry: bool, gate: Option<bool>) -> FrameMetadata {
         &[a64_unwind::Site {
             pc_offset: 8,
             entry,
-        }], &[])
+        }],
+        &[],
+    )
     .unwrap();
     FrameMetadata::decode(&maps, &unwind).unwrap()
 }
@@ -324,7 +326,9 @@ fn image_code_bias_and_joint_metadata_are_checked_before_walking() {
         &[a64_unwind::Site {
             pc_offset: 8,
             entry: false,
-        }], &[])
+        }],
+        &[],
+    )
     .unwrap();
     let loaded = FrameMetadata::load(&maps, &unwind, 0x1000).unwrap();
     assert_eq!(loaded.maps.functions[0].code_rva, 0x1000);
@@ -351,7 +355,9 @@ fn image_code_bias_and_joint_metadata_are_checked_before_walking() {
         &[a64_unwind::Site {
             pc_offset: 8,
             entry: false,
-        }], &[])
+        }],
+        &[],
+    )
     .unwrap();
     assert!(FrameMetadata::decode(&maps, &wrong).is_err());
 }

@@ -173,9 +173,9 @@ fn reserve() -> Fragment {
     b.finish()
 }
 
-/// 校验 x0/x1 并发出过量预留的 mmap。
-/// x19 = bytes, x20 = align, x23 = bytes + align；返回非法输入分支（保留各自条件）与 mmap
-/// 失败分支偏移（EQ 待补）。
+/// 校验 x0/x1，把请求长度取整到宿主 OS 页后发出过量预留的 mmap。
+/// x19 = 页取整后的 bytes, x20 = align, x23 = bytes + align；返回非法输入分支（保留各自
+/// 条件）与 mmap 失败分支偏移（EQ 待补）。
 fn map(b: &mut Builder) -> (Vec<(u32, u8)>, u32) {
     b.add(Reg::x(19), RESULT, 0);
     b.add(Reg::x(20), Reg::x(1), 0);
@@ -188,6 +188,23 @@ fn map(b: &mut Builder) -> (Vec<(u32, u8)>, u32) {
     binary(b, "and.X.shift", 10, 20, 9);
     compare(b, Reg::x(10), 0);
     invalid.push((branch_cond(b, NE), NE));
+    // 契约要求先把请求长度取整到宿主 OS 页（arm64 Darwin 为 16 KiB，
+    // 由 getpagesize 取得，不硬编码），再做过量预留的 mmap；取整溢出按非法输入处理。
+    call_c(b, "getpagesize");
+    b.add(Reg::x(9), RESULT, 0);
+    b.emit("sub.X.imm", [reg(Reg::x(10)), reg(Reg::x(9)), add_imm(1)]);
+    b.emit(
+        "adds.X.shift",
+        [
+            reg(Reg::x(19)),
+            reg(Reg::x(19)),
+            reg(Reg::x(10)),
+            unshifted(),
+        ],
+    );
+    invalid.push((branch_cond(b, CS), CS));
+    negate(b, Reg::x(9), Reg::x(9));
+    binary(b, "and.X.shift", 19, 19, 9);
     b.emit(
         "adds.X.shift",
         [

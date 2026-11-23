@@ -130,8 +130,14 @@ pub fn runtime_definitions(platform: Platform) -> Vec<Definition> {
         Definition::fragment(rt("cage_control"), fragments::cage_control()),
         Definition::fragment(rt("callback_control"), fragments::callback_control()),
         Definition::fragment(rt("callback_queue"), fragments::callback_queue()),
-        Definition::fragment(rt("callback_file_worker"), fragments::callback_file_worker()),
-        Definition::fragment(rt("process_native_worker"), fragments::process_native_worker()),
+        Definition::fragment(
+            rt("callback_file_worker"),
+            fragments::callback_file_worker(),
+        ),
+        Definition::fragment(
+            rt("process_native_worker"),
+            fragments::process_native_worker(),
+        ),
         Definition::fragment(rt("stack_read_word"), fragments::stack_read_word()),
         Definition::fragment(rt("stack_copy_raw"), fragments::stack_copy_raw()),
     ];

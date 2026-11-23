@@ -320,7 +320,13 @@ CallReturn 或 SuspendResume；尤其不能因解析了 select 的目标而丢�
 `type_id`、字节数、对齐和 `flags = compressed | placement 码 << 1`；placement 码
 TurnRegion=0、LocalHeap=1、SharedHeap=2、Resource=3，其余位置必须显式拒绝；
 `type_id` 必须由冻结 type universe 按 descriptor 解析，不能编造。
-哨兵片段 ABI：`context_restore` 与返回尾巴的入口契约为 x0 = restore 上下文、
+状态区 +0 的 A64 邮箱（`A64MorestackMailbox`）与 x64 内联 context 的
+`MorestackMailbox` 不同构：scratch/mutator_context/system_context 均为指向
+非移动 owner 存储的指针，return_value 与 processor 保持在 +56/+64。
+内部 A64 的 `cold+8` 保存指向该协程 `A64ControlBlock` context 区的指针而
+非内联 context；新协程（含 main）经参数块 `COROUTINE_ENTER`（word 13）
+对应的片段以 `[code, pack]` 栈顶槽进入，不使用 x64 的栈顶 `main_return`
+哨兵。哨兵片段 ABI：`context_restore` 与返回尾巴的入口契约为 x0 = restore 上下文、
 x1 = hot 槽、x2 = processor，经 `context_switch + restore_offset` 进入；`current_slot`
 返回 x27；`process_exit`（Linux `exit_group`、Darwin libSystem `exit`）不返回；
 `main_return`/`coroutine_enter` 在恢复系统上下文前向 mailbox 写入 reason = 2
@@ -500,7 +506,7 @@ rt0 和运行时通过 libSystem 调用 Darwin 接口；文件系统、套接字
 
 Darwin 的对齐地址预留先将请求长度向上取整为整页，再裁剪对齐所需的额外地址空间；裁剪失败时不得报告预留成功。
 
-内部 arm64 Darwin 范围适配器在原生栈上通过 libSystem 执行平台范围操作：commit/unprotect 为保护位 `PROT_READ|PROT_WRITE`，guard 为 `PROT_NONE`，release 为 `munmap`，失败读取 Darwin errno 并返回其负值。decommit 以 `MAP_FIXED` 匿名 `PROT_NONE` 映射覆盖区间返回零页——Darwin 的 `MADV_DONTNEED` 不保证再次访问读到零内容；覆盖后的范围须重新 commit 才能访问。页大小取自 `getpagesize`，不硬编码宿主值。
+内部 arm64 Darwin 范围适配器在原生栈上通过 libSystem 执行平台范围操作：commit/unprotect 为保护位 `PROT_READ|PROT_WRITE`，guard 为 `PROT_NONE`，release 为 `munmap`，失败读取 Darwin errno 并返回其负值。decommit 以 `MAP_FIXED` 匿名 `PROT_NONE` 映射覆盖区间返回零页——Darwin 的 `MADV_DONTNEED` 不保证再次访问读到零内容；覆盖后的范围须重新 commit 才能访问。页大小取自 `getpagesize`，不硬编码宿主值；片段自身把请求长度向上舍入到该 OS 页边界，调用方仍提供页对齐的 base。
 
 内部 arm64 进程适配器在原生栈上通过 libSystem 创建进程及管道，并支持非阻塞观察、终止和管道 I/O。`posix_spawn` 及其文件动作直接返回错误码；其他入口在失败时读取 Darwin errno。管道两端设置 close-on-exec，父进程端设置非阻塞并抑制 SIGPIPE。重定向用的描述符副本也设置 close-on-exec；传给 `fcntl` 的可变整数实参位于栈上。
 

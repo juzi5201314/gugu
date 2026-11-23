@@ -420,13 +420,12 @@ pub(crate) fn validate(body: &Body) -> Result<(), Error> {
                 ..
             } => {
                 if call.poll_free_leaf || safepoint.is_none() {
-                    return Err(super::error("invoke requires an authoritative CallReturn map"));
+                    return Err(super::error(
+                        "invoke requires an authoritative CallReturn map",
+                    ));
                 }
                 if body.edges.get(normal.index()).is_none_or(|e| e.unwind)
-                    || body
-                        .edges
-                        .get(unwind.index())
-                        .is_none_or(|e| !e.unwind)
+                    || body.edges.get(unwind.index()).is_none_or(|e| !e.unwind)
                 {
                     return Err(super::error("invoke requires normal and unwind edges"));
                 }
