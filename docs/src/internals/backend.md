@@ -411,7 +411,7 @@ epoll_ctl 将调用方的打包 12 字节事件展开到原生栈，DEL 不解�
 
 `linux_signal_dispatch` 和 `linux_fd_dispatch` 共享同一信号分派生成器；前者单独处理信号 NativeRequest，后者也路由现有运行时的 14/289。13/14/289 分别调用 134/135/74；39/62/186/200/234 分别调用 172/129/178/130/131。rt_sigaction 将输入复制到 32 字节栈缓冲，清除 SA_RESTORER 位并清零 restorer；成功时才复制旧 action。文件/信号保留原始负 VALUE 并写正 ERROR，与网络 packet 的错误归零约定不同。`linux_syscall` 共享原生栈保存、比较分支、svc 和取负辅助生成器。`signal.gg::arm` 修正 signalfd4 的参数：原先把 524288 放到 sigsetsize、flags 留零；现为 size = 8、flags = 524288，避免 x64 与 arm64 内核返回 EINVAL。
 
-Linux DNS 的 `net_resolver.gg` 经 `resolver_symbol` 获得 getaddrinfo/freeaddrinfo，再使用 foreign packet 调用 libc；Linux addrinfo 的 sockaddr 在 +24、next 在 +40。取消不提前释放仍被原生调用读取的 host/hints/result；迟到结果仍须 freeaddrinfo。内部 `linux_resolver_imports(library)` 声明两个 C 名字，`linux_resolver_symbol` 将 x0 的 0/1 映射到同名导入桩，越界陷阱；`linux_import_stub` 以 ADRP/ADD 指向 `linux_import_slot_symbol(name)` 的 GOT 槽，LDR 后 BR x16。它与 `foreign_native_worker(Platform::Linux)` 共用同名 C 桩解析；worker 还需 gettid、__errno_location 导入。`examples/a64_linux_resolver_image.rs` 通过真实 A64 packet worker 调用 musl，验证 localhost、/etc/hosts 的 resolver.test、成功结果的 freeaddrinfo 及 AI_NUMERICHOST 错误的空结果，不进入 nextest。完整 worker 线程启动、调度和目标登记仍未接通；没有另一套 UDP DNS，也未改动取消/迟到结果所有权。
+Linux DNS 的 `net_resolver.gg` 经 `resolver_symbol` 获得 getaddrinfo/freeaddrinfo，再使用 foreign packet 调用 libc；Linux addrinfo 的 sockaddr 在 +24、next 在 +40。取消不提前释放仍被原生调用读取的 host/hints/result；迟到结果仍须 freeaddrinfo。内部 `linux_resolver_imports(library)` 声明两个 C 名字，`linux_resolver_symbol` 将 x0 的 0/1 映射到 `linux_import_stub_symbol` 命名的导入桩，越界陷阱；`linux_import_stub` 以 ADRP/ADD 指向 `linux_import_slot_symbol(name)` 的 GOT 槽，LDR 后 BR x16。它与 `foreign_native_worker(Platform::Linux)` 共用同一套桩符号；worker 的 gettid、__errno_location 也以同样方式定义桩与槽。`examples/a64_linux_resolver_image.rs` 通过真实 A64 packet worker 调用 musl，验证 localhost、/etc/hosts 的 resolver.test、成功结果的 freeaddrinfo 及 AI_NUMERICHOST 错误的空结果，不进入 nextest。完整 worker 线程启动、调度和目标登记仍未接通；没有另一套 UDP DNS，也未改动取消/迟到结果所有权。
 
 `examples/a64_linux_net_signal_image.rs` 手工生成通过适配器在 loopback 上 bind/listen/connect/accept、sendto/epoll/recvfrom，以及 block SIGUSR1、kill 自身、signalfd 读取的镜像；另外通过 sigaction 忽略 SIGUSR2、自发信号并恢复旧 action，同时检查网络 EINVAL/EBADF。默认 nextest 只运行解码/编码往返和确定性 syscall 替身，覆盖布局、完整 data、成功/零事件/错误、信号 action 转换和 signalfd 的运行时参数回归，不运行真实网络或子进程。
 
@@ -787,10 +787,11 @@ candidate 后按 restore ABI 恢复系统上下文）、`gc_enter`（HOT/SP 切�
 片段、`context_switch`/`morestack_or_poll`/`safepoint_slow`、六个已实现的
 `platform_*` VM 原语、`foreign_native_worker`、平台 dispatch glue
 （`fs_native_worker`/`net_call`/`resolver_symbol`/`process_call`/`process_worker`）和
-`gc_config_record` 数据定义；Linux 侧另加 `linux_import_definitions` 的 C 函数桩与
-`linux_import_slot_symbol` 八字节零填充 GOT 槽。`runtime_imports(platform)` 汇总各
-片段声明的原生导入：Darwin 全部经 LIB_SYSTEM（含 exit/write/pthread_threadid_np），
-Linux 为 resolver 的 libc 导入。尚未提供片段的 glue 名（fs_start/fs_poll、callback_*、
+`gc_config_record` 数据定义；Linux 侧另加 `linux_import_definitions` 的
+`__gugu_linux_stub_*` C 函数桩与 `linux_import_slot_symbol` 八字节文件回填 GOT 槽。
+`runtime_imports(platform)` 汇总各片段声明的原生导入：Darwin 全部经 LIB_SYSTEM
+（含 exit/write/pthread_threadid_np，按名去重），Linux 为 resolver 与外调工作线程
+共用的 libc 面（getaddrinfo/freeaddrinfo/gettid/__errno_location）。尚未提供片段的 glue 名（fs_start/fs_poll、callback_*、
 net_close、process_native_worker、monotonic/wall nanos、parallelism_probe、
 signal_install、startup/environment、stack/cage/callback glue、panic glue 与源码侧
 `gc_dispatch` body）在链接期以未定义符号显式失败，不做占位 no-op。
@@ -838,7 +839,7 @@ bridge 的调度协议由 CallKind 决定；C callee 的 `may_suspend=false` 不
 提供独立、16-byte 对齐的 system stack；不能直接从协程栈调用。它有界探测栈参数区，
 加载 x0–x8/d0–d7，保存 x0/x1/d0–d3 和线程 errno，release 发布/清除线程 id，
 不清除 thread handle、不发布已 join 或释放 credit。线程启动、join 确认和调度仍需平台绑定。
-Linux C 引用保留 raw 名，Darwin 函数使用 `import_stub_symbol`；Data 符号不加函数桩前缀。
+Linux C 引用经 `linux_import_stub_symbol` 的 GOT 桩符号，Darwin 函数使用 `import_stub_symbol`；Data 符号不加函数桩前缀。
 字节 VM 使用 TLS 函数、admission/copy-back 与栈移动替身，绝不执行 OS FFI 或线程。
 function assembler 同时保留 ADRP/ADD 地址重定位与 call 重定位；无链接的 `assemble`
 入口仍拒绝任何未解析符号。

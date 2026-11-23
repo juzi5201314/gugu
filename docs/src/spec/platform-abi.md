@@ -326,12 +326,15 @@ x1 = hot 槽、x2 = processor，经 `context_switch + restore_offset` 进入；`
 `main_return`/`coroutine_enter` 在恢复系统上下文前向 mailbox 写入 reason = 2
 （协程返回）、return_value、processor 与 candidate；`coroutine_enter` 从栈上
 `(code, pack)` 读取入口，pack 九条整数道入 x0–x8、八条浮点道入 v0–v7；
-`gc_enter` 把 HOT/SP 切到 coordinator 系统栈并以 `gc_dispatch(request, entry_rsp)`
-调用，返回前恢复；`gc_config` 返回 `gc_config_record` 数据定义地址，其内容即
+`gc_enter` 先把调用方返回地址压到 mutator 栈顶（a64 的 `bl` 不落栈，
+`entry_rsp` 仍按 x64 `call` 契约指向发起帧 PC），再把 HOT/SP 切到 coordinator
+系统栈并以 `gc_dispatch(request, entry_rsp)` 调用，返回前恢复 SP 并弹回 LR；
+`gc_config` 返回 `gc_config_record` 数据定义地址，其内容即
 `GcImageConfig` 规范字节；`thread_id` 在 Linux 走 `gettid`、在 Darwin 调
-`pthread_threadid_np`。Darwin 片段经 `import_stub_symbol` 调用桩引用 libSystem；
-Linux resolver 的 C 函数以同名片段桩加 `linux_import_slot_symbol` 八字节 GOT 槽
-成对定义。未提供片段或源码绑定的 glue 名必须在链接期以未定义符号失败，
+`pthread_threadid_np`。所有 `bl` 调用必须保住调用方返回地址。Darwin 片段经
+`import_stub_symbol` 调用桩引用 libSystem；Linux 的 C 函数以
+`linux_import_stub_symbol`（`__gugu_linux_stub_*`）片段桩加
+`linux_import_slot_symbol` 八字节文件回填 GOT 槽成对定义，桩符号与 import 真名错开。未提供片段或源码绑定的 glue 名必须在链接期以未定义符号失败，
 不能静默当成空操作。
 
 ### 总则
