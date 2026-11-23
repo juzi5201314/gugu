@@ -7,7 +7,7 @@ const ERRNO_AT: u64 = 0x6000;
 
 #[derive(Default)]
 struct LibSystem {
-    calls: Vec<(String, u64, u64, u64)>,
+    calls: Vec<(String, u64, u64, u64, u64, u64, u64)>,
     mmap_result: u64,
     failing: BTreeMap<String, u64>,
     errno: u64,
@@ -25,6 +25,9 @@ impl LibSystem {
             vm.registers[0],
             vm.registers[1],
             vm.registers[2],
+            vm.registers[3],
+            vm.registers[4],
+            vm.registers[5],
         ));
         vm.registers[0] = match short {
             "__error" => ERRNO_AT,
@@ -80,7 +83,7 @@ fn descriptor_operations_call_libsystem_and_translate_errno() {
             0,
             "{name} success"
         );
-        let [(called, base, bytes, arg)] = libsystem.calls.as_slice() else {
+        let [(called, base, bytes, arg, ..)] = libsystem.calls.as_slice() else {
             panic!("expected one libSystem call for {name}")
         };
         assert_eq!(*called, name);
@@ -118,13 +121,16 @@ fn decommit_recovers_the_extent_with_a_fixed_anonymous_mapping() {
         vm.run_calls(&code, |vm, pc| libsystem.call(vm, &calls[&pc])),
         0
     );
-    let [(called, base, bytes, prot)] = libsystem.calls.as_slice() else {
+    let [(called, base, bytes, prot, flags, fd, offset)] = libsystem.calls.as_slice() else {
         panic!("expected the covering mmap")
     };
     assert_eq!(*called, "mmap");
     assert_eq!(*base, 0x100000);
     assert_eq!(*bytes, 0x4000);
     assert_eq!(*prot, 0);
+    assert_eq!(*flags, 0x1012, "MAP_ANON|MAP_PRIVATE|MAP_FIXED");
+    assert_eq!(*fd, u64::MAX);
+    assert_eq!(*offset, 0);
 
     let mut libsystem = LibSystem {
         failing: BTreeMap::from([("mmap".to_owned(), 1)]),
@@ -178,9 +184,25 @@ fn reserve_trims_prefix_and_tail() {
     assert_eq!(
         libsystem.calls,
         [
-            ("mmap".to_owned(), 0, 0x2_0000, 0),
-            ("munmap".to_owned(), 0x1_0000_8000, 0x8000, 0),
-            ("munmap".to_owned(), 0x1_0002_0000, 0x8000, 0),
+            ("mmap".to_owned(), 0, 0x2_0000, 0, 0x1002, u64::MAX, 0),
+            (
+                "munmap".to_owned(),
+                0x1_0000_8000,
+                0x8000,
+                0,
+                0x1002,
+                u64::MAX,
+                0
+            ),
+            (
+                "munmap".to_owned(),
+                0x1_0002_0000,
+                0x8000,
+                0,
+                0x1002,
+                u64::MAX,
+                0
+            ),
         ]
     );
 }
@@ -202,8 +224,16 @@ fn reserve_skips_prefix_when_already_aligned() {
     assert_eq!(
         libsystem.calls,
         [
-            ("mmap".to_owned(), 0, 0x2_0000, 0),
-            ("munmap".to_owned(), 0x1_0001_0000, 0x1_0000, 0),
+            ("mmap".to_owned(), 0, 0x2_0000, 0, 0x1002, u64::MAX, 0),
+            (
+                "munmap".to_owned(),
+                0x1_0001_0000,
+                0x1_0000,
+                0,
+                0x1002,
+                u64::MAX,
+                0
+            ),
         ]
     );
 }
@@ -228,10 +258,34 @@ fn reserve_releases_owned_range_on_trim_failure() {
     assert_eq!(
         libsystem.calls,
         [
-            ("mmap".to_owned(), 0, 0x2_0000, 0),
-            ("munmap".to_owned(), 0x1_0000_8000, 0x8000, 0),
-            ("__error".to_owned(), u64::MAX, 0x8000, 0),
-            ("munmap".to_owned(), 0x1_0000_8000, 0x2_0000, 0),
+            ("mmap".to_owned(), 0, 0x2_0000, 0, 0x1002, u64::MAX, 0),
+            (
+                "munmap".to_owned(),
+                0x1_0000_8000,
+                0x8000,
+                0,
+                0x1002,
+                u64::MAX,
+                0
+            ),
+            (
+                "__error".to_owned(),
+                u64::MAX,
+                0x8000,
+                0,
+                0x1002,
+                u64::MAX,
+                0
+            ),
+            (
+                "munmap".to_owned(),
+                0x1_0000_8000,
+                0x2_0000,
+                0,
+                0x1002,
+                u64::MAX,
+                0
+            ),
         ]
     );
 }
@@ -265,11 +319,43 @@ fn reserve_releases_remaining_range_on_tail_failure() {
     assert_eq!(
         libsystem.calls,
         [
-            ("mmap".to_owned(), 0, 0x2_0000, 0),
-            ("munmap".to_owned(), 0x1_0000_8000, 0x8000, 0),
-            ("munmap".to_owned(), 0x1_0002_0000, 0x8000, 0),
-            ("__error".to_owned(), u64::MAX, 0x8000, 0),
-            ("munmap".to_owned(), 0x1_0001_0000, 0x1_8000, 0),
+            ("mmap".to_owned(), 0, 0x2_0000, 0, 0x1002, u64::MAX, 0),
+            (
+                "munmap".to_owned(),
+                0x1_0000_8000,
+                0x8000,
+                0,
+                0x1002,
+                u64::MAX,
+                0
+            ),
+            (
+                "munmap".to_owned(),
+                0x1_0002_0000,
+                0x8000,
+                0,
+                0x1002,
+                u64::MAX,
+                0
+            ),
+            (
+                "__error".to_owned(),
+                u64::MAX,
+                0x8000,
+                0,
+                0x1002,
+                u64::MAX,
+                0
+            ),
+            (
+                "munmap".to_owned(),
+                0x1_0001_0000,
+                0x1_8000,
+                0,
+                0x1002,
+                u64::MAX,
+                0
+            ),
         ]
     );
 }
@@ -292,8 +378,16 @@ fn reserve_maps_mmap_failure_to_negative_errno() {
     assert_eq!(
         libsystem.calls,
         [
-            ("mmap".to_owned(), 0, 0x2_0000, 0),
-            ("__error".to_owned(), u64::MAX, 0x2_0000, 0),
+            ("mmap".to_owned(), 0, 0x2_0000, 0, 0x1002, u64::MAX, 0),
+            (
+                "__error".to_owned(),
+                u64::MAX,
+                0x2_0000,
+                0,
+                0x1002,
+                u64::MAX,
+                0
+            ),
         ]
     );
 }
