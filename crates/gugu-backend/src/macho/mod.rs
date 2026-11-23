@@ -140,14 +140,14 @@ pub struct Symbol {
     pub at: Location,
 }
 
-/// arm64 指令修补点：`at` 处的占位指令在写出时按 `kind` 编码为指向
-/// `target + addend` 的形式。与 [`Fixup`] 一样依赖链接期地址，由 [`link`] 在最终
-/// 布局上应用——节图后续追加的启动节会移动部分节的地址，提前修补会过期。
+/// arm64 指令修补点：`at` 处的占位指令在写出时按 `kind` 编码为指向 `target`
+/// 的形式（偏移已折进 `target.offset`）。与 [`Fixup`] 一样依赖链接期地址，由
+/// [`link`] 在最终布局上应用——节图后续追加的启动节会移动部分节的地址，提前
+/// 修补会过期。
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub struct Arm64Relocation {
     pub at: Location,
     pub target: Location,
-    pub addend: i64,
     pub kind: crate::a64::inst::RelocKind,
 }
 
@@ -233,10 +233,7 @@ fn apply_relocations(
             return Err("Mach-O arm64 relocation site is not aligned code".into());
         }
         let pc = layout.address(relocation.at)?;
-        let target = layout
-            .address(relocation.target)?
-            .checked_add_signed(relocation.addend)
-            .ok_or("Mach-O arm64 relocation target overflow")?;
+        let target = layout.address(relocation.target)?;
         let at = (layout.sections[relocation.at.section].fileoff + relocation.at.offset) as usize;
         let word = u32::from_le_bytes(file[at..at + 4].try_into().unwrap());
         file[at..at + 4].copy_from_slice(

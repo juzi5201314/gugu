@@ -193,7 +193,6 @@ impl World {
             request.relocations.push(macho::Arm64Relocation {
                 at: relocation.at,
                 target: at,
-                addend: rel.addend,
                 kind: rel.kind,
             });
         }
