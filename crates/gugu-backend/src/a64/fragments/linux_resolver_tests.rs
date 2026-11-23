@@ -13,9 +13,9 @@ fn resolver_imports_and_addresses_follow_linux_c_contract() {
     assert_eq!(fragment.relocations.len(), 4);
     let bytes = relocation::relocate(fragment, 0, |name| {
         Ok(match name {
-            "getaddrinfo" => 0x12340,
-            "freeaddrinfo" => 0x23450,
-            _ => panic!("unexpected symbol"),
+            _ if name == linux_import_stub_symbol("getaddrinfo") => 0x12340,
+            _ if name == linux_import_stub_symbol("freeaddrinfo") => 0x23450,
+            _ => panic!("unexpected symbol {name}"),
         })
     })
     .unwrap();

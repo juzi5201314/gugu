@@ -531,7 +531,11 @@ impl World {
             {
                 return Err(fail("invalid/duplicate A64 native import"));
             }
-            let name = if import.kind == NativeImportKind::Function {
+            // Darwin 的 C 函数在镜像内由 `__gugu_darwin_c_*` 桩定义占名；Linux 的调用点
+            // 另有 GOT 桩符号，import 在这里只申报动态符号真名。
+            let name = if import.kind == NativeImportKind::Function
+                && self.platform == super::foreign::Platform::Darwin
+            {
                 self.platform.symbol(&import.name)
             } else {
                 import.name.clone()

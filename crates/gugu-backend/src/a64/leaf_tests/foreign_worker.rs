@@ -44,7 +44,7 @@ fn return_constant(symbol: &str, value: u64) -> codegen::LeafFragment {
 
 fn tls(platform: Platform) -> (codegen::LeafFragment, codegen::LeafFragment) {
     let tid = if platform == Platform::Linux {
-        return_constant("gettid", 42)
+        return_constant(&platform.symbol("gettid"), 42)
     } else {
         let mut fixture = Fixture::new(&[Type::I64, Type::Ptr], &[Type::I32]);
         let value = fixture.constant(Type::I64, 42);

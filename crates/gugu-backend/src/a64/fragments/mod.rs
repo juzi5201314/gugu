@@ -38,7 +38,8 @@ pub use linux_fd::linux_fd_dispatch;
 pub use linux_net::linux_net_dispatch;
 pub use linux_process::{linux_process_call, linux_process_worker};
 pub use linux_resolver::{
-    linux_import_slot_symbol, linux_import_stub, linux_resolver_imports, linux_resolver_symbol,
+    linux_import_slot_symbol, linux_import_stub, linux_import_stub_symbol, linux_resolver_imports,
+    linux_resolver_symbol,
 };
 pub use linux_signal::linux_signal_dispatch;
 pub use linux_vm::{linux_page_size, linux_vm};

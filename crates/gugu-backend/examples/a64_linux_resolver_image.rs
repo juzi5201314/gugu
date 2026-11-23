@@ -9,7 +9,7 @@ use gugu_backend::{
         foreign::Platform,
         fragments::{
             foreign_native_worker, linux_import_slot_symbol, linux_import_stub,
-            linux_resolver_imports, linux_resolver_symbol,
+            linux_import_stub_symbol, linux_resolver_imports, linux_resolver_symbol,
         },
     },
 };
@@ -33,7 +33,7 @@ fn imports(p: &mut Probe, interpreter: &str, library: &str) -> BTreeMap<String, 
     for import in &imports {
         let name = &import.native.name;
         let stub = p.symbolic_fragment(linux_import_stub(name), &symbols);
-        symbols.insert(name.clone(), stub);
+        symbols.insert(linux_import_stub_symbol(name), stub);
     }
     p.dynamic(DynamicLink {
         interpreter: interpreter.into(),

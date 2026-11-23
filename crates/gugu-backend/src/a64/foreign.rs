@@ -9,9 +9,11 @@ pub enum Platform {
 }
 
 impl Platform {
+    /// 调用点面向的 C 符号：Darwin 经镜像自动生成的 `__gugu_darwin_c_*` 桩，
+    /// Linux 经 `__gugu_linux_stub_*` GOT 桩片段（定义与 import 真名错开）。
     pub fn symbol(self, name: &str) -> String {
         match self {
-            Self::Linux => name.into(),
+            Self::Linux => super::fragments::linux_import_stub_symbol(name),
             Self::Darwin => super::macho::import_stub_symbol(name),
         }
     }

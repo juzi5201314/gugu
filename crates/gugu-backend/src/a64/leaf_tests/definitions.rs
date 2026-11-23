@@ -6,8 +6,7 @@ use crate::{
     a64::{
         definitions::{LINUX_LIBC, linux_import_definitions, runtime_definitions, runtime_imports},
         foreign::Platform,
-        fragments,
-        fragments::linux_import_slot_symbol,
+        fragments::{linux_import_slot_symbol, linux_import_stub_symbol},
         world::Definition,
     },
     macho::{LIB_SYSTEM, SectionContent, Segment},
@@ -107,11 +106,16 @@ fn linux_definitions_mirror_darwin_with_linux_dispatch() {
 }
 
 #[test]
-fn linux_import_definitions_pair_stub_and_zero_fill_slot() {
+fn linux_import_definitions_pair_named_stub_and_file_backed_slot() {
     let definitions = linux_import_definitions();
     let names = symbols(&definitions);
-    for name in ["getaddrinfo", "freeaddrinfo"] {
-        assert!(names.contains(name), "missing stub {name}");
+    for name in ["getaddrinfo", "freeaddrinfo", "gettid", "__errno_location"] {
+        // 桩符号与 import 真名错开：世界校验拒绝定义与导入重名。
+        assert!(!names.contains(name), "import name must stay free {name}");
+        assert!(
+            names.contains(linux_import_stub_symbol(name).as_str()),
+            "missing stub {name}"
+        );
         assert!(
             names.contains(linux_import_slot_symbol(name).as_str()),
             "missing slot {name}"
@@ -121,7 +125,8 @@ fn linux_import_definitions_pair_stub_and_zero_fill_slot() {
             .find(|definition| definition.symbol == linux_import_slot_symbol(name))
             .unwrap();
         assert_eq!(slot.segment, Segment::Data);
-        assert_eq!(slot.content, SectionContent::ZeroFill(8));
+        // ELF dynamic 要求槽是文件回填的 Data（写 GLOB_DAT），不收 ZeroFill。
+        assert_eq!(slot.content, SectionContent::Data(vec![0; 8]));
         assert_eq!(slot.align, 8);
     }
 }
@@ -131,21 +136,32 @@ fn runtime_imports_match_platform_import_surfaces() {
     let linux = runtime_imports(Platform::Linux);
     assert_eq!(
         linux,
-        fragments::linux_resolver_imports(LINUX_LIBC),
-        "Linux imports are the resolver's libc surface"
+        ["getaddrinfo", "freeaddrinfo", "gettid", "__errno_location"]
+            .map(|name| NativeImport::function(LINUX_LIBC, name)),
+        "Linux imports are the resolver plus worker libc surface"
     );
     let darwin = runtime_imports(Platform::Darwin);
-    let mut expected = [
-        fragments::darwin_vm_imports(),
-        fragments::darwin_fd_imports(),
-        fragments::darwin_net_imports(),
-        fragments::darwin_process_imports(),
-        fragments::darwin_resolver_imports(),
-    ]
-    .concat();
-    expected.extend(
-        ["exit", "write", "pthread_threadid_np"]
-            .map(|name| NativeImport::function(LIB_SYSTEM, name)),
-    );
-    assert_eq!(darwin, expected);
+    // 世界校验拒绝重复 import：合并各自申报面后按名去重。
+    let mut seen = std::collections::BTreeSet::new();
+    for import in &darwin {
+        assert!(
+            seen.insert(&import.name),
+            "duplicate import {}",
+            import.name
+        );
+        assert_eq!(import.library, LIB_SYSTEM);
+    }
+    for name in [
+        "exit",
+        "write",
+        "pthread_threadid_np",
+        "__error",
+        "getpagesize",
+        "mmap",
+    ] {
+        assert!(
+            darwin.iter().any(|import| import.name == name),
+            "missing import {name}"
+        );
+    }
 }

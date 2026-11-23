@@ -18,6 +18,9 @@ fn rt(name: &str) -> String {
 /// glibc SONAME for the Linux resolver's C imports; matches every glibc aarch64 system.
 pub const LINUX_LIBC: &str = "libc.so.6";
 
+/// Linux 侧经 GOT 桩调用的全部 C 入口：DNS resolver 两个 + 外调工作线程的 gettid/errno。
+const LINUX_C_IMPORTS: [&str; 4] = ["getaddrinfo", "freeaddrinfo", "gettid", "__errno_location"];
+
 /// Darwin 侧经 libSystem 调用的额外入口（VM/FD/NET/进程/resolver 导入各自申报）。
 const DARWIN_EXTRA_IMPORTS: [&str; 3] = ["exit", "write", "pthread_threadid_np"];
 
@@ -125,18 +128,22 @@ pub fn runtime_definitions(platform: Platform) -> Vec<Definition> {
 }
 
 /// Linux 动态链接的 eager-import 槽与桩：resolver 返回的地址指向桩符号，
-/// 桩经 GOT 槽跳到 libSystem/libc 实现。槽定义以 import 名命名，供 ELF dynamic 填充。
+/// 桩经 GOT 槽跳到 libc 实现。桩符号以 `__gugu_linux_stub_` 命名（与 import 真名错开），
+/// 槽是文件回填的 8 字节 Data，供 ELF dynamic 写 GLOB_DAT。
 pub fn linux_import_definitions() -> Vec<Definition> {
-    ["getaddrinfo", "freeaddrinfo"]
+    LINUX_C_IMPORTS
         .into_iter()
         .flat_map(|name| {
             [
-                Definition::fragment(name, fragments::linux_import_stub(name)),
+                Definition::fragment(
+                    fragments::linux_import_stub_symbol(name),
+                    fragments::linux_import_stub(name),
+                ),
                 Definition {
                     symbol: fragments::linux_import_slot_symbol(name),
                     align: 8,
                     segment: Segment::Data,
-                    content: SectionContent::ZeroFill(8),
+                    content: SectionContent::Data(vec![0; 8]),
                     relocations: vec![],
                     pointers: vec![],
                 },
@@ -145,10 +152,12 @@ pub fn linux_import_definitions() -> Vec<Definition> {
         .collect()
 }
 
-/// 片段声明的原生导入；Darwin 全部经 libSystem，Linux 仅 resolver 的 libc 函数。
+/// 片段声明的原生导入；Darwin 全部经 libSystem（去重），Linux 是 resolver/工作线程的 libc 面。
 pub fn runtime_imports(platform: Platform) -> Vec<NativeImport> {
     match platform {
-        Platform::Linux => fragments::linux_resolver_imports(LINUX_LIBC),
+        Platform::Linux => LINUX_C_IMPORTS
+            .map(|name| NativeImport::function(LINUX_LIBC, name))
+            .into(),
         Platform::Darwin => {
             let mut imports = [
                 fragments::darwin_vm_imports(),
@@ -160,6 +169,8 @@ pub fn runtime_imports(platform: Platform) -> Vec<NativeImport> {
             .concat();
             imports
                 .extend(DARWIN_EXTRA_IMPORTS.map(|name| NativeImport::function(LIB_SYSTEM, name)));
+            let mut seen = std::collections::BTreeSet::new();
+            imports.retain(|import| seen.insert(import.name.clone()));
             imports
         }
     }
