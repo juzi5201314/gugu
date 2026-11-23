@@ -290,6 +290,7 @@ impl Probe {
                 section: 2,
                 offset: INITIAL_SLOT_BYTES,
             },
+            runtime: None,
         };
         let image = if let Some(dynamic) = self.dynamic {
             elf::link_entry_dynamic(self.request, entry, &dynamic)?

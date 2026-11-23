@@ -27,8 +27,9 @@ pub mod macho;
 pub mod memory;
 pub mod metadata;
 mod print;
+pub mod program;
 pub mod reg;
-mod relocation;
+pub(crate) mod relocation;
 pub mod rewrite;
 mod rows;
 pub mod runtime;
@@ -43,6 +44,9 @@ mod tests;
 
 #[cfg(test)]
 mod leaf_tests;
+
+#[cfg(test)]
+mod program_tests;
 
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub struct Error(pub String);

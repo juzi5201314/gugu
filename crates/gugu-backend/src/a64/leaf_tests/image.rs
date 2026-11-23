@@ -3,7 +3,7 @@ use crate::a64::foreign::Platform;
 use crate::a64::world::{BuildRequest, Definition, Pointer, World};
 use crate::{
     NativeImport,
-    macho::{self, SectionContent, Segment},
+    macho::{self, Location, SectionContent, Segment},
     x64::mangle,
 };
 
@@ -166,33 +166,82 @@ fn multi_body_world_deduplicates_constants_and_preserves_linked_metadata_and_poi
     }
     let request = world.macho_request("a64-world-test").unwrap();
     assert_eq!(request.fixups.len(), 1);
-    let call = world
+    let call = request
         .relocations
         .iter()
         .find(|rel| {
-            rel.relocation.kind == inst::RelocKind::Call26
-                && rel.relocation.target == abi::symbol(&bodies[1].instance)
+            rel.kind == inst::RelocKind::Call26
+                && rel.target == world.symbols[&abi::symbol(&bodies[1].instance)]
         })
         .unwrap();
-    let SectionContent::Code(code) = &request.sections[0].content else {
-        panic!()
-    };
-    let at = call.at.offset as usize;
-    let instruction =
-        decode::decode(u32::from_le_bytes(code[at..at + 4].try_into().unwrap())).unwrap();
+    let layout = macho::layout(&request).unwrap();
+    let pc = layout.address(call.at).unwrap();
+    let image = macho::link(&request).unwrap();
+    let at = (layout.sections[call.at.section].fileoff + call.at.offset) as usize;
+    let instruction = decode::decode(u32::from_le_bytes(
+        image.bytes[at..at + 4].try_into().unwrap(),
+    ))
+    .unwrap();
     let inst::Operand::Target(inst::Target::Offset(delta)) = instruction.operands[0] else {
         panic!()
     };
     assert_eq!(
-        (call.at.offset as i64 + delta) as u64,
-        world.symbols[&abi::symbol(&bodies[1].instance)].offset
+        (pc as i64 + delta) as u64,
+        layout.address(call.target).unwrap()
     );
-    let image = macho::link(&request).unwrap();
     assert_eq!(
         u32::from_le_bytes(image.bytes[4..8].try_into().unwrap()),
         0x0100000c
     );
     assert_eq!(image, macho::link(&request).unwrap());
+}
+
+#[test]
+fn macho_relocation_target_addend_lands_once_in_the_linked_image() {
+    let mut f = fixture(1);
+    f.ret(&[]);
+    const RESTORE_OFFSET: u32 = 8;
+    let world = build(
+        &[f.body],
+        &[
+            Definition::fragment("context", fragments::context_switch().fragment),
+            Definition::fragment(
+                "restore",
+                fragments::context_restore("context", RESTORE_OFFSET),
+            ),
+        ],
+        &[],
+    )
+    .unwrap();
+    let request = world.macho_request("a64-addend").unwrap();
+    let branch = request
+        .relocations
+        .iter()
+        .find(|rel| rel.kind == inst::RelocKind::Branch26)
+        .expect("context_restore 产生 Branch26");
+    // restore_offset 只折进目标位置一次。
+    assert_eq!(
+        branch.target,
+        Location {
+            offset: world.symbols["context"].offset + u64::from(RESTORE_OFFSET),
+            ..world.symbols["context"]
+        }
+    );
+    let layout = macho::layout(&request).unwrap();
+    let image = macho::link(&request).unwrap();
+    let pc = layout.address(branch.at).unwrap();
+    let at = (layout.sections[branch.at.section].fileoff + branch.at.offset) as usize;
+    let instruction = decode::decode(u32::from_le_bytes(
+        image.bytes[at..at + 4].try_into().unwrap(),
+    ))
+    .unwrap();
+    let inst::Operand::Target(inst::Target::Offset(delta)) = instruction.operands[0] else {
+        panic!()
+    };
+    assert_eq!(
+        (pc as i64 + delta) as u64,
+        layout.address(branch.target).unwrap()
+    );
 }
 
 fn resolve(mut fragment: codegen::LeafFragment, name: &str, address: u64) -> codegen::LeafFragment {

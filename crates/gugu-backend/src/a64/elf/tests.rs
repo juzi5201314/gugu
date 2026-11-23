@@ -318,6 +318,7 @@ fn runtime_request() -> (ElfRequest, LinuxEntry) {
         payload: loc(3, 0),
         initial_slot: loc(4, 0),
         processor: loc(4, INITIAL_SLOT_BYTES),
+        runtime: None,
     };
     (request, entry)
 }
@@ -434,6 +435,7 @@ fn invalid_runtime_storage_is_rejected() {
         },
         LinuxEntry {
             processor: loc(4, INITIAL_SLOT_BYTES + 8),
+            runtime: None,
             ..entry
         },
     ] {

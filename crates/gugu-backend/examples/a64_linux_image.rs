@@ -27,6 +27,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
             payload: at(3, 0),
             initial_slot: at(4, 0),
             processor: at(4, INITIAL_SLOT_BYTES),
+            runtime: None,
         },
     )?;
     std::fs::write(&path, &image.bytes)?;

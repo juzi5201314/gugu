@@ -10,20 +10,6 @@ fn fail(message: impl std::fmt::Display) -> Error {
     super::error(&message.to_string())
 }
 
-fn address(layout: &macho::Layout, at: Location) -> Result<u64, Error> {
-    let section = layout
-        .sections
-        .get(at.section)
-        .ok_or_else(|| fail("A64 location section out of bounds"))?;
-    if at.offset >= section.size {
-        return Err(fail("A64 location offset out of bounds"));
-    }
-    section
-        .addr
-        .checked_add(at.offset)
-        .ok_or_else(|| fail("A64 address overflow"))
-}
-
 fn target(
     request: &MachORequest,
     symbols: &BTreeMap<String, Location>,
@@ -55,7 +41,53 @@ fn target(
 }
 
 impl World {
-    /// Final instruction addresses use the writer's layout, including import stubs.
+    /// The same owned section graph for the A64 ELF writer: instruction relocations
+    /// resolve their named targets through the world symbol table, and data pointers
+    /// become RELATIVE entries that rt0 applies after measuring the load bias.
+    pub fn elf_request(&self) -> Result<super::elf::ElfRequest, Error> {
+        if self.platform != super::foreign::Platform::Linux {
+            return Err(fail("ELF requires a Linux A64 world"));
+        }
+        self.validate()?;
+        let symbols = &self.symbols;
+        let target = |name: &str| {
+            symbols
+                .get(name)
+                .copied()
+                .ok_or_else(|| fail(format!("undefined A64 symbol {name}")))
+        };
+        Ok(super::elf::ElfRequest {
+            sections: self.sections.clone(),
+            entry: self.entry,
+            relatives: self
+                .pointers
+                .iter()
+                .map(|pointer| {
+                    Ok(super::elf::Relative {
+                        at: pointer.at,
+                        target: target(&pointer.target)?,
+                        addend: pointer.addend,
+                    })
+                })
+                .collect::<Result<_, Error>>()?,
+            relocations: self
+                .relocations
+                .iter()
+                .map(|rel| {
+                    Ok(super::elf::Relocation {
+                        at: rel.at,
+                        target: target(&rel.relocation.target)?,
+                        addend: rel.relocation.addend,
+                        kind: rel.relocation.kind,
+                    })
+                })
+                .collect::<Result<_, Error>>()?,
+        })
+    }
+
+    /// Instruction relocations become pending [`macho::Arm64Relocation`] records
+    /// that `macho::link` patches on the final layout — startup sections appended
+    /// later would otherwise move already-patched addresses.
     /// Metadata RVAs remain relative to `code`, as required by a64_binding::Sections.
     pub fn macho_request(&self, identifier: &str) -> Result<MachORequest, Error> {
         if self.platform != super::foreign::Platform::Darwin {
@@ -69,6 +101,7 @@ impl World {
             libraries: vec![],
             imports: vec![],
             fixups: vec![],
+            relocations: vec![],
             symbols: self
                 .symbols
                 .iter()
@@ -131,7 +164,6 @@ impl World {
                 }
             };
         }
-        let layout = macho::layout(&request).map_err(fail)?;
         for relocation in &self.relocations {
             let rel = &relocation.relocation;
             let at = target(&request, &symbols, &self.sizes, &rel.target, rel.addend)?;
@@ -143,27 +175,26 @@ impl World {
             {
                 return Err(fail("A64 branch target is not aligned code"));
             }
-            let pc = address(&layout, relocation.at)?;
-            let destination = address(&layout, at)?;
-            let section = request
+            let site = request
                 .sections
-                .get_mut(relocation.at.section)
-                .ok_or_else(|| fail("A64 relocation section missing"))?;
-            let SectionContent::Code(bytes) = &mut section.content else {
-                return Err(fail("A64 instruction relocation outside code"));
-            };
-            let offset = usize::try_from(relocation.at.offset).map_err(fail)?;
-            let field = bytes
-                .get_mut(
-                    offset
-                        ..offset
+                .get(relocation.at.section)
+                .is_some_and(|s| {
+                    matches!(s.content, SectionContent::Code(_))
+                        && relocation.at.offset % 4 == 0
+                        && relocation
+                            .at
+                            .offset
                             .checked_add(4)
-                            .ok_or_else(|| fail("A64 relocation offset overflow"))?,
-                )
-                .filter(|_| offset % 4 == 0)
-                .ok_or_else(|| fail("A64 relocation outside instruction"))?;
-            let word = u32::from_le_bytes(field.try_into().unwrap());
-            field.copy_from_slice(&super::relocation::patch(word, rel.kind, pc, destination)?);
+                            .is_some_and(|end| end <= s.content.size())
+                });
+            if !site {
+                return Err(fail("A64 relocation outside instruction"));
+            }
+            request.relocations.push(macho::Arm64Relocation {
+                at: relocation.at,
+                target: at,
+                kind: rel.kind,
+            });
         }
         Ok(request)
     }

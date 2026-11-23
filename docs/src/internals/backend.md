@@ -393,7 +393,7 @@ fragment relocation 封闭为：
 
 `a64::relocation` 与 Darwin 启动路径共享 decode/encode 修补器；支持 `Call26`/`Branch26`、`AdrpPage21`、`AddLo12` 与 `LdStLo12`，按指令自身的 4 KiB 页计算 ADRP 和页内偏移，与 ELF 段的 64 KiB 对齐无关。修补时检查指令形式、访存缩放、位移范围和对齐，不用掩码截断无效值。
 
-`a64::elf::link_entry` 接收 `LinuxEntry`（`rt0_start`、可写载荷、初始槽与 processor），追加只读参数块、Linux `_start` 和共享 `a64::fragments::rt0`。参数块保存链接期值，入口由参数块运行时地址减去 `bias_baseline` 得到加载偏移，遍历 RELA 表把 `bias + addend` 写入 `bias + slot`。零条目跳过循环；内核不负责这批自重定位。入口从原始 sp 读取 argc，以 `sp + 8` 为 argv、`argv + 8 * (argc + 1)` 为 envp，保留它们直到以 x0–x4 = params、bias、envp、argc、argv 调用 rt0。rt0 初始化 x27/x28，写入载荷启动参数并调用 `rt0_start`，返回的 x0 直接交给 `exit_group`（x8 = 94，`svc #0`）。入口写入载荷 revision，并为载荷的 `initial_slot` 字段自动登记一项 RELATIVE；其他载荷指针由调用方提供。`examples/a64_linux_image.rs` 在默认测试之外生成读取已重定位指针槽、经 Linux write 输出消息并返回 42 的验证镜像；单元测试只在进程内检查结构与指令。
+`a64::elf::link_entry` 接收 `LinuxEntry`（`rt0_start`、可写载荷、初始槽与 processor），追加只读参数块、Linux `_start` 和共享 `a64::fragments::rt0`。参数块保存链接期值，入口由参数块运行时地址减去 `bias_baseline` 得到加载偏移，遍历 RELA 表把 `bias + addend` 写入 `bias + slot`。零条目跳过循环；内核不负责这批自重定位。入口从原始 sp 读取 argc，以 `sp + 8` 为 argv、`argv + 8 * (argc + 1)` 为 envp，保留它们直到以 x0–x4 = params、bias、envp、argc、argv 调用 rt0。rt0 初始化 x27/x28，写入载荷启动参数并调用 `rt0_start`，返回的 x0 直接交给 `exit_group`（x8 = 94，`svc #0`）。入口写入载荷 revision，并为载荷的 `initial_slot` 字段自动登记一项 RELATIVE；其他载荷指针由调用方提供。`LinuxEntry::runtime` 为 `Some(LinuxRuntime)` 时由链接器补齐其余启动契约，与 Darwin 侧同构：参数块追加写入 main `entry`、`runtime_state` 与 `coroutine_enter` 三个链接期 VA（rt0_start 运行时加加载偏移），`Rt0Payload` 的 `main_entry`/`runtime_state`/`main_return`/`stackmap`/`fragment_base`/`unwind`/`gc_types`/`gc_meta` 地址字段登记为 RELATIVE（rt0 的 RELATIVE 循环把它们补成运行时地址），对应长度字段按偏移截到节尾写出；`fragment_base` 必须是代码节偏移 0 的起点，空 GC blob 记为指针和长度皆 0。`runtime_state` 必须落在可写 Data 节且容下 `state::BYTES`；`None` 保留只含 `rt0_start` 的探针形态。`examples/a64_linux_image.rs` 在默认测试之外生成读取已重定位指针槽、经 Linux write 输出消息并返回 42 的验证镜像；单元测试只在进程内检查结构与指令。
 
 `a64::fragments::linux_fd_dispatch` 是无导入、无外部重定位的 Builder 片段，在原生栈上保留 x19/x20/x29/x30，并预留 128 字节 arm64 kernel stat 暂存区。它接收 x0 = `NativeRequest*`，加载 `foreign_schema` 的 operation/arguments，按 Linux x86_64 请求号翻译为 asm-generic syscall：read/write/close/lseek = 63/64/57/62，open→openat 56，stat/lstat/newfstatat→newfstatat 79，fstat→80，fcntl→25，fsync/fdatasync/ftruncate→82/83/46，rename/mkdir/rmdir/link/unlink/symlink/readlink→38/34/35/37/35/36/78，getdents64→61。*at 转换插入 -100、`AT_REMOVEDIR` 或 `AT_SYMLINK_NOFOLLOW`；传入 newfstatat 的 dirfd/flags 原样保留。open 的 flags 与 fcntl 的 `F_SETFL` 输入、`F_GETFL` 输出交换位组 14–15 和 16–17，其他 flags 保持不变。负返回值转成正 errno，原返回值保留在 VALUE；未支持请求为 EINVAL。信号请求委派给同一片段内的共享信号分派生成器；此层不实现调度与完成发布。
 
@@ -742,13 +742,15 @@ Definition；显式 blob 的 Pointer 保留 offset、target 与 addend。该阶�
 
 所有 compiled body 仍走 runtime 选择、分配、frame、site 与 metadata 路径。world 将其放进
 同一代码节，用真实函数偏移聚合 `a64_binding::Sections`，追加独立 maps/CFA 节；fragment
-base 是代码节起点，不是 Mach-O image base。`World::macho_request` 先固定全部节、导入、
-fixup 和符号形状，再调用已有 import stubs 与 writer layout，最后原长回填指令重定位。
+base 是代码节起点，不是 Mach-O image base。`World::macho_request` 固定全部节、导入、fixup 和符号形状，
+指令重定位不就地回填——目标解析后转为请求携带的 `macho::Arm64Relocation` 记录，
+由 `macho::link` 在最终布局上编码（`link_entry` 追加的启动节会移动部分节地址，
+提前修补会过期），x86_64 请求必须保持该列表为空。
 native data 的 SymbolAddr 多一次槽读取，blob 中的 native data 指针用 chained bind。
-请求入口目前是所选 managed body；writer 侧已具备 `DarwinRuntime` 启动契约（见
-`link_entry` 条目），哨兵与平台片段也经 `a64::definitions::runtime_definitions` 成形，
-但 `macho_request` 尚未消费这两组产物，不能把这个 request 当作已具备启动协议的
-可执行程序。
+请求入口目前是所选 managed body；`a64::program::build` 把 world、`DarwinRuntime`/
+`LinuxRuntime` 启动契约（见 `link_entry` 条目）与 `runtime_definitions` 的哨兵/平台
+片段一并消费，输出完整可执行镜像字节。生产元数据/适配器生成、前端 arch 分派与
+`plan` 的 A64 分支尚未接通，`program::build` 目前只由后端测试驱动。
 
 `a64::runtime::Catalog` 复用 canonical `RuntimeGlueBindings` 的源码解析，不另建按函数名
 猜测的 runtime 表。`build_runtime` 校验 body 仍与同一冻结世界一致；CallTarget::Runtime
@@ -773,8 +775,17 @@ source poll-free 叶证明。隐含调用保留 LR frame，并保守预留同一
 `a64::definitions::runtime_definitions(platform)` 以同名 Definition 产出，调用点不区分。
 TLS 与普通 global 同形落 `__bss` 零初始化块（mangle 不消费 thread_local 标志），线程
 所有者绑定仍是 runtime 层 coroutine_locals 的职责，world 不再整类拒绝。
-生产元数据/适配器生成、`CoroutineSwitch`、线程 worker 启动与 `macho_request`/`link_entry`
-对这两组产物的消费仍留待后续 review unit；该 catalog 不是已完成的生产调度器。
+`a64::program::build` 消费该 catalog：`runtime_definitions(platform)` 与四个启动保留区
+（`__gugu_a64_payload`/`__gugu_a64_initial_slot`/`__gugu_a64_processor` 4KiB 对齐零初始化
+页/`__gugu_a64_runtime_state`）和 `runtime_imports(platform)` 一起交给
+`world::build_runtime`；非空的 `__gugu_a64_gc_types`/`__gugu_a64_gc_meta` 在装配时各自
+独占一个只读节（与 `__gugu_maps`/`__gugu_cfa` 同法，Mach-O 名为 `__gugutyp`/`__ggmeta`），
+使载荷的长度字段精确等于 blob 大小，不吞掉共享 `__const` 的后续常量。随后 Darwin 走
+`world.macho_request` + `macho::link_entry(DarwinRuntime)`，Linux 走新加的
+`world.elf_request`（经 world 符号表解析指令重定位目标、数据指针转 RELATIVE）+
+`elf::link_entry_dynamic(LinuxRuntime)`，`Import::slot` 取 `linux_import_slot_symbol` 的
+已布局槽。`CoroutineSwitch`、线程 worker 启动与前端对 `program::build` 的调用
+仍留待后续 review unit；该驱动不是已完成的生产调度器。
 
 `a64::fragments::runtime` 是哨兵与调度片段集：`context_restore`（单条 `b` 进
 `context_switch + restore_offset`）、`current_slot`（x27 → x0）、`process_exit` 与
