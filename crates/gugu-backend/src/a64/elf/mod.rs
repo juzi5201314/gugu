@@ -15,7 +15,7 @@ use std::collections::BTreeSet;
 use super::{fragments::Fragment, inst::RelocKind, relocation};
 pub use crate::macho::{Location, Section, SectionContent, Segment};
 pub use dynamic::{DynamicLink, Import, link_dynamic};
-pub use entry::{LinuxEntry, link_entry, link_entry_dynamic};
+pub use entry::{LinuxEntry, LinuxRuntime, link_entry, link_entry_dynamic};
 pub use layout::{Layout, PlacedSection};
 
 pub const SEGMENT_ALIGN: u64 = 0x10000;

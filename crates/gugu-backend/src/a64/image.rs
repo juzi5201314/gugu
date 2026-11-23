@@ -55,6 +55,50 @@ fn target(
 }
 
 impl World {
+    /// The same owned section graph for the A64 ELF writer: instruction relocations
+    /// resolve their named targets through the world symbol table, and data pointers
+    /// become RELATIVE entries that rt0 applies after measuring the load bias.
+    pub fn elf_request(&self) -> Result<super::elf::ElfRequest, Error> {
+        if self.platform != super::foreign::Platform::Linux {
+            return Err(fail("ELF requires a Linux A64 world"));
+        }
+        self.validate()?;
+        let symbols = &self.symbols;
+        let target = |name: &str| {
+            symbols
+                .get(name)
+                .copied()
+                .ok_or_else(|| fail(format!("undefined A64 symbol {name}")))
+        };
+        Ok(super::elf::ElfRequest {
+            sections: self.sections.clone(),
+            entry: self.entry,
+            relatives: self
+                .pointers
+                .iter()
+                .map(|pointer| {
+                    Ok(super::elf::Relative {
+                        at: pointer.at,
+                        target: target(&pointer.target)?,
+                        addend: pointer.addend,
+                    })
+                })
+                .collect::<Result<_, Error>>()?,
+            relocations: self
+                .relocations
+                .iter()
+                .map(|rel| {
+                    Ok(super::elf::Relocation {
+                        at: rel.at,
+                        target: target(&rel.relocation.target)?,
+                        addend: rel.relocation.addend,
+                        kind: rel.relocation.kind,
+                    })
+                })
+                .collect::<Result<_, Error>>()?,
+        })
+    }
+
     /// Final instruction addresses use the writer's layout, including import stubs.
     /// Metadata RVAs remain relative to `code`, as required by a64_binding::Sections.
     pub fn macho_request(&self, identifier: &str) -> Result<MachORequest, Error> {

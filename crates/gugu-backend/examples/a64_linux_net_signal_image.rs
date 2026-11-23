@@ -43,6 +43,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                 section: 5,
                 offset: INITIAL_SLOT_BYTES,
             },
+            runtime: None,
         },
     )?;
     std::fs::write(&path, image.bytes)?;
