@@ -512,23 +512,46 @@ fn rewrite_item(
         Item::Call {
             suspend,
             target,
+            callee,
             arguments,
             results,
             safepoint,
+            landing,
         } => {
+            // 间接调用：Code 参数不占 ABI 槽，先物化到 x16（在参数装填前，避免被覆盖）。
+            if let Some(callee) = callee {
+                let src = location(MReg::Virtual(*callee), allocation)?
+                    .ok_or_else(|| super::error("call reads dead callee"))?;
+                move_loc(out, src, Location::Reg(PhysReg(16)), frame, super::abi::GPR)?;
+            }
             arguments_to_abi(out, arguments, allocation, frame, false, runtime)?;
+            let kind = if *suspend {
+                super::sites::SiteKind::SuspendResume
+            } else {
+                super::sites::SiteKind::CallReturn
+            };
             if let Some((block, instruction)) = safepoint {
-                runtime.call(
-                    out,
-                    target.clone(),
-                    if *suspend {
-                        super::sites::SiteKind::SuspendResume
-                    } else {
-                        super::sites::SiteKind::CallReturn
-                    },
-                    Some(*block),
-                    Some(*instruction),
-                )?;
+                if callee.is_some() {
+                    runtime.call_register(
+                        out,
+                        16,
+                        kind,
+                        Some(*block),
+                        Some(*instruction),
+                        *landing,
+                    )?;
+                } else {
+                    runtime.call(
+                        out,
+                        target.clone(),
+                        kind,
+                        Some(*block),
+                        Some(*instruction),
+                        *landing,
+                    )?;
+                }
+            } else if callee.is_some() {
+                emit(out, "blr", vec![Operand::Reg(Reg::x(16))])?;
             } else {
                 out.push(layout::Item::SymbolBranch {
                     target: target.clone(),

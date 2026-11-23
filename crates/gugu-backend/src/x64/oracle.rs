@@ -43,7 +43,7 @@ impl TargetOracle for X64Oracle {
                 lane,
             });
         }
-        let name = lower::domain(op);
+        let name = op.domain();
         let lowered = lower::lower(
             op,
             &site_values(operands, kind),

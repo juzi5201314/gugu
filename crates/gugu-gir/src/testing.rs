@@ -65,8 +65,15 @@ fn artifact(target: TargetName) -> &'static RuntimeArtifactV1 {
                 LazyLock::new(|| load(TargetName::X86_64Macos));
             &MACOS
         }
-        TargetName::Aarch64Linux | TargetName::Aarch64Macos => {
-            unreachable!("aarch64 目标的 runtime artifact 尚未构建")
+        TargetName::Aarch64Linux => {
+            static AARCH64_LINUX: LazyLock<RuntimeArtifactV1> =
+                LazyLock::new(|| load(TargetName::Aarch64Linux));
+            &AARCH64_LINUX
+        }
+        TargetName::Aarch64Macos => {
+            static AARCH64_MACOS: LazyLock<RuntimeArtifactV1> =
+                LazyLock::new(|| load(TargetName::Aarch64Macos));
+            &AARCH64_MACOS
         }
     }
 }

@@ -3,7 +3,7 @@ use super::Builder;
 use crate::{
     a64::{Error, abi, machine::Item},
     gir::body::CallKind,
-    lir::body::{Body, Call, CallTarget, Type, ValueId},
+    lir::body::{Body, Call, CallTarget, Provenance, Type, ValueId},
 };
 
 pub fn requires_maps(call: &Call) -> bool {
@@ -39,7 +39,7 @@ pub fn lower(
     tail: bool,
     b: &mut Builder<'_>,
 ) -> Result<(), Error> {
-    lower_mode(body, call, args, results, tail, Mode::Isolated, b)
+    lower_mode(body, call, args, results, tail, Mode::Isolated, None, b)
 }
 
 pub(crate) fn lower_mode(
@@ -49,8 +49,14 @@ pub(crate) fn lower_mode(
     results: &[ValueId],
     tail: bool,
     mode: Mode,
+    landing: Option<(u32, u32)>,
     b: &mut Builder<'_>,
 ) -> Result<(), Error> {
+    if landing.is_some() && !matches!(mode, Mode::Runtime(Some(_))) {
+        return Err(crate::a64::error(
+            "A64 invoke requires a CallReturn safepoint anchor",
+        ));
+    }
     let runtime = matches!(mode, Mode::Runtime(_));
     if call.kind != CallKind::Managed {
         if !matches!(
@@ -101,27 +107,59 @@ pub(crate) fn lower_mode(
             "requires checked entry / stack maps (4c)",
         ));
     }
-    let target = match &call.target {
-        CallTarget::Instance(key) => abi::symbol(key),
-        CallTarget::Runtime(_) => b
-            .runtime_catalog
-            .ok_or_else(|| {
-                crate::a64::error("A64 runtime call requires a canonical source catalog")
-            })?
-            .call_target(call)?,
+    let (target, callee) = match &call.target {
+        CallTarget::Instance(key) => (abi::symbol(key), None),
+        CallTarget::Runtime(_) => (
+            b.runtime_catalog
+                .ok_or_else(|| {
+                    crate::a64::error("A64 runtime call requires a canonical source catalog")
+                })?
+                .call_target(call)?,
+            None,
+        ),
+        CallTarget::Indirect => {
+            // Code-provenance 参数是 callee：不占 ABI 槽，发射时物化到 x16 后 `blr`。
+            let codes = call
+                .parameters
+                .iter()
+                .enumerate()
+                .filter(|(_, p)| p.provenance == Some(Provenance::Code))
+                .map(|(index, _)| index)
+                .collect::<Vec<_>>();
+            let &[position] = codes.as_slice() else {
+                return Err(crate::a64::error(
+                    "A64 indirect call requires exactly one Code callee",
+                ));
+            };
+            (String::new(), Some((args[position].0, position)))
+        }
         _ => {
             return Err(crate::a64::error(
                 "only direct Instance or bound runtime calls supported",
             ));
         }
     };
+    if tail && callee.is_some() {
+        return Err(crate::a64::error("A64 indirect tail call unsupported"));
+    }
     if call.captures_arguments && !matches!(call.target, CallTarget::Runtime(_))
-        || !call.by_value.is_empty()
         || !call.foreign_arguments.is_empty()
     {
         return Err(crate::a64::error(
-            "capturing/aggregate/foreign call unsupported",
+            "capturing/foreign call unsupported",
         ));
+    }
+    // by_value/sret 参数是 caller 侧临时副本/结果缓冲的地址：一个 Ptr 车道，聚合读写
+    // 由 LIR 自身完成，与 x64 内部 ABI 同层语义。
+    let pointer_lane = |index: u32| {
+        call.parameters
+            .get(index as usize)
+            .is_none_or(|p| p.ty != Type::Ptr)
+    };
+    if call.by_value.iter().any(|(index, ..)| pointer_lane(*index))
+        || call.sret.is_some_and(|(index, ..)| pointer_lane(index))
+    {
+        return Err(crate::a64::error("invalid by_value/sret pointer lane"));
     }
     let kinds = |ids: &[ValueId]| {
         ids.iter()
@@ -150,7 +188,12 @@ pub(crate) fn lower_mode(
     {
         return Err(crate::a64::error("invalid hidden sret pointer/signature"));
     }
-    let arguments = args.iter().map(|id| id.0).collect();
+    let arguments = args
+        .iter()
+        .enumerate()
+        .filter(|(index, _)| callee.is_none_or(|(_, position)| position != *index))
+        .map(|(_, id)| id.0)
+        .collect();
     if tail {
         if call.sret.is_some()
             || body.signature.sret.is_some()
@@ -172,12 +215,14 @@ pub(crate) fn lower_mode(
         b.push(Item::Call {
             suspend: call.may_suspend,
             target,
+            callee: callee.map(|(value, _)| value),
             arguments,
             results: results.iter().map(|id| id.0).collect(),
             safepoint: match mode {
                 Mode::Isolated => None,
                 Mode::Runtime(site) => site,
             },
+            landing,
         });
         for result in results {
             if abi::class(body.values[result.index()].kind.ty) == abi::FPR {

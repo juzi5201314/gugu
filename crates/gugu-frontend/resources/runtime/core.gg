@@ -10,6 +10,7 @@ use std.runtime.process_context as process_context
 use std.runtime.timer as timer
 use std.runtime.control as control
 use std.runtime.signal as signal
+use std.runtime.roots.{gc_metadata_lookup, ROOT_NO_ENTRY}
 
 /* Gugu runtime 源树的 bootstrap 编译单元。平台入口和 intrinsic 保持在明确边界内。
  *
@@ -492,6 +493,18 @@ unsafe fn fatal_stack() {
 }
 
 /// 运行期只消费编译器验证过的封闭元数据；任何缺失或越界都属于 fatal，不转用户 panic。
+#[cfg(arch = "aarch64")]
+unsafe fn checked_safepoint(section: uint, length: uint, fragment_base: uint, return_pc: uint, kind: byte) {
+    unsafe {
+        if section == 0 || length < 72 || return_pc < fragment_base || word(section) != uint(0x31304d5355475547) || word32(section + 8) != uint(0x01080005) || word32(section + 24) != uint(183) || word(section + 64) != length {
+            fatal_runtime()
+        }
+        let (function, point) = gc_metadata_lookup(section, return_pc - fragment_base, uint(kind))
+        if function == ROOT_NO_ENTRY || point == ROOT_NO_ENTRY { fatal_runtime() }
+    }
+}
+
+#[cfg(not(arch = "aarch64"))]
 unsafe fn checked_safepoint(section: uint, length: uint, fragment_base: uint, return_pc: uint, kind: byte) {
     unsafe {
         if length < 72 || return_pc < fragment_base || word(section) != uint(0x31304d5355475547) || word32(section + 8) != uint(0x01080004) {
@@ -634,6 +647,51 @@ unsafe fn write_panic_report(message: *byte, len: uint, path: *byte, path_len: u
     }
 }
 
+/// a64 的 unwind blob 是 GUGUCF01 逐函数表拼接：blob 头 `{magic,函数数,arch=183}` +
+/// 每函数 `{first,end}` 偏移对；函数表头自带 `code_rva/code_size`，landing 记录接在
+/// 站点数组后（头内 +32 站点数、+36 landing 数），定位语义与 x64 版一致。
+#[cfg(arch = "aarch64")]
+unsafe fn panic_landing(unwind: uint, length: uint, fragment_base: uint, return_pc: uint) uint {
+    unsafe {
+        if length < 24 || return_pc <= fragment_base || word(unwind) != uint(0x3130444155475547) || word32(unwind + 12) != uint(183) { fatal_runtime() }
+        let functions = uint(word32(unwind + 8))
+        let site = return_pc - fragment_base - 1
+        let index: uint = 0
+        while index < functions {
+            let first = word(unwind + 16 + index * 8)
+            let end = word(unwind + 24 + index * 8)
+            if first > end || end > length || end - first < 40 { fatal_runtime() }
+            let table = unwind + first
+            if word(table) != uint(0x3130464355475547) || word32(table + 8) != uint(183) { fatal_runtime() }
+            let code_rva = word(table + 24)
+            let code_size = uint(word32(table + 12))
+            if site >= code_rva && site - code_rva < code_size {
+                let sites = uint(word32(table + 32))
+                let landings = uint(word32(table + 36))
+                if sites * 16 > end - first - 40 || landings * 16 > end - first - 40 - sites * 16 { fatal_runtime() }
+                let entry: uint = 0
+                let offset = site - code_rva
+                while entry < landings {
+                    let landing = table + 40 + sites * 16 + entry * 16
+                    let lo = uint(word32(landing))
+                    let hi = uint(word32(landing + 4))
+                    let target = uint(word32(landing + 8))
+                    if offset >= lo && offset < hi {
+                        if target >= code_size || hi > code_size { fatal_runtime() }
+                        return fragment_base + code_rva + target
+                    }
+                    entry = entry + 1
+                }
+                fatal_runtime()
+            }
+            index = index + 1
+        }
+        fatal_runtime()
+        0
+    }
+}
+
+#[cfg(not(arch = "aarch64"))]
 unsafe fn panic_landing(unwind: uint, length: uint, fragment_base: uint, return_pc: uint) uint {
     unsafe {
         if length < 48 || return_pc <= fragment_base || word(unwind) != uint(0x31304e5555475547) || word16(unwind + 8) != uint(1) || word(unwind + 36) != length { fatal_runtime() }

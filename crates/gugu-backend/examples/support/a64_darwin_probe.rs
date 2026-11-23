@@ -36,6 +36,7 @@ impl Probe {
     pub fn new(imports: Vec<NativeImport>) -> Self {
         let mut p = Self {
             world: World {
+                type_symbols: vec![],
                 platform: Platform::Darwin,
                 sections: vec![
                     section(Segment::Text, "__text", SectionContent::Code(vec![])),

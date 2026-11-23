@@ -188,6 +188,7 @@ fn fixture(target: &str) -> (&'static [Body], runtime::Catalog<'static>) {
         "gc_dispatch",
         "foreign_dispatch",
         "foreign_dirty_dispatch",
+        "panic_unwind",
     ]
     .into_iter()
     .enumerate()
@@ -211,6 +212,7 @@ fn darwin_program_image_links_the_full_startup_contract() {
         gc_types: &[0xAA; 16],
         gc_meta: &[0xBB; 16],
         interpreter: "",
+        cage_bytes: 0,
         identifier: "test.a64",
         universe: None,
     })
@@ -270,6 +272,7 @@ fn linux_program_image_links_the_full_startup_contract() {
         gc_types: &[0xAA; 16],
         gc_meta: &[0xBB; 16],
         interpreter: "/lib/ld-linux-aarch64.so.1",
+        cage_bytes: 0,
         identifier: "",
         universe: None,
     })

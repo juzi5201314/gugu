@@ -1,3 +1,4 @@
+#![cfg(not(arch = "aarch64"))]
 use std.runtime.net_platform as native
 use std.runtime.net_endpoint as endpoint
 use std.runtime.net_wait as waiting

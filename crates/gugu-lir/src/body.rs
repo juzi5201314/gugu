@@ -569,6 +569,66 @@ pub enum Op {
     CoverageCounter(u32),
 }
 
+impl Op {
+    /// op 的 lowering 域名：诊断与目标 legalization 错误消息中的稳定短名。
+    ///
+    /// op 命名是 LIR 词汇，所有后端共用；新增 op 必须在这里登记短名。
+    pub fn domain(&self) -> &'static str {
+        match self {
+            Op::IConst(_) => "IConst",
+            Op::FConst(_) => "FConst",
+            Op::SymbolAddr(_) => "SymbolAddr",
+            Op::StackAddr(_) => "StackAddr",
+            Op::RootInitAddr(_) => "RootInitAddr",
+            Op::PtrOffset => "PtrOffset",
+            Op::Integer(_) => "Integer",
+            Op::Float(_) => "Float",
+            Op::Compare { .. } => "Compare",
+            Op::Convert(_) => "Convert",
+            Op::Vector(_) => "Vector",
+            Op::Select => "Select",
+            Op::TrapIf => "TrapIf",
+            Op::Load(_) => "Load",
+            Op::Store(_) => "Store",
+            Op::Memcpy { .. } => "Memcpy",
+            Op::Memmove { .. } => "Memmove",
+            Op::Memset { .. } => "Memset",
+            Op::Atomic { .. } => "Atomic",
+            Op::GcAlloc { .. } => "GcAlloc",
+            Op::RegionAlloc { .. } => "RegionAlloc",
+            Op::PlatformCall(_) => "PlatformCall",
+            Op::RuntimeMachineCall(_) => "RuntimeMachineCall",
+            Op::RegionPublish { .. } => "RegionPublish",
+            Op::RegionReset { .. } => "RegionReset",
+            Op::PromoteManaged { .. } => "PromoteManaged",
+            Op::RegionTransfer { .. } => "RegionTransfer",
+            Op::MarkTicketBatch => "MarkTicketBatch",
+            Op::EdgeDeltaBatch => "EdgeDeltaBatch",
+            Op::ResolveSharedHandle => "ResolveSharedHandle",
+            Op::SharedAccessBegin { .. } => "SharedAccessBegin",
+            Op::SharedAccessEnd { .. } => "SharedAccessEnd",
+            Op::SharedFieldBarrier { .. } => "SharedFieldBarrier",
+            Op::SharedFieldBarrierReserved { .. } => "SharedFieldBarrierReserved",
+            Op::ForwardSharedHandle => "ForwardSharedHandle",
+            Op::DecodeCompressedRef => "DecodeCompressedRef",
+            Op::BarrierReserve(_) => "BarrierReserve",
+            Op::GcWriteBarrier { .. } => "GcWriteBarrier",
+            Op::GcWriteBarrierReserved { .. } => "GcWriteBarrierReserved",
+            Op::ScopedViewBegin { .. } => "ScopedViewBegin",
+            Op::ScopedViewEnd { .. } => "ScopedViewEnd",
+            Op::SafepointPoll { .. } => "SafepointPoll",
+            Op::StackCheck => "StackCheck",
+            Op::NoSafepointBegin(_) => "NoSafepointBegin",
+            Op::NoSafepointEnd(_) => "NoSafepointEnd",
+            Op::CoroutineSwitch => "CoroutineSwitch",
+            Op::Call(_) => "Call",
+            Op::ForeignCall(_) => "ForeignCall",
+            Op::InlineAsm(_) => "InlineAsm",
+            Op::CoverageCounter(_) => "CoverageCounter",
+        }
+    }
+}
+
 #[derive(Clone, Debug, Eq, PartialEq, Serialize, Deserialize)]
 pub enum Terminator {
     Jump(EdgeId),
@@ -779,6 +839,11 @@ pub struct Body {
 impl Body {
     pub fn args(&self, values: &Range<u32>) -> &[ValueId] {
         &self.operands[range(values)]
+    }
+    /// 指令结果值 id：`Instruction.results` 是 `values` 表的连续区间（见 build 的
+    /// `emit`），不是 `operands` 里的范围。
+    pub fn results(&self, inst: &Instruction) -> impl Iterator<Item = ValueId> {
+        inst.results.clone().map(ValueId)
     }
     pub fn params(&self, block: BlockId) -> &[Parameter] {
         &self.parameters[range(&self.blocks[block.index()].parameters)]

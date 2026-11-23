@@ -1,3 +1,4 @@
+#![cfg(not(arch = "aarch64"))]
 use std.net.address.{UnixAddr}
 use std.net.types.{Shutdown, DatagramRecv, ConnectOptions}
 use std.runtime.resource.{ResourceCell}

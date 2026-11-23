@@ -71,9 +71,13 @@ pub enum Item {
     Call {
         suspend: bool,
         target: String,
+        // 间接调用的 Code-provenance 参数值：不占 ABI 槽，物化到 x16 后 `blr`。
+        callee: Option<u32>,
         arguments: Vec<u32>,
         results: Vec<u32>,
         safepoint: Option<(u32, u32)>,
+        // (目标 block 标签, cleanup 链)：invoke 的落点，写入 a64 unwind 表 landing 记录。
+        landing: Option<(u32, u32)>,
     },
     TailCall {
         target: String,

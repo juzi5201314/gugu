@@ -412,6 +412,7 @@ pub struct Compilation {
     lir: Option<lir::Validated>,
     raw_contract: Option<RuntimeRawContractV1>,
     x64: Option<backend::x64::codegen::X64World>,
+    a64: Option<A64Codegen>,
     action_key: Option<project::ActionKey>,
     docs: Option<gugu_gir::docs::DocWorld>,
 }
@@ -467,8 +468,8 @@ impl Compilation {
     /// 返回已通过 verifier 的 LIR dump。
     pub fn dump_lir(&self) -> Option<String> {
         let lir = self.lir.as_ref()?;
-        let oracle = backend::x64::oracle::X64Oracle::new(lir.target().descriptor().cpu_baseline);
-        Some(lir.dump(&oracle))
+        let oracle = target_oracle(lir.target());
+        Some(lir.dump(oracle.as_ref()))
     }
 
     /// 返回 LIR 世界指纹。
@@ -534,6 +535,11 @@ impl Compilation {
     #[cfg(test)]
     pub(crate) fn x64_world(&self) -> Option<&backend::x64::codegen::X64World> {
         self.x64.as_ref()
+    }
+
+    /// 返回 a64 整程序装配产物（aarch64 目标的可执行编译才有）。
+    pub fn a64_program(&self) -> Option<&backend::a64::program::Program> {
+        self.a64.as_ref().map(|codegen| &codegen.program)
     }
 
     /// 返回已编码的栈图 section 字节；供 crate 内证明（门控根条目）使用。
@@ -682,6 +688,7 @@ impl Compiler {
                     lir: None,
                     raw_contract: None,
                     x64: None,
+                    a64: None,
                     action_key: None,
                     docs: None,
                 };
@@ -706,6 +713,7 @@ impl Compiler {
                     lir: None,
                     raw_contract: None,
                     x64: None,
+                    a64: None,
                     action_key: None,
                     docs: None,
                 };
@@ -740,6 +748,7 @@ impl Compiler {
                     lir: None,
                     raw_contract: None,
                     x64: None,
+                    a64: None,
                     action_key: None,
                     docs: None,
                 };
@@ -765,18 +774,19 @@ impl Compiler {
                 lir: None,
                 raw_contract: None,
                 x64: None,
+                    a64: None,
                 action_key: None,
                 docs: Some(frontend.docs),
             };
         }
-        let oracle = backend::x64::oracle::X64Oracle::new(target.descriptor().cpu_baseline);
+        let oracle = target_oracle(target);
         let lir = match lir::build(
             &frontend.hir,
             &frontend.gir,
             &frontend.mono,
             target,
             compression,
-            &oracle,
+            oracle.as_ref(),
             &self.queries,
             &source_map,
             (&frontend.installed, resources.prebuilt()),
@@ -800,6 +810,7 @@ impl Compiler {
                     lir: None,
                     raw_contract: None,
                     x64: None,
+                    a64: None,
                     action_key: None,
                     docs: Some(frontend.docs),
                 };
@@ -826,6 +837,7 @@ impl Compiler {
                         lir: Some(lir),
                         raw_contract: None,
                         x64: None,
+                    a64: None,
                         action_key: None,
                         docs: Some(frontend.docs),
                     };
@@ -853,6 +865,7 @@ impl Compiler {
                     lir: Some(lir),
                     raw_contract: None,
                     x64: None,
+                    a64: None,
                     action_key: None,
                     docs: Some(frontend.docs),
                 };
@@ -895,6 +908,7 @@ impl Compiler {
                     lir: Some(lir),
                     raw_contract: None,
                     x64: None,
+                    a64: None,
                     action_key: None,
                     docs: Some(frontend.docs),
                 };
@@ -925,14 +939,15 @@ impl Compiler {
             ),
         );
 
-        // 机器码片段：只有可执行入口才产出；统计供给 PlanBackend 的镜像计划。
+        // 机器码生成：x64 走片段世界，aarch64 走整程序装配（runtime catalog + 启动存储）。
+        // 只有可执行入口才产出；统计供给 PlanBackend 的镜像计划。
         let entry_instance = frontend
             .mono
             .root_categories
             .iter()
             .position(|category| *category == RootCategoryV1::Entry)
             .and_then(|index| frontend.mono.roots.get(index).copied());
-        let x64 = if frontend.hir.module().entry.is_some() {
+        let (x64, a64) = if frontend.hir.module().entry.is_some() {
             let outcome = entry_instance
                 .ok_or_else(|| {
                     vec![Diagnostic::error(
@@ -942,20 +957,21 @@ impl Compiler {
                     )]
                 })
                 .and_then(|entry| {
-                    backend::x64::codegen::build(
+                    build_machine_codegen(
+                        target,
                         &lir,
                         &frontend.mono.universe,
                         &raw_contract,
-                        target,
                         &self.queries,
                         &source_map,
-                        &entry,
+                        entry,
                         glues,
-                        (&frontend.installed, resources.prebuilt()),
+                        &frontend.installed,
+                        resources.prebuilt(),
                     )
                 });
             match outcome {
-                Ok(world) => {
+                Ok(MachineCodegen::X64(world)) => {
                     graph.complete(
                         ActionKind::Codegen,
                         format!(
@@ -966,7 +982,25 @@ impl Compiler {
                             world.relocation_count()
                         ),
                     );
-                    Some(world)
+                    (Some(world), None)
+                }
+                Ok(MachineCodegen::A64 { program, glues }) => {
+                    graph.complete(
+                        ActionKind::Codegen,
+                        format!(
+                            "A64 整程序装配：{} 个节，{} 字节镜像，{} 个重定位",
+                            program.world.sections.len(),
+                            program.image.len(),
+                            program.world.relocations.len() + program.world.pointers.len()
+                        ),
+                    );
+                    (
+                        None,
+                        Some(A64Codegen {
+                            program,
+                            glues,
+                        }),
+                    )
                 }
                 Err(errors) => {
                     for error in errors {
@@ -986,6 +1020,7 @@ impl Compiler {
                         lir: Some(lir),
                         raw_contract: Some(raw_contract),
                         x64: None,
+                        a64: None,
                         action_key: None,
                         docs: Some(frontend.docs),
                     };
@@ -993,10 +1028,24 @@ impl Compiler {
             }
         } else {
             graph.complete(ActionKind::Codegen, "没有可执行入口");
-            None
+            (None, None)
         };
 
         let native_link = native_link.with_standard_library(target, &lir);
+        let codegen_key = x64
+            .as_ref()
+            .map(|world| CodegenKey {
+                encoder: world.encoder_fingerprint(),
+                fragments: world.fingerprint(),
+                glues: world.glues().summary(),
+            })
+            .or_else(|| {
+                a64.as_ref().map(|codegen| CodegenKey {
+                    encoder: backend::a64::contract::fingerprint(),
+                    fragments: hash::hash_domain("gugu-a64-image-v1", &codegen.program.image),
+                    glues: codegen.glues.summary(),
+                })
+            });
         let action_key = Some(compilation_action_key(
             target,
             &source_map,
@@ -1004,7 +1053,7 @@ impl Compiler {
             &lir,
             &raw_contract,
             resources.manifest_digest(),
-            x64.as_ref(),
+            codegen_key,
             loaded
                 .plan
                 .as_ref()
@@ -1016,16 +1065,30 @@ impl Compiler {
         let hir = frontend.hir;
         let gir = frontend.gir;
 
-        let backend_plan = match x64.as_ref() {
-            None => Ok(None),
-            Some(world) => backend::plan(
+        let backend_plan = match (&x64, &a64) {
+            (None, None) => Ok(None),
+            (Some(world), _) => backend::plan(
                 target,
                 &hir,
                 &frontend.mono,
                 &gir,
                 &lir,
                 &raw_contract,
-                world,
+                backend::PlanCodegen::X64(world),
+                frontend.analysis.runtime_checks_elided_count,
+                &native_link,
+            ),
+            (None, Some(codegen)) => backend::plan(
+                target,
+                &hir,
+                &frontend.mono,
+                &gir,
+                &lir,
+                &raw_contract,
+                backend::PlanCodegen::A64 {
+                    program: &codegen.program,
+                    glues: &codegen.glues,
+                },
                 frontend.analysis.runtime_checks_elided_count,
                 &native_link,
             ),
@@ -1047,6 +1110,7 @@ impl Compiler {
                     lir: Some(lir),
                     raw_contract: Some(raw_contract),
                     x64,
+                    a64,
                     action_key,
                     docs: Some(frontend.docs),
                 };
@@ -1071,6 +1135,7 @@ impl Compiler {
                     lir: Some(lir),
                     raw_contract: Some(raw_contract),
                     x64,
+                    a64,
                     action_key,
                     docs: Some(frontend.docs),
                 };
@@ -1106,6 +1171,7 @@ impl Compiler {
             lir: Some(lir),
             raw_contract: Some(raw_contract),
             x64,
+            a64,
             action_key,
             docs: Some(frontend.docs),
         }
@@ -1134,6 +1200,110 @@ pub(crate) fn compiler_identity() -> String {
 /// 规范化与分段表来自依赖，实际版本记录在 [`compiler_identity`] 里。
 pub const UNICODE_VERSION: &str = runtime::text::UNICODE_VERSION;
 
+/// aarch64 整程序装配产物与解析它的 glue 绑定表。
+#[derive(Clone, Debug)]
+struct A64Codegen {
+    program: backend::a64::program::Program,
+    glues: backend::x64::glue::RuntimeGlueBindings,
+}
+
+/// 一次编译的机器世界产出：x64 片段世界或 a64 整程序装配。
+enum MachineCodegen {
+    X64(backend::x64::codegen::X64World),
+    A64 {
+        program: backend::a64::program::Program,
+        glues: backend::x64::glue::RuntimeGlueBindings,
+    },
+}
+
+/// 写进 action key 的编码器身份、片段指纹与 glue 摘要。
+struct CodegenKey {
+    encoder: [u8; 32],
+    fragments: [u8; 32],
+    glues: Vec<u8>,
+}
+
+/// 按目标描述符选择 LIR `TargetOracle`：x86_64 走 x64 表与 baseline verifier，
+/// aarch64 复用 a64 lowering 的同一分派（见 `a64::oracle::A64Oracle`）。
+fn target_oracle(target: TargetName) -> Box<dyn lir::target::TargetOracle> {
+    match target.descriptor().arch {
+        crate::target::Architecture::Aarch64 => Box::new(backend::a64::oracle::A64Oracle::new(
+            target.name(),
+        )),
+        _ => Box::new(backend::x64::oracle::X64Oracle::new(
+            target.descriptor().cpu_baseline,
+        )),
+    }
+}
+
+/// 按目标架构分派机器码生成：x64 录片段世界，aarch64 装配整程序镜像。
+#[expect(
+    clippy::too_many_arguments,
+    reason = "机器码生成需要冻结前端各层产物与 runtime 契约"
+)]
+fn build_machine_codegen(
+    target: TargetName,
+    lir: &lir::Validated,
+    universe: &gugu_gir::late::universe::TypeUniverse,
+    raw_contract: &RuntimeRawContractV1,
+    queries: &QueryEngine,
+    source_map: &SourceMap,
+    entry: [u8; 32],
+    glues: backend::x64::glue::RuntimeGlueBindings,
+    installed: &gugu_gir::functions::InstalledFunctions,
+    prebuilt: Option<&crate::runtime::RuntimePrebuiltV1>,
+) -> Result<MachineCodegen, Vec<Diagnostic>> {
+    let descriptor = target.descriptor();
+    if !matches!(descriptor.arch, crate::target::Architecture::Aarch64) {
+        return backend::x64::codegen::build(
+            lir,
+            universe,
+            raw_contract,
+            target,
+            queries,
+            source_map,
+            &entry,
+            glues,
+            (installed, prebuilt),
+        )
+        .map(MachineCodegen::X64);
+    }
+    let a64_error = |error: backend::a64::Error| {
+        vec![Diagnostic::error(
+            DiagnosticCode::BackendInvariant,
+            error.0,
+            None,
+        )]
+    };
+    let catalog = backend::a64::runtime::Catalog::from_resolved(&glues, lir).map_err(a64_error)?;
+    let platform = match descriptor.os {
+        OperatingSystem::Linux => backend::a64::foreign::Platform::Linux,
+        OperatingSystem::Macos => backend::a64::foreign::Platform::Darwin,
+        os => {
+            return Err(vec![Diagnostic::error(
+                DiagnosticCode::BackendInvariant,
+                format!("aarch64 目标不支持 OS {os:?}"),
+                None,
+            )]);
+        }
+    };
+    let gc_metadata = raw_contract.gc_metadata();
+    let program = backend::a64::program::build(&backend::a64::program::ProgramRequest {
+        bodies: lir.bodies(),
+        entry,
+        platform,
+        catalog: &catalog,
+        gc_types: &gc_metadata.type_section,
+        gc_meta: &gc_metadata.metadata_section,
+        cage_bytes: raw_contract.compression().cage_bytes(),
+        interpreter: descriptor.linux_interpreter.unwrap_or(""),
+        identifier: "gugu",
+        universe: Some(universe),
+    })
+    .map_err(a64_error)?;
+    Ok(MachineCodegen::A64 { program, glues })
+}
+
 /// 前端 action 的完整输入集合：identity、host/target、源码摘要、cfg 与 registry 摘要。
 #[expect(
     clippy::too_many_arguments,
@@ -1146,7 +1316,7 @@ fn compilation_action_key(
     lir: &lir::Validated,
     raw_contract: &RuntimeRawContractV1,
     runtime_artifact: [u8; 32],
-    x64: Option<&backend::x64::codegen::X64World>,
+    codegen: Option<CodegenKey>,
     plan: Option<(bool, &frontend::cfg::CfgContext)>,
     native_link: &NativeLink,
     embed: Option<&EmbedHost>,
@@ -1197,10 +1367,10 @@ fn compilation_action_key(
     inputs.set_runtime_raw(raw_contract.fingerprint());
     inputs.set_runtime_artifact(runtime_artifact);
     inputs.set_target_descriptor(target.descriptor().digest());
-    if let Some(x64) = x64 {
-        inputs.set_backend_encoder(x64.encoder_fingerprint());
-        inputs.set_backend_fragments(x64.fingerprint());
-        inputs.set_runtime_glues(x64.glues().summary());
+    if let Some(codegen) = codegen {
+        inputs.set_backend_encoder(codegen.encoder);
+        inputs.set_backend_fragments(codegen.fragments);
+        inputs.set_runtime_glues(codegen.glues);
     }
     inputs.set_query_registry(crate::query::registry_fingerprint());
     let mut policy = frontend::gir::pass::policy_bytes();

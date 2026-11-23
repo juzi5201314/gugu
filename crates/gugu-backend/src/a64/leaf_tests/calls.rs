@@ -336,8 +336,22 @@ fn unsafe_call_and_checked_entry_rejections_are_contextual() {
             "{error}"
         );
     }
+    // Indirect 有专属校验（callee 形状），拒绝信息比通用 Instance 检查更精确。
+    let mut f = caller(&[], &[]);
+    f.op(
+        Op::Call(Call {
+            target: CallTarget::Indirect,
+            ..safe.clone()
+        }),
+        &[],
+        &[],
+    );
+    let error = codegen::compile_function(&f.body).unwrap_err().0;
+    assert!(
+        error.contains("block 0 site 0") && error.contains("indirect call"),
+        "{error}"
+    );
     for target in [
-        CallTarget::Indirect,
         CallTarget::Vtable { slot: 0 },
         CallTarget::External {
             key: [0; 32],

@@ -22,7 +22,8 @@ pub fn lower(body: &Body, inst: &Instruction, b: &mut Builder<'_>) -> Result<(),
         unreachable!()
     };
     let args = body.args(&inst.arguments);
-    let results = body.args(&inst.results);
+    let results_vec: Vec<crate::lir::body::ValueId> = body.results(inst).collect();
+    let results = results_vec.as_slice();
     let valid = match op {
         AtomicOp::Load => matches!(ordering, Relaxed | Acquire | SeqCst),
         AtomicOp::Store => matches!(ordering, Relaxed | Release | SeqCst),

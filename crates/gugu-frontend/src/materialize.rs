@@ -20,11 +20,21 @@ pub fn materialize(
 }
 
 /// 在已物化的基础表上录制函数表；输入的函数表必须为空。
+///
+/// aarch64 还没有 a64 片段录制路径，函数表留空：加载端照常现算全部内建实例，
+/// 产物与用户编译现算的结果同源这一不变式不受影响。
 pub fn materialize_functions(
     target: TargetName,
     mut artifact: RuntimeArtifactV1,
 ) -> Result<RuntimeArtifactV1, MaterializeError> {
-    let functions = record_functions(&artifact, target).map_err(MaterializeError::Derive)?;
+    let functions = if matches!(
+        target.descriptor().arch,
+        crate::target::Architecture::Aarch64
+    ) {
+        Vec::new()
+    } else {
+        record_functions(&artifact, target).map_err(MaterializeError::Derive)?
+    };
     let prebuilt = artifact
         .payload
         .prebuilt

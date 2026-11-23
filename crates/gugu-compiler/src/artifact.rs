@@ -33,6 +33,26 @@ static MACOS: LazyLock<Result<RuntimeArtifactV1, RuntimeArtifactError>> = LazyLo
     )))
 });
 
+static AARCH64_LINUX: LazyLock<Result<RuntimeArtifactV1, RuntimeArtifactError>> =
+    LazyLock::new(|| {
+        RuntimeArtifactV1::decode(include_bytes!(concat!(
+            env!("OUT_DIR"),
+            "/runtime-aarch64-linux",
+            env!("GUGU_PREBUILT_FLAVOR"),
+            ".gbc"
+        )))
+    });
+
+static AARCH64_MACOS: LazyLock<Result<RuntimeArtifactV1, RuntimeArtifactError>> =
+    LazyLock::new(|| {
+        RuntimeArtifactV1::decode(include_bytes!(concat!(
+            env!("OUT_DIR"),
+            "/runtime-aarch64-macos",
+            env!("GUGU_PREBUILT_FLAVOR"),
+            ".gbc"
+        )))
+    });
+
 /// 返回目标的 core 目标名。
 const fn core_target(target: TargetName) -> gugu_compiler_core::TargetName {
     match target {
@@ -68,10 +88,8 @@ pub fn embedded_artifact(
         TargetName::X86_64Linux => decode(&LINUX, target),
         TargetName::X86_64Windows => decode(&WINDOWS, target),
         TargetName::X86_64Macos => decode(&MACOS, target),
-        // aarch64 的 runtime artifact 尚未构建：内建块物化仍只覆盖 x64 目标。
-        TargetName::Aarch64Linux | TargetName::Aarch64Macos => Err(RuntimeArtifactError::Manifest(
-            "aarch64 目标的 runtime artifact 尚未构建".to_owned(),
-        )),
+        TargetName::Aarch64Linux => decode(&AARCH64_LINUX, target),
+        TargetName::Aarch64Macos => decode(&AARCH64_MACOS, target),
     }
 }
 

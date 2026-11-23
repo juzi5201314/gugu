@@ -16,7 +16,7 @@ use crate::runtime::entry::state;
 use crate::runtime::processor::{PROCESSOR_STATE_OFFSET, PROCESSOR_SYSTEM_SLOT_OFFSET};
 
 use super::linux_syscall::syscall;
-use super::{AddressMode, Builder, Fragment, HOT, LR, PROCESSOR, SP, add_imm, imm, mem, movz, reg};
+use super::{AddressMode, Builder, Fragment, HOT, LR, PROCESSOR, SP, add_imm, condition, imm, mem, movz, next, reg};
 
 /// main/协程返回登记的调度原因：2 = 协程返回（与 x64 哨兵同值）。
 const REASON_COROUTINE_RETURN: u16 = 2;
@@ -78,6 +78,49 @@ pub fn process_exit(platform: Platform) -> Fragment {
             b.external_branch("b", &import_stub_symbol("exit"));
         }
     }
+    b.finish()
+}
+
+/// panic 入口（invoke 调用点）：x0-x5 = panic 记录六车道，LR = 原调用返回 PC
+/// （即 CallReturn safepoint pc）。装 pc=x6、state=x7 后 `bl panic_dispatch`
+/// → x0 = landing PC，`br x0` 交给调用方帧内 landing。a64 `bl` 不压栈，
+/// 没有 x64 片段的返回槽搬运。
+pub fn panic(panic_dispatch: &str) -> Fragment {
+    let mut b = Builder::default();
+    b.add(Reg::x(6), LR, 0);
+    mailbox(&mut b, Reg::x(7));
+    b.external_branch("bl", panic_dispatch);
+    b.emit("br", [reg(Reg::x(0))]);
+    b.finish()
+}
+
+/// panic 挂起恢复（4c.2 invoke/unwind）：校验 state+104 挂起标记后按
+/// `panic_unwind(message, len, path, path_len, line, column, state)` 的内部整数
+/// 通道装参并 bl 过去；标记无效时 `process_exit(2)`，与 x64 panic_resume 片段同契约。
+pub fn panic_resume(panic_unwind: &str, process_exit: &str) -> Fragment {
+    const NE: u8 = 1;
+    let mut b = Builder::default();
+    mailbox(&mut b, Reg::x(9));
+    b.memory("ldr.W.Unsigned", Reg::w(10), Reg::x(9), 104);
+    b.emit(
+        "subs.W.imm",
+        [reg(Reg::zr(Width::W)), reg(Reg::w(10)), add_imm(1)],
+    );
+    let invalid = b.offset();
+    b.emit("b.cond", [next(), condition(NE)]);
+    for index in 0..6u8 {
+        b.memory(
+            "ldr.X.Unsigned",
+            Reg::x(index),
+            Reg::x(9),
+            state::PANIC_MESSAGE as usize + usize::from(index) * 8,
+        );
+    }
+    b.add(Reg::x(6), Reg::x(9), 0);
+    b.external_branch("bl", panic_unwind);
+    b.patch_branch(invalid, "b.cond", &[], &[condition(NE)]);
+    b.emit("movz.X", [reg(Reg::x(0)), movz(2)]);
+    b.external_branch("b", process_exit);
     b.finish()
 }
 

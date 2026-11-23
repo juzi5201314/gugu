@@ -268,7 +268,7 @@ fn serialized_a64_cfa_recovers_entry_and_framed_callers() {
             entry: false,
         },
     ];
-    let bytes = a64_unwind::encode(code, 16, &sites).unwrap();
+    let bytes = a64_unwind::encode(code, 16, &sites, &[]).unwrap();
     let table = a64_unwind::decode(&bytes).unwrap();
     let mut call = point(0, 8);
     call.1.pc_offset = 12;
@@ -320,8 +320,7 @@ fn a64_cfa_decoder_rejects_corruption_and_accepts_empty_sites() {
                 pc_offset: 12,
                 entry: false,
             },
-        ],
-    )
+        ], &[])
     .unwrap();
     for length in [0, 7, 39, bytes.len() - 1] {
         assert!(a64_unwind::decode(&bytes[..length]).is_err());
@@ -336,7 +335,7 @@ fn a64_cfa_decoder_rejects_corruption_and_accepts_empty_sites() {
     }
     let mut empty_code = code;
     empty_code.frame_size = 0;
-    let table = a64_unwind::decode(&a64_unwind::encode(empty_code, 0, &[]).unwrap()).unwrap();
+    let table = a64_unwind::decode(&a64_unwind::encode(empty_code, 0, &[], &[]).unwrap()).unwrap();
     assert!(table.sites.is_empty());
     assert!(table.caller(0x1008, 0x8000, &[], &[]).is_err());
 }

@@ -1,6 +1,7 @@
 //! 尚未登记目标的 AArch64 运行时机器片段。
 
 mod atomic;
+mod callback;
 mod coroutine;
 mod darwin_fd;
 mod darwin_net;
@@ -17,10 +18,12 @@ mod linux_resolver;
 mod linux_signal;
 mod linux_syscall;
 mod linux_vm;
+mod native;
 mod poll;
 mod runtime;
 
 pub use atomic::{AtomicWidth, atomic};
+pub use callback::{callback_control, callback_queue};
 pub use coroutine::{
     Context, ContextCode, MorestackCode, MorestackMailbox, MorestackScratch, context_switch,
     morestack_or_poll,
@@ -43,10 +46,17 @@ pub use linux_resolver::{
 };
 pub use linux_signal::linux_signal_dispatch;
 pub use linux_vm::{linux_page_size, linux_vm};
+pub use native::{
+    cage_control, callback_file_worker, darwin_environment_symbol, darwin_fs_poll, darwin_fs_start,
+    darwin_monotonic_nanos, darwin_net_close, darwin_parallelism_probe, darwin_startup_call,
+    darwin_wall_nanos, linux_environment_symbol, linux_fs_poll, linux_fs_start,
+    linux_monotonic_nanos, linux_net_close, linux_parallelism_probe, linux_startup_call,
+    linux_wall_nanos, native_imports, process_native_worker, stack_copy_raw, stack_read_word,
+};
 pub use poll::safepoint_slow;
 pub use runtime::{
-    context_restore, coroutine_enter, current_slot, gc_config, gc_enter, main_return, process_exit,
-    report_write, runtime_poll_defer, thread_id,
+    context_restore, coroutine_enter, current_slot, gc_config, gc_enter, main_return, panic,
+    panic_resume, process_exit, report_write, runtime_poll_defer, thread_id,
 };
 
 use super::{

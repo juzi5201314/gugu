@@ -192,11 +192,11 @@ pub(crate) fn select_body_with_poll(
                     LoweringError::UnregisteredGlue { glue }
                 }
                 LoweringError::Unsupported { detail, .. } => LoweringError::Unsupported {
-                    op: lower::domain(&instruction.op),
+                    op: instruction.op.domain(),
                     detail,
                 },
                 LoweringError::InvalidOperands => LoweringError::Unsupported {
-                    op: lower::domain(&instruction.op),
+                    op: instruction.op.domain(),
                     detail: "操作数不符合 op 语义",
                 },
             })?;
@@ -214,7 +214,7 @@ pub(crate) fn select_body_with_poll(
             clobbers = clobbers.union(lowered.clobbers);
             sites.push(SelectedSite {
                 instruction: crate::lir::body::id(index),
-                op: lower::domain(&instruction.op),
+                op: instruction.op.domain(),
                 kind: SiteKind::of(&instruction.op),
                 spill_pointers: spills_pointers(&instruction.op),
                 lowered,

@@ -26,6 +26,7 @@ pub mod machine;
 pub mod macho;
 pub mod memory;
 pub mod metadata;
+pub mod oracle;
 mod print;
 pub mod program;
 pub mod reg;
