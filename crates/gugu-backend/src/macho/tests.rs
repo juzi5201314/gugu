@@ -447,6 +447,44 @@ fn arm64_darwin_entry_writes_the_full_runtime_contract() {
 }
 
 #[test]
+fn arm64_darwin_entry_lengths_follow_metadata_offsets() {
+    use crate::{
+        a64::macho::link_entry,
+        runtime::entry::{Rt0Payload, rt0_params},
+    };
+    use std::mem::offset_of;
+
+    let (request, mut entry) = arm64_darwin_runtime_fixture();
+    let mut runtime = entry.runtime.unwrap();
+    runtime.stackmap = at(5, 8);
+    runtime.gc_types = Some(at(7, 24));
+    entry.runtime = Some(runtime);
+    let file = link_entry(request, entry).unwrap().bytes;
+    let rva = |name: &str, offset: u64| {
+        let (address, _) = section_address(&file, name);
+        address + offset - crate::macho::IMAGE_BASE
+    };
+    let (_, payload_file) = section_address(&file, "__data");
+    for (field, expected) in [
+        (offset_of!(Rt0Payload, stackmap), rva("__gugu_maps", 8)),
+        (offset_of!(Rt0Payload, stackmap_len), 24),
+        (offset_of!(Rt0Payload, gc_types), 0),
+        (offset_of!(Rt0Payload, gc_types_len), 0),
+    ] {
+        assert_eq!(
+            u64_at(&file, payload_file + 8 + field),
+            expected,
+            "payload field {field}"
+        );
+    }
+    let (_, params_file) = section_address(&file, "__rt0_params");
+    assert_eq!(
+        u64_at(&file, params_file + rt0_params::ENTRY * 8),
+        rva("__text", 8)
+    );
+}
+
+#[test]
 fn arm64_darwin_entry_rejects_invalid_runtime_locations() {
     use crate::a64::macho::link_entry;
 

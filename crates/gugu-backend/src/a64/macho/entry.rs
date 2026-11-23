@@ -304,12 +304,18 @@ fn write_startup_data(
         (offset_of!(Rt0Payload, initial_slot), slot),
     ];
     if let Some(runtime) = entry.runtime {
+        let len = |at: Location| -> Result<u64, String> {
+            layout.sections[at.section]
+                .size
+                .checked_sub(at.offset)
+                .ok_or_else(|| format!("invalid arm64 Mach-O metadata location {at:?}"))
+        };
         let blob = |at: Option<Location>| -> Result<(u64, u64), String> {
             match at {
                 None => Ok((0, 0)),
                 Some(at) => {
-                    let size = layout.sections[at.section].size;
-                    Ok((if size == 0 { 0 } else { rva(at)? }, size))
+                    let len = len(at)?;
+                    Ok((if len == 0 { 0 } else { rva(at)? }, len))
                 }
             }
         };
@@ -330,15 +336,9 @@ fn write_startup_data(
                 offset_of!(Rt0Payload, fragment_base),
                 rva(runtime.fragment_base)?,
             ),
-            (
-                offset_of!(Rt0Payload, stackmap_len),
-                layout.sections[runtime.stackmap.section].size,
-            ),
+            (offset_of!(Rt0Payload, stackmap_len), len(runtime.stackmap)?),
             (offset_of!(Rt0Payload, unwind), rva(runtime.unwind)?),
-            (
-                offset_of!(Rt0Payload, unwind_len),
-                layout.sections[runtime.unwind.section].size,
-            ),
+            (offset_of!(Rt0Payload, unwind_len), len(runtime.unwind)?),
             (offset_of!(Rt0Payload, gc_types), types),
             (offset_of!(Rt0Payload, gc_types_len), types_len),
             (offset_of!(Rt0Payload, gc_meta), meta),

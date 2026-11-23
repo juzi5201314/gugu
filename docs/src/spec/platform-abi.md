@@ -460,7 +460,7 @@ rt0 和 runtime 通过 PE 导入表调用目标注册表允许的系统 DLL；�
 
 内部 arm64 Mach-O 的 `LC_MAIN` 将 Darwin 的 `argc`、`argv` 和 `envp` 传给 rt0；`rt0_start` 正常返回时，进程以其返回值调用 libSystem 的 `exit`。如果镜像已导入 libSystem 的 `_exit`，入口复用该导入。添加入口不改变已有调用桩的绑定目标。这一入口不构成目标登记。
 
-调用方可以通过 `DarwinRuntime` 启动契约让链接器补齐其余启动数据：参数块写入 main `entry`、可写 `runtime_state` 和 `coroutine_enter` 的镜像相对地址，载荷写入 `main_entry`、`runtime_state`、`main_return`、`stackmap`、`unwind`、`gc_types`、`gc_meta` 与各自字节长度，以及 `fragment_base`（代码节起点的相对地址）。`RELOC_TABLE`、`PROTECT_*` 参数保持 0——镜像重基址由 dyld chained fixups 完成；不存在的 GC blob 记为指针和长度皆 0。`runtime_state` 必须位于可写节且容下运行期状态区，入口与返回哨兵必须位于代码节内；不提供该契约时载荷只写版本号与初始槽，维持验证探针形态。
+调用方可以通过 `DarwinRuntime` 启动契约让链接器补齐其余启动数据：参数块写入 main `entry`、可写 `runtime_state` 和 `coroutine_enter` 的镜像相对地址，载荷写入 `main_entry`、`runtime_state`、`main_return`、`stackmap`、`unwind`、`gc_types`、`gc_meta` 与各自从指定偏移到节尾的字节数，以及 `fragment_base`（代码节起点的相对地址）。`RELOC_TABLE`、`PROTECT_*` 参数保持 0——镜像重基址由 dyld chained fixups 完成；不存在的 GC blob 记为指针和长度皆 0。`runtime_state` 必须位于 `__DATA` 可写节且容下运行期状态区；`entry`、`coroutine_enter`、`main_return` 必须是代码节内 4 字节对齐且不越界的地址；`fragment_base` 必须是代码节偏移 0 的起点；不提供该契约时载荷只写版本号与初始槽，维持验证探针形态。
 
 rt0 和运行时通过 libSystem 调用 Darwin 接口；文件系统、套接字、进程和信号订阅使用同一标准库语义，但原生结构、信号编号和错误码不与 Linux 互换。普通信号由 kqueue 收集；订阅期间的原生处理器不执行用户代码，也不把忽略信号的 disposition 传给通过 exec 启动的子进程。
 
