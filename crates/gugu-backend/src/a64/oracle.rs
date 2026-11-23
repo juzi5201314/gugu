@@ -80,9 +80,11 @@ impl TargetOracle for A64Oracle {
                 call,
                 body.args(&instruction.arguments),
                 &body.results(&instruction).collect::<Vec<_>>(),
-                false,
-                lower::call::Mode::Runtime(None),
-                None,
+                lower::call::CallTail {
+                    tail: false,
+                    mode: lower::call::Mode::Runtime(None),
+                    landing: None,
+                },
                 &mut builder,
             )
             .map_err(|error| LegalizeError::MissingSequence {

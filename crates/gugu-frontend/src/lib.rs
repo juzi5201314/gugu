@@ -972,6 +972,7 @@ impl Compiler {
                 });
             match outcome {
                 Ok(MachineCodegen::X64(world)) => {
+                    let world = *world;
                     graph.complete(
                         ActionKind::Codegen,
                         format!(
@@ -984,7 +985,8 @@ impl Compiler {
                     );
                     (Some(world), None)
                 }
-                Ok(MachineCodegen::A64 { program, glues }) => {
+                Ok(MachineCodegen::A64(a64)) => {
+                    let A64Codegen { program, glues } = *a64;
                     graph.complete(
                         ActionKind::Codegen,
                         format!(
@@ -1203,11 +1205,8 @@ struct A64Codegen {
 
 /// 一次编译的机器世界产出：x64 片段世界或 a64 整程序装配。
 enum MachineCodegen {
-    X64(backend::x64::codegen::X64World),
-    A64 {
-        program: backend::a64::program::Program,
-        glues: backend::x64::glue::RuntimeGlueBindings,
-    },
+    X64(Box<backend::x64::codegen::X64World>),
+    A64(Box<A64Codegen>),
 }
 
 /// 写进 action key 的编码器身份、片段指纹与 glue 摘要。
@@ -1260,7 +1259,7 @@ fn build_machine_codegen(
             glues,
             (installed, prebuilt),
         )
-        .map(MachineCodegen::X64);
+        .map(|world| MachineCodegen::X64(Box::new(world)));
     }
     let a64_error = |error: backend::a64::Error| {
         vec![Diagnostic::error(
@@ -1295,7 +1294,7 @@ fn build_machine_codegen(
         universe: Some(universe),
     })
     .map_err(a64_error)?;
-    Ok(MachineCodegen::A64 { program, glues })
+    Ok(MachineCodegen::A64(Box::new(A64Codegen { program, glues })))
 }
 
 /// 前端 action 的完整输入集合：identity、host/target、源码摘要、cfg 与 registry 摘要。

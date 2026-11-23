@@ -39,7 +39,25 @@ pub fn lower(
     tail: bool,
     b: &mut Builder<'_>,
 ) -> Result<(), Error> {
-    lower_mode(body, call, args, results, tail, Mode::Isolated, None, b)
+    lower_mode(
+        body,
+        call,
+        args,
+        results,
+        CallTail {
+            tail,
+            mode: Mode::Isolated,
+            landing: None,
+        },
+        b,
+    )
+}
+
+/// 调用的尾态描述：是否尾调用、调用模式与 invoke 异常落点。
+pub(crate) struct CallTail {
+    pub tail: bool,
+    pub mode: Mode,
+    pub landing: Option<(u32, u32)>,
 }
 
 pub(crate) fn lower_mode(
@@ -47,11 +65,14 @@ pub(crate) fn lower_mode(
     call: &Call,
     args: &[ValueId],
     results: &[ValueId],
-    tail: bool,
-    mode: Mode,
-    landing: Option<(u32, u32)>,
+    exit: CallTail,
     b: &mut Builder<'_>,
 ) -> Result<(), Error> {
+    let CallTail {
+        tail,
+        mode,
+        landing,
+    } = exit;
     if landing.is_some() && !matches!(mode, Mode::Runtime(Some(_))) {
         return Err(crate::a64::error(
             "A64 invoke requires a CallReturn safepoint anchor",

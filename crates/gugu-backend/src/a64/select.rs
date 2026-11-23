@@ -124,12 +124,14 @@ fn select_mode(
                             body,
                             call,
                             body.args(&instruction.arguments),
-                            &body.results(&instruction).collect::<Vec<_>>(),
-                            false,
-                            lower::call::Mode::Runtime(
-                                instruction.safepoint.map(|_| (index as u32, site)),
-                            ),
-                            None,
+                            &body.results(instruction).collect::<Vec<_>>(),
+                            lower::call::CallTail {
+                                tail: false,
+                                mode: lower::call::Mode::Runtime(
+                                    instruction.safepoint.map(|_| (index as u32, site)),
+                                ),
+                                landing: None,
+                            },
                             &mut b,
                         )
                         .map_err(|e| Error(format!("{}: {e}", b.context)))?;
@@ -358,11 +360,13 @@ fn terminator(
                 call,
                 body.args(arguments),
                 &result_ids,
-                false,
-                lower::call::Mode::Runtime(
-                    safepoint.map(|_| (index as u32, block.instructions.end)),
-                ),
-                Some((landing_block.0 + 1, cleanup)),
+                lower::call::CallTail {
+                    tail: false,
+                    mode: lower::call::Mode::Runtime(
+                        safepoint.map(|_| (index as u32, block.instructions.end)),
+                    ),
+                    landing: Some((landing_block.0 + 1, cleanup)),
+                },
                 b,
             )?;
             jump(b, "b", vec![], edge(*normal) as u32)?;
