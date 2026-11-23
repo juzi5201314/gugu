@@ -159,5 +159,12 @@ fn runtime_imports_match_platform_import_surfaces() {
     expected.extend(DARWIN_EXTRA_IMPORTS.map(|name| NativeImport::function(LIB_SYSTEM, name)));
     let mut seen = BTreeSet::new();
     expected.retain(|import| seen.insert(import.name.clone()));
+    // 与生产共用的常量若漏掉必需入口，两边会一致地错：再独立核对必需名。
+    for name in ["exit", "write", "pthread_threadid_np"] {
+        assert!(
+            darwin.iter().any(|import| import.name == name),
+            "Darwin imports must include {name}"
+        );
+    }
     assert_eq!(darwin, expected);
 }
