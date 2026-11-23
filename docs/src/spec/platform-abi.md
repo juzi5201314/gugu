@@ -326,9 +326,10 @@ x1 = hot 槽、x2 = processor，经 `context_switch + restore_offset` 进入；`
 `main_return`/`coroutine_enter` 在恢复系统上下文前向 mailbox 写入 reason = 2
 （协程返回）、return_value、processor 与 candidate；`coroutine_enter` 从栈上
 `(code, pack)` 读取入口，pack 九条整数道入 x0–x8、八条浮点道入 v0–v7；
-`gc_enter` 先把调用方返回地址压到 mutator 栈顶（a64 的 `bl` 不落栈，
-`entry_rsp` 仍按 x64 `call` 契约指向发起帧 PC），再把 HOT/SP 切到 coordinator
-系统栈并以 `gc_dispatch(request, entry_rsp)` 调用，返回前恢复 SP 并弹回 LR；
+`gc_enter` 先在 mutator 栈上开辟槽位并把调用方返回地址写到 `entry_rsp` 处
+（a64 的 `bl` 不落栈；该布局与 x64 `call` 压栈一致，`entry_rsp+8` 即发起帧顶），
+再把 HOT/SP 切到 coordinator 系统栈并以 `gc_dispatch(request, entry_rsp)` 调用，
+返回前恢复 SP 并弹回 LR；
 `gc_config` 返回 `gc_config_record` 数据定义地址，其内容即
 `GcImageConfig` 规范字节；`thread_id` 在 Linux 走 `gettid`、在 Darwin 调
 `pthread_threadid_np`。所有 `bl` 调用必须保住调用方返回地址。Darwin 片段经
