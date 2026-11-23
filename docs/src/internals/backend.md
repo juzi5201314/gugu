@@ -894,11 +894,17 @@ function assembler 同时保留 ADRP/ADD 地址重定位与 call 重定位；无
 - `Invoke`/`ResumePanic` 已接入：invoke 发射调用、landing 记录进入 unwind 表，
   `ResumePanic` 走 panic glue；结构化跳转、条件跳转、switch、return、tail
   managed call、trap 和 unreachable 均已支持。
-- 普通 managed 调用支持直接实例、绑定 runtime 目标与恰一个 Code-provenance
-  参数的间接调用；aggregate/sret 按 caller 临时副本/结果缓冲地址处理。`Vtable`
-  目标、`captures_arguments`（runtime 目标除外）与 `foreign_arguments` 仍拒绝，
-  依赖 runtime/adapter 路径。整数除余仍要求静态非零除数证明；窄宽度
-  的非法 carry/wide、非法转换和超帧范围显式拒绝。
+- 普通 managed 调用支持直接实例、绑定 runtime 目标、恰一个 Code-provenance
+  参数的间接调用，与 `Vtable` 动态派发；aggregate/sret 按 caller 临时副本/结果
+  缓冲地址处理。间接 callee 不占 ABI 槽，vtable 接收者照常作为实参传递；派发
+  源同 x64 `dispatch_source`：`Metadata` lane 直接是 vtable（偏移 0），否则首个
+  非 sret 的 `Ptr` 参数是指向胖对的指针，vtable 在其 `+8`（`dyn` 布局 `data@0`、
+  `vtable@8`），槽地址为 vtable `+ slot*8`。目标入口在参数装填前物化到 x8：
+  x16/x17 是并行拷贝组的破环与槽间暂存，不能承载跨拷贝的调用目标；间接 callee
+  车道虽不在 `arguments` 中，也登记为 `Item::Call` 的 Read 事件，否则 regalloc
+  会在调用点前回收其位置。间接/派发的 tail call、`captures_arguments`（runtime
+  目标除外）与 `foreign_arguments` 仍拒绝。整数除余仍要求静态非零除数证明；
+  窄宽度的非法 carry/wide、非法转换和超帧范围显式拒绝。
 
 这些拒绝不隐藏为 no-op；特别是泛型 SIMD 与动态除零检查不是已实现的 PR 6/8 能力。
 

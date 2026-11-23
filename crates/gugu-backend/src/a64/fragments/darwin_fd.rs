@@ -8,7 +8,7 @@ use crate::{
     macho::LIB_SYSTEM,
     runtime::foreign_schema::{
         NATIVE_REQUEST_ARGUMENTS, NATIVE_REQUEST_ERROR, NATIVE_REQUEST_OPERATION,
-        NATIVE_REQUEST_VALUE,
+        NATIVE_REQUEST_THREAD_HANDLE, NATIVE_REQUEST_VALUE,
     },
 };
 
@@ -79,8 +79,10 @@ pub fn darwin_fd_imports() -> Vec<NativeImport> {
         .collect()
 }
 
-/// x0 = NativeRequest；只在已进入 native 栈后调用，不管理线程或发布完成。
-pub fn darwin_fd_dispatch() -> Fragment {
+/// x0 = NativeRequest；只在已进入 native 栈后调用，不管理线程。
+/// `publish_done` 区分 x64 `worker(thread)` 两个变体：fs_native_worker 线程入口
+/// 返回前发布 DONE=1，callback_file_worker 路径不发布。
+pub fn darwin_fd_dispatch(publish_done: bool) -> Fragment {
     let mut b = Builder::default();
     b.emit("sub.X.imm", [reg(SP), reg(SP), add_imm(32)]);
     for (offset, saved) in [(8, REQUEST), (16, FP), (24, LR)] {
@@ -119,6 +121,17 @@ pub fn darwin_fd_dispatch() -> Fragment {
     b.memory("str.X.Unsigned", RESULT, REQUEST, NATIVE_REQUEST_ERROR);
     for at in exits {
         b.patch_branch(at, "b", &[], &[]);
+    }
+    if publish_done {
+        // 与 x64 worker 同一完成契约：线程入口在返回前发布 DONE=1，
+        // fs_poll 读 [THREAD_HANDLE] 非零即完成。
+        b.emit("movz.X", [reg(Reg::x(9)), movz(1)]);
+        b.memory(
+            "str.X.Unsigned",
+            Reg::x(9),
+            REQUEST,
+            NATIVE_REQUEST_THREAD_HANDLE,
+        );
     }
     for (offset, saved) in [(8, REQUEST), (16, FP), (24, LR)] {
         b.memory("ldr.X.Unsigned", saved, SP, offset);

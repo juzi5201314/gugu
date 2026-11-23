@@ -182,7 +182,12 @@ pub(super) fn adjust(
     Ok(())
 }
 
-fn stack(out: &mut Vec<layout::Item>, load: bool, reg: u8, offset: u32) -> Result<(), Error> {
+pub(super) fn stack(
+    out: &mut Vec<layout::Item>,
+    load: bool,
+    reg: u8,
+    offset: u32,
+) -> Result<(), Error> {
     if reg >= 32 {
         return super::fp::stack(out, load, reg, Width::Q, offset);
     }
@@ -253,7 +258,7 @@ fn restore(out: &mut Vec<layout::Item>, frame: &Frame) -> Result<(), Error> {
     Ok(())
 }
 
-fn location(reg: MReg, allocation: &Allocation) -> Result<Option<Location>, Error> {
+pub(super) fn location(reg: MReg, allocation: &Allocation) -> Result<Option<Location>, Error> {
     match reg {
         MReg::Physical(id) if id < 64 && id != 31 => Ok(Some(Location::Reg(PhysReg(id)))),
         MReg::Physical(_) => Err(super::error("invalid physical GPR")),
@@ -267,7 +272,7 @@ fn location(reg: MReg, allocation: &Allocation) -> Result<Option<Location>, Erro
     }
 }
 
-fn offset(frame: &Frame, slot: u32) -> Result<u32, Error> {
+pub(super) fn offset(frame: &Frame, slot: u32) -> Result<u32, Error> {
     if slot == u32::MAX {
         return Ok(frame.copy_scratch);
     }
@@ -278,7 +283,7 @@ fn offset(frame: &Frame, slot: u32) -> Result<u32, Error> {
         .ok_or_else(|| super::error("unknown spill slot"))
 }
 
-fn move_loc(
+pub(super) fn move_loc(
     out: &mut Vec<layout::Item>,
     src: Location,
     dst: Location,
@@ -352,7 +357,7 @@ impl CopyPolicy<Location, crate::regalloc::Class> for Policy<'_> {
     }
 }
 
-fn rewrite_item(
+pub(super) fn rewrite_item(
     out: &mut Vec<layout::Item>,
     item: &Item,
     allocation: &Allocation,
@@ -382,6 +387,9 @@ fn rewrite_item(
         }
         Item::ForeignCall { .. } => {
             super::foreign_emit::lower(item, allocation, frame, runtime, out)
+        }
+        Item::ForeignLeaf { .. } => {
+            super::foreign_leaf::lower(item, allocation, frame, runtime, out)
         }
         Item::Atomic(atomic) => atomic.emit(out, runtime),
         Item::RootInit {
@@ -513,16 +521,46 @@ fn rewrite_item(
             suspend,
             target,
             callee,
+            dispatch,
             arguments,
             results,
             safepoint,
             landing,
         } => {
-            // 间接调用：Code 参数不占 ABI 槽，先物化到 x16（在参数装填前，避免被覆盖）。
+            // 间接/派发调用：目标入口先物化到 x8（在参数装填前，避免被覆盖）。
+            // 不能用 x16/x17：它们是并行拷贝组的破环/槽间暂存；x8 不参与装填与拷贝。
             if let Some(callee) = callee {
                 let src = location(MReg::Virtual(*callee), allocation)?
                     .ok_or_else(|| super::error("call reads dead callee"))?;
+                move_loc(out, src, Location::Reg(PhysReg(8)), frame, super::abi::GPR)?;
+            } else if let Some(dispatch) = dispatch {
+                let src = location(MReg::Virtual(dispatch.receiver), allocation)?
+                    .ok_or_else(|| super::error("call reads dead receiver"))?;
                 move_loc(out, src, Location::Reg(PhysReg(16)), frame, super::abi::GPR)?;
+                if dispatch.vtable_offset != 0 {
+                    emit(
+                        out,
+                        "ldr.X.Unsigned",
+                        vec![
+                            Operand::Reg(Reg::x(16)),
+                            Operand::Address(Address {
+                                base: Reg::x(16),
+                                mode: AddressMode::Unsigned(i64::from(dispatch.vtable_offset)),
+                            }),
+                        ],
+                    )?;
+                }
+                emit(
+                    out,
+                    "ldr.X.Unsigned",
+                    vec![
+                        Operand::Reg(Reg::x(8)),
+                        Operand::Address(Address {
+                            base: Reg::x(16),
+                            mode: AddressMode::Unsigned(i64::from(dispatch.slot_offset)),
+                        }),
+                    ],
+                )?;
             }
             arguments_to_abi(out, arguments, allocation, frame, false, runtime)?;
             let kind = if *suspend {
@@ -531,10 +569,10 @@ fn rewrite_item(
                 super::sites::SiteKind::CallReturn
             };
             if let Some((block, instruction)) = safepoint {
-                if callee.is_some() {
+                if callee.is_some() || dispatch.is_some() {
                     runtime.call_register(
                         out,
-                        16,
+                        8,
                         kind,
                         Some(*block),
                         Some(*instruction),
@@ -550,8 +588,8 @@ fn rewrite_item(
                         *landing,
                     )?;
                 }
-            } else if callee.is_some() {
-                emit(out, "blr", vec![Operand::Reg(Reg::x(16))])?;
+            } else if callee.is_some() || dispatch.is_some() {
+                emit(out, "blr", vec![Operand::Reg(Reg::x(8))])?;
             } else {
                 out.push(layout::Item::SymbolBranch {
                     target: target.clone(),

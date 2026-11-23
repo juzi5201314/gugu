@@ -71,8 +71,10 @@ pub enum Item {
     Call {
         suspend: bool,
         target: String,
-        // 间接调用的 Code-provenance 参数值：不占 ABI 槽，物化到 x16 后 `blr`。
+        // 间接调用的 Code-provenance 参数值：不占 ABI 槽，物化到 x8 后 `blr`（x16/x17 是并行拷贝组的破环/槽间暂存）。
         callee: Option<u32>,
+        // 动态派发：接收者照常作实参传递，vtable 槽内容化物化到 x8 后 `blr`。
+        dispatch: Option<VtableDispatch>,
         arguments: Vec<u32>,
         results: Vec<u32>,
         safepoint: Option<(u32, u32)>,
@@ -90,12 +92,32 @@ pub enum Item {
         results: Vec<u32>,
         safepoint: (u32, u32),
     },
+    /// `#[ffi(leaf)]` 直调：当前协程栈上按 C ABI 发 `bl`/`blr`，无 bridge、无安全点记录。
+    ForeignLeaf {
+        call: Box<crate::lir::body::Call>,
+        platform: super::foreign::Platform,
+        arguments: Vec<u32>,
+        results: Vec<u32>,
+    },
     Branch {
         form: FormId,
         operands: Vec<MOperand>,
         target: u32,
     },
     Return,
+}
+
+/// `CallTarget::Vtable` 的派发读取计划：接收者在 `arguments` 中照常传参，
+/// 这里只描述如何从中取出 vtable 槽内的入口地址。
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct VtableDispatch {
+    /// 接收者参数车道（虚拟寄存器）。
+    pub receiver: u32,
+    /// vtable 指针相对接收者的偏移：`Metadata` lane 为 0，指向胖对的指针为 8
+    /// （`dyn` 值布局 `data@0`、`vtable@8`）。
+    pub vtable_offset: u32,
+    /// 目标槽在 vtable 中的字节偏移（`slot * 8`）。
+    pub slot_offset: u32,
 }
 
 #[derive(Clone, Debug, Eq, PartialEq)]
@@ -154,6 +176,7 @@ impl Item {
             self,
             Self::Call { .. }
                 | Self::ForeignCall { .. }
+                | Self::ForeignLeaf { .. }
                 | Self::TailCall { .. }
                 | Self::Poll { .. }
         )
@@ -182,9 +205,27 @@ impl Item {
                 }
             }
             Self::Call {
+                callee,
+                arguments,
+                results,
+                ..
+            } => {
+                // callee 不占 ABI 槽，不在 arguments 里，但发射时要物化到 x8——
+                // 必须登记为 Read，否则 regalloc 会在调用点之前回收它的位置。
+                if let Some(callee) = callee {
+                    events.push((MReg::Virtual(*callee), Access::Read));
+                }
+                events.extend(
+                    arguments
+                        .iter()
+                        .map(|id| (MReg::Virtual(*id), Access::Read)),
+                );
+                events.extend(results.iter().map(|id| (MReg::Virtual(*id), Access::Write)));
+            }
+            Self::ForeignCall {
                 arguments, results, ..
             }
-            | Self::ForeignCall {
+            | Self::ForeignLeaf {
                 arguments, results, ..
             } => {
                 events.extend(

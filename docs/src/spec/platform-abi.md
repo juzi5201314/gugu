@@ -60,7 +60,7 @@ A64 内部整数叶 lowering 使用私有寄存器约定与共享分配核心；
 
 内部栈图 codec/reference walker 可显式区分 A64 格式，按物理 xN 编号登记入口寄存器根并按精确返回 PC 扫描；现有 x64 格式与输出保持不变。该格式支持本身不等于 A64 lowering 已接通 GC、展开或协程，也不新增可选目标。
 
-内部 A64 runtime 编译边界可为标量根和带权威 LIR map 的直接 managed call 输出栈图及精确 safepoint 的 caller-frame 恢复记录；它不放宽隔离叶入口，也不支持尚未接通的 aggregate signature/sret、挂起、协程换栈或生产镜像 decoder。该分阶段能力不是 AArch64 用户镜像或平台异常展开可用性的声明。
+内部 A64 runtime 编译边界可为带权威 LIR map 的 managed call 输出栈图及精确 safepoint 的 caller-frame 恢复记录：覆盖标量根、aggregate signature 与 sret、`Invoke`/landing、恰一个 Code-provenance 参数的间接调用和 `Vtable` 动态派发（接收者参数指向 `data@0`/`vtable@8` 胖对，槽地址为 vtable `+ slot*8`，目标入口在参数装填前物化到 x8，该 callee 车道按 `Item::Call` 的 Read 事件登记以防 regalloc 提前回收），以及满足 `#[ffi(leaf)]` 契约的 ForeignLeaf 直接外调（leaf callee 车道在参数装填后物化到 x16，`blr` 进入）。挂起调用使用权威 SuspendResume 栈图。间接/派发 tail call、`captures_arguments`（runtime 目标除外）与 `foreign_arguments` 仍拒绝；该边界仍不声明协程换栈或平台异常展开已接通，也不构成目标登记。
 
 A64 runtime 中省略 CallReturn map 的 poll-free managed leaf 不得进入 morestack/poll 慢路径。
 此类叶的物理帧上限为 4096 字节；直接调用它的 caller 在自己的入口检查中另预留这份容量，

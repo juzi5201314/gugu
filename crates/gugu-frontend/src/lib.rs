@@ -968,6 +968,7 @@ impl Compiler {
                         glues,
                         &frontend.installed,
                         resources.prebuilt(),
+                        &native_link,
                     )
                 });
             match outcome {
@@ -1245,6 +1246,7 @@ fn build_machine_codegen(
     glues: backend::x64::glue::RuntimeGlueBindings,
     installed: &gugu_gir::functions::InstalledFunctions,
     prebuilt: Option<&crate::runtime::RuntimePrebuiltV1>,
+    native_link: &NativeLink,
 ) -> Result<MachineCodegen, Vec<Diagnostic>> {
     let descriptor = target.descriptor();
     if !matches!(descriptor.arch, crate::target::Architecture::Aarch64) {
@@ -1292,6 +1294,7 @@ fn build_machine_codegen(
         interpreter: descriptor.linux_interpreter.unwrap_or(""),
         identifier: "gugu",
         universe: Some(universe),
+        imports: &native_link.imports,
     })
     .map_err(a64_error)?;
     Ok(MachineCodegen::A64(Box::new(A64Codegen { program, glues })))

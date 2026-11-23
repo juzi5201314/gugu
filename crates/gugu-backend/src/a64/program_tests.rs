@@ -215,6 +215,7 @@ fn darwin_program_image_links_the_full_startup_contract() {
         cage_bytes: 0,
         identifier: "test.a64",
         universe: None,
+        imports: &[],
     })
     .unwrap();
     let image = &program.image;
@@ -275,6 +276,7 @@ fn linux_program_image_links_the_full_startup_contract() {
         cage_bytes: 0,
         identifier: "",
         universe: None,
+        imports: &[],
     })
     .unwrap();
     let image = &program.image;

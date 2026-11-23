@@ -351,13 +351,22 @@ fn unsafe_call_and_checked_entry_rejections_are_contextual() {
         error.contains("block 0 site 0") && error.contains("indirect call"),
         "{error}"
     );
-    for target in [
-        CallTarget::Vtable { slot: 0 },
-        CallTarget::External {
-            key: [0; 32],
-            name: "foreign".into(),
-        },
-    ] {
+    // Vtable 已有专属校验（Metadata/胖对接收者车道），无接收者时是精确拒绝。
+    {
+        let mut f = caller(&[], &[]);
+        let mut call = safe.clone();
+        call.target = CallTarget::Vtable { slot: 0 };
+        f.op(Op::Call(call), &[], &[]);
+        let error = codegen::compile_function(&f.body).unwrap_err().0;
+        assert!(
+            error.contains("block 0 site 0") && error.contains("vtable dispatch"),
+            "{error}"
+        );
+    }
+    for target in [CallTarget::External {
+        key: [0; 32],
+        name: "foreign".into(),
+    }] {
         let mut f = caller(&[], &[]);
         let mut call = safe.clone();
         call.target = target;
@@ -411,10 +420,26 @@ fn unsafe_call_and_checked_entry_rejections_are_contextual() {
 fn malformed_call_signatures_and_foreign_effects_are_rejected() {
     let mut callee = Fixture::new(&[], &[]);
     callee.ret(&[]);
+    // captures_arguments 不再被拒绝：它只是 verify 层的逃逸约束，codegen 无差异。
+    {
+        let mut call = direct(&callee);
+        call.captures_arguments = true;
+        let mut f = caller(&[], &[]);
+        f.op(Op::Call(call), &[], &[]);
+        assert!(codegen::compile_function(&f.body).is_ok());
+    }
     for case in 0..5 {
         let mut call = direct(&callee);
         match case {
-            0 => call.captures_arguments = true,
+            0 => call
+                .foreign_arguments
+                .push(crate::lir::body::ForeignArgument {
+                    first: 0,
+                    lanes: 1,
+                    bytes: 8,
+                    align: 8,
+                    memory: false,
+                }),
             1 => call.parameters.push(value_type(Type::I64)),
             2 => call.results = vec![value_type(Type::I64); 3],
             3 => call.sret = Some((1, 24, [0; 32])),
@@ -486,4 +511,44 @@ fn large_frames_materialize_sp_and_preserve_stack_values_across_calls() {
             .0
             .contains("overflow")
     );
+}
+
+#[test]
+fn vtable_dispatch_loads_entry_from_slot() {
+    use std::collections::BTreeMap;
+    const PAIR: u64 = 1 << 41;
+    const VTABLE: u64 = PAIR + 0x1000;
+    // 槽内容是被链接镜像内的字节偏移：caller 片段在前，callee 紧随其后。
+    for (pairs, receiver) in [(true, PAIR), (false, VTABLE)] {
+        let mut callee = Fixture::new(&[Type::Ptr], &[Type::I64]);
+        let value = callee.constant(Type::I64, 48);
+        callee.ret(&[value]);
+        let target = callee.compile();
+
+        let mut f = caller(&[Type::Ptr], &[Type::I64]);
+        let receiver_arg = f.param(0, 0);
+        let mut call = direct(&callee);
+        call.target = CallTarget::Vtable { slot: 0 };
+        call.parameters = if pairs {
+            vec![value_type(Type::Ptr)]
+        } else {
+            let lane = ValueType::pointer(Provenance::Metadata);
+            f.body.signature.parameters[0] = lane;
+            f.body.values[receiver_arg.index()].kind = lane;
+            vec![lane]
+        };
+        let result = f.op(Op::Call(call), &[receiver_arg], &[Type::I64])[0];
+        f.ret(&[result]);
+        let fragment = compile(&f);
+        let mut memory = BTreeMap::new();
+        for byte in 0..8 {
+            memory.insert(PAIR + 8 + byte, (VTABLE >> (byte * 8)) as u8);
+            memory.insert(
+                VTABLE + byte,
+                ((fragment.bytes.len() as u64) >> (byte * 8)) as u8,
+            );
+        }
+        let (results, ..) = vm::execute_seeded(&fragment, &[&target], &[receiver], memory);
+        assert_eq!(results[0], 48, "pairs={pairs}");
+    }
 }

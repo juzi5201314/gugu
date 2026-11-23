@@ -40,10 +40,8 @@ impl runtime::RuntimeArtifactProvider for A64Fixtures {
                 .find(|blob| blob.logical_path == "std/runtime/a64.gg")
                 .unwrap();
             assert!(a64.source.starts_with(A64_GUARD));
-            let host_guard = format!(
-                "#![cfg(arch = \"{}\")]",
-                TargetName::X86_64Linux.descriptor().arch.name()
-            );
+            let host_arch = TargetName::X86_64Linux.descriptor().arch.name();
+            let host_guard = format!("#![cfg(arch = \"{host_arch}\")]");
             let interpreted = a64.source.replacen(A64_GUARD, &host_guard, 1);
             let roots = base
                 .payload
@@ -51,10 +49,12 @@ impl runtime::RuntimeArtifactProvider for A64Fixtures {
                 .iter()
                 .find(|blob| blob.logical_path == "std/runtime/roots.gg")
                 .unwrap();
-            let interpreted_roots = roots.source.replace(
-                "#[cfg(arch = \"aarch64\")]",
-                &host_guard.replace("#![", "#["),
-            );
+            let item_guard = host_guard.replace("#![", "#[");
+            let not_item_guard = format!("#[cfg(not(arch = \"{}\"))]", host_arch);
+            let interpreted_roots = roots
+                .source
+                .replace("#[cfg(arch = \"aarch64\")]", &item_guard)
+                .replace("#[cfg(not(arch = \"aarch64\"))]", &not_item_guard);
             let mut sources: Vec<_> = base
                 .payload
                 .sources

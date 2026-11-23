@@ -69,6 +69,8 @@ pub struct ProgramRequest<'a> {
     pub identifier: &'a str,
     /// 类型宇宙（foreign 类型签名用）。
     pub universe: Option<&'a TypeUniverse>,
+    /// 用户声明的 C 导入（`extern "C"` 直调/bridge 目标）；与 runtime imports 合并去重。
+    pub imports: &'a [crate::NativeImport],
 }
 
 /// 装配产物：world 留给上层消费（`plan` 需要节图与符号），image 是可执行字节。
@@ -124,7 +126,14 @@ fn assemble(request: &ProgramRequest<'_>) -> Result<World, Error> {
         .into_iter()
         .chain(storage(request.cage_bytes))
         .collect::<Vec<_>>();
-    let imports = runtime_imports(request.platform);
+    let mut imports = runtime_imports(request.platform);
+    // World 按符号名（而非库名）校验唯一；runtime 片段申报过的同名导入直接复用，
+    // 用户的同名导入等价指向同一动态符号。
+    for import in request.imports {
+        if !imports.iter().any(|known| known.name == import.name) {
+            imports.push(import.clone());
+        }
+    }
     let mut world = build_runtime(
         BuildRequest {
             bodies: request.bodies,

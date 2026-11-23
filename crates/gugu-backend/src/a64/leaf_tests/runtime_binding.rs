@@ -97,7 +97,7 @@ fn source_runtime_call_uses_the_actual_body_and_preserves_register_stack_abi() {
 
 #[test]
 fn runtime_allocation_call_keeps_canonical_allocation_map_and_managed_argument() {
-    let mut callee = function(2, &[Type::Ptr], &[Type::Ptr]);
+    let mut callee = function(2, &[Type::Ptr; 9], &[Type::Ptr]);
     callee.ret(&[callee.param(0, 0)]);
     let mut caller = function(1, &[Type::Ptr], &[Type::Ptr]);
     caller.body.poll_interface.leaf = false;
@@ -106,9 +106,12 @@ fn runtime_allocation_call_keeps_canonical_allocation_map_and_managed_argument()
     caller.body.values[arg.index()].kind = managed;
     caller.body.signature.parameters[0] = managed;
     caller.body.signature.results[0] = managed;
+    // 第 9 个受管实参落栈：outgoing 字必须在调用点 map 中登记，寄存器实参由被调方接管。
+    let args = [arg; 9];
+    let params = [managed; 9];
     let result = caller.op(
-        Op::Call(call(RuntimeCall::ValueCopy, &[managed], &[managed], false)),
-        &[arg],
+        Op::Call(call(RuntimeCall::ValueCopy, &params, &[managed], false)),
+        &args,
         &[Type::Ptr],
     );
     caller.body.values[result[0].index()].kind = managed;
@@ -126,11 +129,8 @@ fn runtime_allocation_call_keeps_canonical_allocation_map_and_managed_argument()
     );
     let maps =
         crate::runtime::decode_tables(&fragment.metadata.as_ref().unwrap().stackmaps).unwrap();
-    assert!(
-        maps.maps
-            .iter()
-            .any(|map| map.slots[0].iter().any(|word| *word != 0))
-    );
+    // 栈实参的 outgoing 字登记在第 0 槽位：按"有根"断言，不能按下标值非零。
+    assert!(maps.maps.iter().any(|map| map.slots[0].contains(&0)));
     let callee = bound_callee(&bodies[1], "value_copy");
     assert_eq!(
         runtime_vm::run_linked(

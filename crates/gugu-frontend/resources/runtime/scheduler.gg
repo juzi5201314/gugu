@@ -505,8 +505,27 @@ fn prepare_child(processor: uint, code: uint, env: uint, trace: uint, result_kin
         let frame = stack_top - 16
         store_word(frame, code)
         store_word(frame + 8, pack)
-        store_word(cold + 8, frame)
-        store_word(cold + 16, word(processor + 4072))
+        #[cfg(arch = "aarch64")]
+        {
+            // a64 的 cold+8 按 mutator_context_area 约定存放指向非移动
+            // A64ControlBlock（context@0 152B、scratch@160 224B、mailbox@384 72B，
+            // 共 464B）的指针；context.pc 直接指向 coroutine_enter，
+            // 栈顶 [code, pack] 布局与 x64 相同，由进入片段弹道。
+            let block = heap_alloc(processor, 464)
+            let cursor = block
+            while cursor < block + 464 {
+                store_word(cursor, 0)
+                cursor = cursor + 8
+            }
+            store_word(block, frame)
+            store_word(block + 8, word(processor + 4072))
+            store_word(cold + 8, block)
+        }
+        #[cfg(not(arch = "aarch64"))]
+        {
+            store_word(cold + 8, frame)
+            store_word(cold + 16, word(processor + 4072))
+        }
         store_word(slot, 6)
         register_coroutine(processor, slot)
         slot
@@ -686,10 +705,20 @@ pub fn resume_ready(state: uint) uint {
         if hot == 0 { return 0 }
         store_word(hot, 1)
         store_word(state, hot)
-        store_word(state + 32, word(hot + 48))
+        let cold = word(hot + 48)
+        #[cfg(arch = "aarch64")]
+        {
+            // 共享 state 邮箱逐协程更新：scratch/mutator_context 指向该协程
+            // 控制块内的区域；system_context 由 rt0 绑定后不变。
+            let block = word(cold + 8)
+            store_word(state + 32, block + 160)
+            store_word(state + 40, block)
+        }
+        #[cfg(not(arch = "aarch64"))]
+        store_word(state + 32, cold)
         store_word(state + 96, processor)
         std.runtime.context_restore(
-            std.mem.transmute[uint, *()](word(hot + 48) + 8),
+            std.mem.transmute[uint, *()](mutator_context_area(cold)),
             std.mem.transmute[uint, *()](hot),
             std.mem.transmute[uint, *()](processor),
         )

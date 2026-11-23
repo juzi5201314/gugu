@@ -33,15 +33,17 @@ fn main() {
     let plan = compilation.image_plan().expect("镜像计划");
     if env::var_os("GUGU_FS_DUMP").is_some() {
         fs::write(
-            "/tmp/gugu_fs_x64.txt",
-            compilation.dump_x64().expect("机器码 dump"),
-        )
-        .expect("写出机器码 dump");
-        fs::write(
             "/tmp/gugu_fs_lir.txt",
             compilation.dump_lir().expect("LIR dump"),
         )
         .expect("写出 LIR dump");
+        if target == TargetName::X86_64Linux {
+            fs::write(
+                "/tmp/gugu_fs_x64.txt",
+                compilation.dump_x64().expect("机器码 dump"),
+            )
+            .expect("写出机器码 dump");
+        }
     }
     let (name, bytes) = match target {
         TargetName::X86_64Linux => ("/tmp/gugu_fs_image", plan.linux_image()),

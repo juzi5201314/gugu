@@ -170,21 +170,20 @@ pub(crate) fn build(
                                         && let Some(offset) =
                                             argument_offset(body, call, arguments, index)?
                                     {
-                                        set_slot(&mut map, class, offset)?;
+                                        set_slot(&mut map, class, offset).map_err(|e| {
+                                            Error(format!("argument outgoing: {e}"))
+                                        })?;
                                     }
                                 }
                             }
                         }
                         LogicalRoot::Argument { index } => {
                             let (call, arguments) = call_parts(body, anchor)?;
-                            let value = arguments
-                                .get(*index as usize)
-                                .ok_or_else(|| super::error("unknown call root argument"))?;
-                            place_value(allocation, frame, &mut map, class, value.0, position)?;
                             if let Some(offset) =
                                 argument_offset(body, call, arguments, *index as usize)?
                             {
-                                set_slot(&mut map, class, offset)?;
+                                set_slot(&mut map, class, offset)
+                                    .map_err(|e| Error(format!("argument outgoing: {e}")))?;
                             }
                         }
                         LogicalRoot::Slot { slot, offset } => {
@@ -210,7 +209,8 @@ pub(crate) fn build(
                                     init_byte,
                                 });
                             } else {
-                                set_slot(&mut map, class, word * 8)?;
+                                set_slot(&mut map, class, word * 8)
+                                    .map_err(|e| Error(format!("local root: {e}")))?;
                             }
                         }
                     }
@@ -305,6 +305,7 @@ fn place_value(
             .get(slot as usize)
             .ok_or_else(|| super::error("missing root spill frame offset"))?,
     )
+    .map_err(|e| Error(format!("value spill: value {value} class {class}: {e}")))
 }
 
 fn set_slot(
@@ -316,6 +317,17 @@ fn set_slot(
         return Err(super::error("root offset is outside frame"));
     }
     let word = offset / 8;
+    for (other, bitmap) in map.slots.iter().enumerate() {
+        if other != class
+            && bitmap
+                .get(word as usize / 64)
+                .is_some_and(|bits| bits & (1 << (word % 64)) != 0)
+        {
+            return Err(Error(format!(
+                "root offset {offset} claimed by classes {other} and {class}"
+            )));
+        }
+    }
     map.slots[class][word as usize / 64] |= 1 << (word % 64);
     Ok(())
 }

@@ -98,6 +98,7 @@ fn alloc(
         results: vec![dest.0],
         suspend: false,
         callee: None,
+        dispatch: None,
         safepoint: instruction.safepoint.map(|_| (block, site)),
         landing: None,
     });
@@ -133,6 +134,7 @@ fn machine_call(call: &CallSite<'_>, b: &mut Builder<'_>, name: &str) -> Result<
         results: results.iter().map(|value| value.0).collect(),
         suspend: instruction.op.safepoint_kind() == Some(crate::lir::body::SafepointKind::Suspend),
         callee: None,
+        dispatch: None,
         safepoint: instruction.safepoint.map(|_| (block, site)),
         landing: None,
     });
@@ -235,6 +237,7 @@ pub(crate) fn lower(
         results: results.iter().map(|value| value.0).collect(),
         suspend: instruction.op.safepoint_kind() == Some(crate::lir::body::SafepointKind::Suspend),
         callee: None,
+        dispatch: None,
         safepoint: instruction.safepoint.map(|_| (block, site)),
         landing: None,
     });

@@ -315,7 +315,7 @@ fn darwin_fd_dispatch_uses_native_packet_and_arm64_libsystem_abi() {
         darwin_fd_imports(),
         names.map(|name| NativeImport::function(LIB_SYSTEM, name)),
     );
-    let fragment = darwin_fd_dispatch();
+    let fragment = darwin_fd_dispatch(true);
     let code = instructions(&fragment);
     let x0 = Reg::x(0);
     let request = Reg::x(19);

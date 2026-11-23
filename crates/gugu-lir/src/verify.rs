@@ -341,7 +341,8 @@ pub(super) fn edges(body: &Body, terminator: &Terminator, mut visit: impl FnMut(
     }
 }
 
-pub(super) fn compatible(expected: super::body::ValueType, actual: super::body::ValueType) -> bool {
+/// 值类型兼容：`GcHeap`/`Stack` 可传给 `GcInterior` 形参，`Raw` 可传给 `Foreign`。
+pub fn compatible(expected: super::body::ValueType, actual: super::body::ValueType) -> bool {
     use super::body::Provenance;
     expected.ty == actual.ty
         && (expected.provenance == actual.provenance

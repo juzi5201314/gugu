@@ -662,13 +662,26 @@ fn validate(body: &Body, leaf: bool, runtime: bool) -> Result<(), Error> {
             )));
         }
         let params = body.params(edge.to);
-        if params.len() != body.args(&edge.arguments).len()
-            || params
-                .iter()
-                .zip(body.args(&edge.arguments))
-                .any(|(p, a)| body.values[p.value.index()].kind != body.values[a.index()].kind)
+        if params.len() != body.args(&edge.arguments).len() {
+            return Err(Error(format!(
+                "edge {index}: parameter count {} != {}",
+                params.len(),
+                body.args(&edge.arguments).len()
+            )));
+        }
+        if let Some((position, (p, a))) = params
+            .iter()
+            .zip(body.args(&edge.arguments))
+            .enumerate()
+            .find(|(_, (p, a))| {
+                body.values[p.value.index()].kind.ty != body.values[a.index()].kind.ty
+            })
         {
-            return Err(Error(format!("edge {index}: parameter mismatch")));
+            return Err(Error(format!(
+                "edge {index}: parameter {position} mismatch {:?} != {:?}",
+                body.values[p.value.index()].kind,
+                body.values[a.index()].kind
+            )));
         }
     }
     let params = body

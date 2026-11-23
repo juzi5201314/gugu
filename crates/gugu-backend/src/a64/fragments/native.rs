@@ -77,13 +77,14 @@ pub fn process_native_worker() -> Fragment {
     b.finish()
 }
 
-/// `callback_file_worker`：request x0；op==-1 转 foreign worker，其余走文件分派。
+/// `callback_file_worker`：request x0；op==-1 转 foreign worker，其余走不发布
+/// DONE 的文件分派变体（对应 x64 `worker(false)`；完成由 callback 协议自身发布）。
 pub fn callback_file_worker() -> Fragment {
     let mut b = Builder::default();
     load(&mut b, A, Reg::x(0), OPERATION);
     b.emit("adds.X.imm", [reg(XZR), reg(A), add_imm(1)]);
     let foreign = cond(&mut b, EQ);
-    b.external_branch("b", &rt("fs_native_worker"));
+    b.external_branch("b", &rt("fd_dispatch"));
     patch(&mut b, foreign, EQ);
     b.external_branch("b", &rt("foreign_native_worker"));
     b.finish()

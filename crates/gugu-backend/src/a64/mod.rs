@@ -12,6 +12,7 @@ pub mod elf;
 pub mod encode;
 pub mod foreign;
 mod foreign_emit;
+mod foreign_leaf;
 mod foreign_packet;
 mod fp;
 pub mod fragments;

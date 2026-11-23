@@ -169,7 +169,8 @@ pub fn runtime_definitions(platform: Platform) -> Vec<Definition> {
             .chain(linux_import_definitions()),
         ),
         Platform::Darwin => definitions.extend([
-            Definition::fragment(rt("fs_native_worker"), fragments::darwin_fd_dispatch()),
+            Definition::fragment(rt("fs_native_worker"), fragments::darwin_fd_dispatch(true)),
+            Definition::fragment(rt("fd_dispatch"), fragments::darwin_fd_dispatch(false)),
             Definition::fragment(rt("net_call"), fragments::darwin_net_dispatch()),
             Definition::fragment(rt("resolver_symbol"), fragments::darwin_resolver_symbol()),
             Definition::fragment(rt("process_call"), fragments::darwin_process_call()),
