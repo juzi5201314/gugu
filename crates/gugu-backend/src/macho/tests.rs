@@ -194,6 +194,7 @@ fn arm64_darwin_entry_fixture() -> (MachORequest, crate::a64::macho::DarwinEntry
         payload: at(3, 8),
         initial_slot: at(4, 0),
         processor: at(4, 128),
+        runtime: None,
     };
     (request, entry)
 }
@@ -360,6 +361,82 @@ fn arm64_darwin_entry_rejects_a_payload_outside_writable_data() {
         error.contains("invalid arm64 Mach-O payload location"),
         "{error}"
     );
+}
+
+#[test]
+fn arm64_darwin_entry_writes_the_full_runtime_contract() {
+    use crate::{
+        a64::macho::{DarwinRuntime, link_entry},
+        runtime::entry::{Rt0Payload, rt0_params, state},
+    };
+    use std::mem::offset_of;
+
+    let (mut request, mut entry) = arm64_darwin_entry_fixture();
+    request.sections[4].content = SectionContent::ZeroFill(128 + 4096 + state::BYTES);
+    for (name, bytes) in [
+        ("__gugu_maps", 32),
+        ("__gugu_cfa", 16),
+        ("__gugu_types", 24),
+    ] {
+        request.sections.push(Section {
+            segment: Segment::DataConst,
+            name: name.into(),
+            align: 8,
+            content: SectionContent::Data(vec![0x5a; bytes]),
+        });
+    }
+    entry.runtime = Some(DarwinRuntime {
+        entry: at(0, 8),
+        runtime_state: at(4, 128 + 4096),
+        coroutine_enter: at(0, 0),
+        main_return: at(0, 4),
+        fragment_base: at(0, 0),
+        stackmap: at(5, 0),
+        unwind: at(6, 0),
+        gc_types: Some(at(7, 0)),
+        gc_meta: None,
+    });
+    let file = link_entry(request, entry).unwrap().bytes;
+    let rva = |name: &str, offset: u64| {
+        let (address, _) = section_address(&file, name);
+        address + offset - crate::macho::IMAGE_BASE
+    };
+    let (_, params_file) = section_address(&file, "__rt0_params");
+    let (_, payload_file) = section_address(&file, "__data");
+    for (word, expected) in [
+        (rt0_params::ENTRY, rva("__text", 8)),
+        (rt0_params::RUNTIME_STATE, rva("__bss", 128 + 4096)),
+        (rt0_params::COROUTINE_ENTER, rva("__text", 0)),
+    ] {
+        assert_eq!(
+            u64_at(&file, params_file + word * 8),
+            expected,
+            "word {word}"
+        );
+    }
+    for (field, expected) in [
+        (offset_of!(Rt0Payload, main_entry), rva("__text", 8)),
+        (
+            offset_of!(Rt0Payload, runtime_state),
+            rva("__bss", 128 + 4096),
+        ),
+        (offset_of!(Rt0Payload, main_return), rva("__text", 4)),
+        (offset_of!(Rt0Payload, stackmap), rva("__gugu_maps", 0)),
+        (offset_of!(Rt0Payload, fragment_base), rva("__text", 0)),
+        (offset_of!(Rt0Payload, stackmap_len), 32),
+        (offset_of!(Rt0Payload, unwind), rva("__gugu_cfa", 0)),
+        (offset_of!(Rt0Payload, unwind_len), 16),
+        (offset_of!(Rt0Payload, gc_types), rva("__gugu_types", 0)),
+        (offset_of!(Rt0Payload, gc_types_len), 24),
+        (offset_of!(Rt0Payload, gc_meta), 0),
+        (offset_of!(Rt0Payload, gc_meta_len), 0),
+    ] {
+        assert_eq!(
+            u64_at(&file, payload_file + 8 + field),
+            expected,
+            "payload field {field}"
+        );
+    }
 }
 
 fn section_address(file: &[u8], name: &str) -> (u64, usize) {
