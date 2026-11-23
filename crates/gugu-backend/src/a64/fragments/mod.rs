@@ -18,6 +18,7 @@ mod linux_signal;
 mod linux_syscall;
 mod linux_vm;
 mod poll;
+mod runtime;
 
 pub use atomic::{AtomicWidth, atomic};
 pub use coroutine::{
@@ -37,11 +38,16 @@ pub use linux_fd::linux_fd_dispatch;
 pub use linux_net::linux_net_dispatch;
 pub use linux_process::{linux_process_call, linux_process_worker};
 pub use linux_resolver::{
-    linux_import_slot_symbol, linux_import_stub, linux_resolver_imports, linux_resolver_symbol,
+    linux_import_slot_symbol, linux_import_stub, linux_import_stub_symbol, linux_resolver_imports,
+    linux_resolver_symbol,
 };
 pub use linux_signal::linux_signal_dispatch;
 pub use linux_vm::{linux_page_size, linux_vm};
 pub use poll::safepoint_slow;
+pub use runtime::{
+    context_restore, coroutine_enter, current_slot, gc_config, gc_enter, main_return, process_exit,
+    report_write, runtime_poll_defer, thread_id,
+};
 
 use super::{
     encode::{self, Relocation},
@@ -104,13 +110,11 @@ impl Builder {
     }
 
     fn external_branch(&mut self, form: &str, name: &str) {
-        self.emit(
-            form,
-            [Operand::Target(Target::Symbol {
-                name: name.into(),
-                addend: 0,
-            })],
-        );
+        self.external_branch_at(form, name, 0);
+    }
+
+    fn external_branch_at(&mut self, form: &str, name: &str, addend: i64) {
+        self.emit(form, [inst_target(name, addend)]);
     }
 
     fn memory(&mut self, form: &str, value: Reg, base: Reg, offset: usize) {
@@ -161,6 +165,13 @@ fn add_imm(value: usize) -> Operand {
         imm12: u16::try_from(value).expect("A64 立即数适配 u16"),
         shift12: false,
     }
+}
+
+fn inst_target(name: &str, addend: i64) -> Operand {
+    Operand::Target(Target::Symbol {
+        name: name.into(),
+        addend,
+    })
 }
 
 fn reg(register: Reg) -> Operand {

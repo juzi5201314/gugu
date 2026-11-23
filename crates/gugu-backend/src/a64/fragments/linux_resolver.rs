@@ -16,6 +16,11 @@ pub fn linux_import_slot_symbol(name: &str) -> String {
     format!("__gugu_linux_import_{name}")
 }
 
+/// GOT 桩的可调用符号；与 import 的真名错开，避免定义与导入重名。
+pub fn linux_import_stub_symbol(name: &str) -> String {
+    format!("__gugu_linux_stub_{name}")
+}
+
 pub fn linux_import_stub(name: &str) -> Fragment {
     let mut b = Builder::default();
     let target = Operand::Target(Target::Symbol {
@@ -40,7 +45,7 @@ pub fn linux_resolver_symbol() -> Fragment {
         let skip = b.offset();
         b.emit("b.cond", [next(), condition(1)]);
         let target = Operand::Target(Target::Symbol {
-            name: name.into(),
+            name: linux_import_stub_symbol(name),
             addend: 0,
         });
         b.emit("adrp", [reg(Reg::x(0)), target.clone()]);

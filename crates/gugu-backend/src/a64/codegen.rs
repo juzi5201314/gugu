@@ -35,14 +35,14 @@ pub(crate) fn compile_function_with_registers(
     body: &Body,
     registers: &impl RegisterFile,
 ) -> Result<LeafFragment, Error> {
-    compile(body, registers, false, None, None, None)
+    compile(body, registers, false, None, None, None, None)
 }
 
 pub(crate) fn compile_with_registers(
     body: &Body,
     registers: &impl RegisterFile,
 ) -> Result<LeafFragment, Error> {
-    compile(body, registers, true, None, None, None)
+    compile(body, registers, true, None, None, None, None)
 }
 
 /// Checked entries, scalar roots, polls and mapped internal direct calls.
@@ -51,7 +51,15 @@ pub fn compile_runtime(
     bindings: &super::glue::RuntimeBindings,
 ) -> Result<LeafFragment, Error> {
     bindings.validate()?;
-    compile(body, &abi::A64Registers, false, Some(bindings), None, None)
+    compile(
+        body,
+        &abi::A64Registers,
+        false,
+        Some(bindings),
+        None,
+        None,
+        None,
+    )
 }
 
 pub(crate) fn compile_image(
@@ -59,6 +67,7 @@ pub(crate) fn compile_image(
     bindings: &super::glue::RuntimeBindings,
     symbols: &[(crate::lir::body::Symbol, String)],
     runtime_catalog: Option<&super::runtime::Catalog<'_>>,
+    universe: Option<&crate::late::universe::TypeUniverse>,
 ) -> Result<LeafFragment, Error> {
     bindings.validate()?;
     compile(
@@ -68,6 +77,7 @@ pub(crate) fn compile_image(
         Some(bindings),
         Some(symbols),
         runtime_catalog,
+        universe,
     )
 }
 
@@ -78,6 +88,7 @@ fn compile(
     bindings: Option<&super::glue::RuntimeBindings>,
     symbols: Option<&[(crate::lir::body::Symbol, String)]>,
     runtime_catalog: Option<&super::runtime::Catalog<'_>>,
+    universe: Option<&crate::late::universe::TypeUniverse>,
 ) -> Result<LeafFragment, Error> {
     let compile = || {
         for reg in registers.pool(abi::GPR, false) {
@@ -88,7 +99,7 @@ fn compile(
             }
         }
         let selected = if let Some(symbols) = symbols {
-            super::select::select_image(body, symbols, runtime_catalog)?
+            super::select::select_image(body, symbols, runtime_catalog, universe)?
         } else if bindings.is_some() {
             super::select::select_runtime(body)?
         } else if leaf {

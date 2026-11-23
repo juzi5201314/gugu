@@ -24,6 +24,8 @@ pub struct A64MorestackMailbox {
     pub scratch: uint,
     pub mutator_context: uint,
     pub system_context: uint,
+    pub return_value: uint,
+    pub processor: uint,
 }
 
 #[repr(C, align(16))]

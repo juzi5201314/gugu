@@ -290,8 +290,9 @@ coroutine-stack 地址直接留给 native，也不得提前发布线程退出或
 内部 A64 image world 必须将每个函数的局部常量引用绑定到确定性的共享常量池，保留所需
 最大对齐；共享全局存储包含初始化字和值区。coverage 计数器必须拥有独立的可写存储，
 不能与函数局部常量下标混用。描述符、类型表、名称表、vtable 和适配器只能引用真实定义，
-缺失定义、重复符号、代码与数据种类不匹配、不一致的存储布局或越界重定位必须报错，不能虚构地址。TLS 仍需线程
-所有者绑定，不能降为进程全局存储。
+缺失定义、重复符号、代码与数据种类不匹配、不一致的存储布局或越界重定位必须报错，不能虚构地址。TLS
+全局可与普通全局同形落在 `__bss` 零初始化存储，但线程所有者绑定必须由 runtime 层
+（coroutine_locals）提供；只有进程全局副本不得宣称 TLS 已接通。
 
 Mach-O 适配层必须通过既有 arm64 writer 和导入桩生成器布局、重定位和签名；native data
 地址经导入槽读取，数据中的 native 指针使用加载期绑定而不是导入槽自身的地址。
@@ -309,6 +310,33 @@ scoped-view、no-safepoint 和 permit 标记只能在冻结 LIR 已验证的证�
 把缺少实现的 runtime、机器原语、分配或平台操作静默当成空操作。
 调用保持原有 LIR Allocation、Barrier 和 Select 安全点身份，后端仅在物理记录层映射到
 CallReturn 或 SuspendResume；尤其不能因解析了 select 的目标而丢掉 default/挂起区别。
+
+内部 A64 的机器原语与哨兵 glue 统一落在 `__gugu_runtime_*` 命名空间：源码绑定的 glue
+由 world 在该名字下写出指向真实编译 body 的别名，机器片段由
+`a64::definitions::runtime_definitions(platform)` 按同一名字产出 Definition；调用点只引用
+命名空间符号，不区分两种实现。`RuntimeMachineCall` 按 `machine.name()`、`PlatformCall`
+按 `platform_<op>` 绑定到该命名空间，参数限八个整数车道、结果最多两个整数车道，超界
+签名必须显式拒绝。`GcAlloc`/`RegionAlloc` 使用与 x64 同构的四车道慢调用 ABI：
+`type_id`、字节数、对齐和 `flags = compressed | placement 码 << 1`；placement 码
+TurnRegion=0、LocalHeap=1、SharedHeap=2、Resource=3，其余位置必须显式拒绝；
+`type_id` 必须由冻结 type universe 按 descriptor 解析，不能编造。
+哨兵片段 ABI：`context_restore` 与返回尾巴的入口契约为 x0 = restore 上下文、
+x1 = hot 槽、x2 = processor，经 `context_switch + restore_offset` 进入；`current_slot`
+返回 x27；`process_exit`（Linux `exit_group`、Darwin libSystem `exit`）不返回；
+`main_return`/`coroutine_enter` 在恢复系统上下文前向 mailbox 写入 reason = 2
+（协程返回）、return_value、processor 与 candidate；`coroutine_enter` 从栈上
+`(code, pack)` 读取入口，pack 九条整数道入 x0–x8、八条浮点道入 v0–v7；
+`gc_enter` 先在 mutator 栈上开辟槽位并把调用方返回地址写到 `entry_rsp` 处
+（a64 的 `bl` 不落栈；该布局与 x64 `call` 压栈一致，`entry_rsp+8` 即发起帧顶），
+再把 HOT/SP 切到 coordinator 系统栈并以 `gc_dispatch(request, entry_rsp)` 调用，
+返回前恢复 SP 并弹回 LR；
+`gc_config` 返回 `gc_config_record` 数据定义地址，其内容即
+`GcImageConfig` 规范字节；`thread_id` 在 Linux 走 `gettid`、在 Darwin 调
+`pthread_threadid_np`。所有 `bl` 调用必须保住调用方返回地址。Darwin 片段经
+`import_stub_symbol` 调用桩引用 libSystem；Linux 的 C 函数以
+`linux_import_stub_symbol`（`__gugu_linux_stub_*`）片段桩加
+`linux_import_slot_symbol` 八字节文件回填 GOT 槽成对定义，桩符号与 import 真名错开。未提供片段或源码绑定的 glue 名必须在链接期以未定义符号失败，
+不能静默当成空操作。
 
 ### 总则
 

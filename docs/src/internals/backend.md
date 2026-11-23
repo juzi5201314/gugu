@@ -411,7 +411,7 @@ epoll_ctl 将调用方的打包 12 字节事件展开到原生栈，DEL 不解�
 
 `linux_signal_dispatch` 和 `linux_fd_dispatch` 共享同一信号分派生成器；前者单独处理信号 NativeRequest，后者也路由现有运行时的 14/289。13/14/289 分别调用 134/135/74；39/62/186/200/234 分别调用 172/129/178/130/131。rt_sigaction 将输入复制到 32 字节栈缓冲，清除 SA_RESTORER 位并清零 restorer；成功时才复制旧 action。文件/信号保留原始负 VALUE 并写正 ERROR，与网络 packet 的错误归零约定不同。`linux_syscall` 共享原生栈保存、比较分支、svc 和取负辅助生成器。`signal.gg::arm` 修正 signalfd4 的参数：原先把 524288 放到 sigsetsize、flags 留零；现为 size = 8、flags = 524288，避免 x64 与 arm64 内核返回 EINVAL。
 
-Linux DNS 的 `net_resolver.gg` 经 `resolver_symbol` 获得 getaddrinfo/freeaddrinfo，再使用 foreign packet 调用 libc；Linux addrinfo 的 sockaddr 在 +24、next 在 +40。取消不提前释放仍被原生调用读取的 host/hints/result；迟到结果仍须 freeaddrinfo。内部 `linux_resolver_imports(library)` 声明两个 C 名字，`linux_resolver_symbol` 将 x0 的 0/1 映射到同名导入桩，越界陷阱；`linux_import_stub` 以 ADRP/ADD 指向 `linux_import_slot_symbol(name)` 的 GOT 槽，LDR 后 BR x16。它与 `foreign_native_worker(Platform::Linux)` 共用同名 C 桩解析；worker 还需 gettid、__errno_location 导入。`examples/a64_linux_resolver_image.rs` 通过真实 A64 packet worker 调用 musl，验证 localhost、/etc/hosts 的 resolver.test、成功结果的 freeaddrinfo 及 AI_NUMERICHOST 错误的空结果，不进入 nextest。完整 worker 线程启动、调度和目标登记仍未接通；没有另一套 UDP DNS，也未改动取消/迟到结果所有权。
+Linux DNS 的 `net_resolver.gg` 经 `resolver_symbol` 获得 getaddrinfo/freeaddrinfo，再使用 foreign packet 调用 libc；Linux addrinfo 的 sockaddr 在 +24、next 在 +40。取消不提前释放仍被原生调用读取的 host/hints/result；迟到结果仍须 freeaddrinfo。内部 `linux_resolver_imports(library)` 声明两个 C 名字，`linux_resolver_symbol` 将 x0 的 0/1 映射到 `linux_import_stub_symbol` 命名的导入桩，越界陷阱；`linux_import_stub` 以 ADRP/ADD 指向 `linux_import_slot_symbol(name)` 的 GOT 槽，LDR 后 BR x16。它与 `foreign_native_worker(Platform::Linux)` 共用同一套桩符号；worker 的 gettid、__errno_location 也以同样方式定义桩与槽。`examples/a64_linux_resolver_image.rs` 通过真实 A64 packet worker 调用 musl，验证 localhost、/etc/hosts 的 resolver.test、成功结果的 freeaddrinfo 及 AI_NUMERICHOST 错误的空结果，不进入 nextest。完整 worker 线程启动、调度和目标登记仍未接通；没有另一套 UDP DNS，也未改动取消/迟到结果所有权。
 
 `examples/a64_linux_net_signal_image.rs` 手工生成通过适配器在 loopback 上 bind/listen/connect/accept、sendto/epoll/recvfrom，以及 block SIGUSR1、kill 自身、signalfd 读取的镜像；另外通过 sigaction 忽略 SIGUSR2、自发信号并恢复旧 action，同时检查网络 EINVAL/EBADF。默认 nextest 只运行解码/编码往返和确定性 syscall 替身，覆盖布局、完整 data、成功/零事件/错误、信号 action 转换和 signalfd 的运行时参数回归，不运行真实网络或子进程。
 
@@ -745,9 +745,10 @@ Definition；显式 blob 的 Pointer 保留 offset、target 与 addend。该阶�
 base 是代码节起点，不是 Mach-O image base。`World::macho_request` 先固定全部节、导入、
 fixup 和符号形状，再调用已有 import stubs 与 writer layout，最后原长回填指令重定位。
 native data 的 SymbolAddr 多一次槽读取，blob 中的 native data 指针用 chained bind。
-请求入口目前是所选 managed body；writer 侧已具备 `DarwinRuntime` 启动契约，但
-`macho_request` 尚未把它接入——main_return/coroutine_enter 等哨兵片段仍在后续阶段，
-调度与平台 VM 绑定也未落地，不能把这个 request 当作已具备启动协议的可执行程序。
+请求入口目前是所选 managed body；writer 侧已具备 `DarwinRuntime` 启动契约（见
+`link_entry` 条目），哨兵与平台片段也经 `a64::definitions::runtime_definitions` 成形，
+但 `macho_request` 尚未消费这两组产物，不能把这个 request 当作已具备启动协议的
+可执行程序。
 
 `a64::runtime::Catalog` 复用 canonical `RuntimeGlueBindings` 的源码解析，不另建按函数名
 猜测的 runtime 表。`build_runtime` 校验 body 仍与同一冻结世界一致；CallTarget::Runtime
@@ -760,8 +761,40 @@ native data 的 SymbolAddr 多一次槽读取，blob 中的 native data 指针�
 region publish/reset/promote/transfer 合成真实 plan/export 车道；无 map 的入口还必须拥有
 source poll-free 叶证明。隐含调用保留 LR frame，并保守预留同一 4096-byte 叶调用预算。
 冻结 LIR 的 scoped-view/no-safepoint/permit 标记不产指令，不改变验证过的证明。
-尚未登记 A64 machine 实现的入口、专用分配 ABI、生产元数据/适配器生成、TLS、线程与
-Darwin startup/VM 接线仍明确留待后续 review unit；该 catalog 不是已完成的生产调度器。
+
+`RuntimeMachineCall` 与 `PlatformCall` 不经 catalog：`machine_binding(op)` 把
+`machine.name()` 或 `platform_<op>` 映射为 glue 名，lower 直接发
+`Item::Call { target: mangle_runtime(name) }`；`GcAlloc`/`RegionAlloc` 按 x64
+`slow_alloc` 同构的四车道慢调用（type_id、bytes、align、`compressed | code << 1`）
+调 `gc_alloc_slow`/`gc_region_slow`/`gc_shared_alloc`，type_id 由调用方传入的冻结
+`TypeUniverse` 按 descriptor 解析。所有 runtime glue 调用统一引用
+`__gugu_runtime_*` 命名空间：`build_with_catalog` 为 catalog 每个 binding 把
+`mangle_runtime(name)` 写成指向真实编译 body 的别名符号，机器片段则由
+`a64::definitions::runtime_definitions(platform)` 以同名 Definition 产出，调用点不区分。
+TLS 与普通 global 同形落 `__bss` 零初始化块（mangle 不消费 thread_local 标志），线程
+所有者绑定仍是 runtime 层 coroutine_locals 的职责，world 不再整类拒绝。
+生产元数据/适配器生成、`CoroutineSwitch`、线程 worker 启动与 `macho_request`/`link_entry`
+对这两组产物的消费仍留待后续 review unit；该 catalog 不是已完成的生产调度器。
+
+`a64::fragments::runtime` 是哨兵与调度片段集：`context_restore`（单条 `b` 进
+`context_switch + restore_offset`）、`current_slot`（x27 → x0）、`process_exit` 与
+`report_write`（Linux `exit_group`/`write` syscall，Darwin 尾调 libSystem `exit`/`write`）、
+`main_return` 与 `coroutine_enter`（mailbox 写 reason=2、return_value、processor、
+candidate 后按 restore ABI 恢复系统上下文）、`gc_enter`（HOT/SP 切到 coordinator
+系统栈，`gc_dispatch(request, entry_rsp)`，返回前恢复）、`gc_config`（adrp+add 返回
+`gc_config_record` 数据地址）、`runtime_poll_defer`（裸 `ret`）与 `thread_id`
+（Linux `gettid`，Darwin `pthread_threadid_np`）。`runtime_definitions` 统一生成这批
+片段、`context_switch`/`morestack_or_poll`/`safepoint_slow`、六个已实现的
+`platform_*` VM 原语、`foreign_native_worker`、平台 dispatch glue
+（`fs_native_worker`/`net_call`/`resolver_symbol`/`process_call`/`process_worker`）和
+`gc_config_record` 数据定义；Linux 侧另加 `linux_import_definitions` 的
+`__gugu_linux_stub_*` C 函数桩与 `linux_import_slot_symbol` 八字节文件回填 GOT 槽。
+`runtime_imports(platform)` 汇总各片段声明的原生导入：Darwin 全部经 LIB_SYSTEM
+（含 exit/write/pthread_threadid_np，按名去重），Linux 为 resolver 与外调工作线程
+共用的 libc 面（getaddrinfo/freeaddrinfo/gettid/__errno_location）。尚未提供片段的 glue 名（fs_start/fs_poll、callback_*、
+net_close、process_native_worker、monotonic/wall nanos、parallelism_probe、
+signal_install、startup/environment、stack/cage/callback glue、panic glue 与源码侧
+`gc_dispatch` body）在链接期以未定义符号显式失败，不做占位 no-op。
 
 ### A64 外调参数包与内部 lowering（4d.3）
 
@@ -806,7 +839,7 @@ bridge 的调度协议由 CallKind 决定；C callee 的 `may_suspend=false` 不
 提供独立、16-byte 对齐的 system stack；不能直接从协程栈调用。它有界探测栈参数区，
 加载 x0–x8/d0–d7，保存 x0/x1/d0–d3 和线程 errno，release 发布/清除线程 id，
 不清除 thread handle、不发布已 join 或释放 credit。线程启动、join 确认和调度仍需平台绑定。
-Linux C 引用保留 raw 名，Darwin 函数使用 `import_stub_symbol`；Data 符号不加函数桩前缀。
+Linux C 引用经 `linux_import_stub_symbol` 的 GOT 桩符号，Darwin 函数使用 `import_stub_symbol`；Data 符号不加函数桩前缀。
 字节 VM 使用 TLS 函数、admission/copy-back 与栈移动替身，绝不执行 OS FFI 或线程。
 function assembler 同时保留 ADRP/ADD 地址重定位与 call 重定位；无链接的 `assemble`
 入口仍拒绝任何未解析符号。
@@ -818,11 +851,14 @@ function assembler 同时保留 ADRP/ADD 地址重定位与 call 重定位；无
 
 - 孤立入口仍拒绝 `RuntimeCall` 与隐含 runtime 操作；私有 catalog 已按真实源码 body 绑定
   标量 RuntimeCall、handle/屏障与 region 生命周期，并消去冻结 LIR 的 scoped-view 证明标记。
-  专用 allocation ABI、`RuntimeMachineCall`/`CoroutineSwitch` 的 machine 实现和不具备
-  no-safepoint 叶证明的 reserved 屏障仍拒绝；不把未完成的平台接线伪装为可运行的 runtime。
+  `RuntimeMachineCall`/`PlatformCall` 与 `GcAlloc`/`RegionAlloc` 已分别接入
+  `__gugu_runtime_*` 命名空间和四车道慢调用 ABI；`CoroutineSwitch`、不具备
+  no-safepoint 叶证明的 reserved 屏障与尚无片段/源码绑定的 glue 名仍拒绝（后者在
+  链接期以未定义符号失败），不把未完成的平台接线伪装为可运行的 runtime。
 - 孤立编译入口仍拒绝 global、adapter、descriptor、type table/name、vtable、data blob
   与 `CoverageCounter`；私有 image world 已绑定常量、普通全局与 coverage，并要求其余
-  typed 符号有真实显式定义。生产类型表生成与适配器构造尚未接入；TLS 仍明确拒绝。
+  typed 符号有真实显式定义。TLS 与普通 global 同形落 `__bss`，线程所有者绑定仍属
+  runtime 层；生产类型表生成与适配器构造尚未接入。
   Darwin image 的 extern data 地址读取导入槽，function 地址使用已有导入桩。
 - `Vector` 的算术、shuffle、lane 与 reduction：通用 SIMD 尚无 lowering；现有生产
   LIR builder 不生成该 Op，V128 transport/select/load/store/bitcast 已支持。

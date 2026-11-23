@@ -55,7 +55,7 @@ pub fn source_layouts() -> Vec<CoroutineRecordLayout> {
     }
     vec![
         record!("A64Context", A64Context; sp, pc, x19_to_x26, x29, d8_to_d15),
-        record!("A64MorestackMailbox", A64MorestackMailbox; hot, entry_sp, candidate, required, scratch, mutator_context, system_context),
+        record!("A64MorestackMailbox", A64MorestackMailbox; hot, entry_sp, candidate, required, scratch, mutator_context, system_context, return_value, processor),
         record!("A64MorestackScratch", A64MorestackScratch; return_pc, caller_lr, vector, gpr),
         record!("A64ControlBlock", A64ControlBlock; context, scratch, mailbox),
         record!("A64Snapshot", Snapshot; context, return_pc, registers),

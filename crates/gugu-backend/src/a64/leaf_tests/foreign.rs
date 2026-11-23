@@ -120,7 +120,7 @@ fn run(
     stub.symbol = if darwin {
         macho::import_stub_symbol("native")
     } else {
-        "native".into()
+        fragments::linux_import_stub_symbol("native")
     };
     let mut ordinary = stub.clone();
     ordinary.symbol = "ffi_dispatch".into();
@@ -175,7 +175,7 @@ fn foreign_bridge_uses_all_eight_integer_lanes_stack_and_dirty_maps() {
                 == if darwin {
                     macho::import_stub_symbol("native")
                 } else {
-                    "native".into()
+                    fragments::linux_import_stub_symbol("native")
                 }));
         }
     }

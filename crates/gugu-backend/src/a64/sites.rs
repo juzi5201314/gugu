@@ -360,7 +360,7 @@ pub(crate) fn validate(body: &Body) -> Result<(), Error> {
                 return Err(fail("invalid runtime safepoint table reference"));
             }
         }
-        if super::runtime::operation_name(&inst.op).is_some()
+        if super::runtime::implicit_call(&inst.op)
             && inst.op.safepoint_kind().is_some()
             && inst.safepoint.is_none()
         {

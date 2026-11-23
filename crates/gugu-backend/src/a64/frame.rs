@@ -80,7 +80,7 @@ pub fn layout(body: &Body, allocation: &Allocation) -> Result<Frame, Error> {
     let implicit_calls = body
         .instructions
         .iter()
-        .any(|inst| super::runtime::operation_name(&inst.op).is_some());
+        .any(|inst| super::runtime::implicit_call(&inst.op));
     if polls {
         saved.extend(super::abi::CALLEE_SAVED);
     }
@@ -183,7 +183,7 @@ pub(crate) fn runtime_policy(body: &Body, frame: &mut Frame) -> Result<(), Error
     let implicit_calls = body
         .instructions
         .iter()
-        .any(|inst| super::runtime::operation_name(&inst.op).is_some());
+        .any(|inst| super::runtime::implicit_call(&inst.op));
     if body.poll_interface.leaf {
         if implicit_calls || body.instructions.iter().any(|inst| matches!(inst.op, crate::lir::body::Op::StackCheck | crate::lir::body::Op::SafepointPoll { .. } | crate::lir::body::Op::Call(_) | crate::lir::body::Op::ForeignCall(_))) || !body.safepoints.is_empty() {
             return Err(super::error("poll-free leaf interface contains a checked entry or runtime call/poll"));

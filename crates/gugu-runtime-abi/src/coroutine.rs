@@ -89,6 +89,10 @@ pub struct A64MorestackMailbox {
     pub scratch: u64,
     pub mutator_context: u64,
     pub system_context: u64,
+    /// main 协程返回时由返回哨兵记录的退出值。
+    pub return_value: u64,
+    /// 当前 worker 的 `LogicalProcessor*`；返回哨兵恢复上下文时用它重建 `x28`。
+    pub processor: u64,
 }
 
 #[derive(Clone, Copy, Debug, Default, Eq, PartialEq)]

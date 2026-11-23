@@ -194,7 +194,10 @@ fn empty_malformed_and_unbound_symbol_cases_are_explicit() {
     sig.variadic = None;
     sig.arguments[0].align = 32;
     assert!(classify(&sig, Platform::Linux).is_err());
-    assert_eq!(Platform::Linux.symbol("read"), "read");
+    assert_eq!(
+        Platform::Linux.symbol("read"),
+        super::super::fragments::linux_import_stub_symbol("read")
+    );
     assert_eq!(
         Platform::Darwin.symbol("read"),
         super::super::macho::import_stub_symbol("read")

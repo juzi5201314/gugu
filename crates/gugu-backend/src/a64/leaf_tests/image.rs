@@ -34,6 +34,7 @@ fn build(
         bindings: &bindings(),
         definitions,
         imports,
+        universe: None,
     })
 }
 
@@ -213,7 +214,7 @@ fn coverage_executes_wrapping_u32_updates_without_touching_neighbors() {
     f.op(Op::CoverageCounter(3), &[], &[]);
     f.ret(&[]);
     assert!(codegen::compile_runtime(&f.body, &bindings()).is_err());
-    let fragment = codegen::compile_image(&f.body, &bindings(), &[], None).unwrap();
+    let fragment = codegen::compile_image(&f.body, &bindings(), &[], None, None).unwrap();
     let fragment = resolve(fragment, &crate::a64::world::coverage_symbol(3), 0x4000);
     for initial in [0_u32, u32::MAX] {
         let mut memory = (0..8)
@@ -246,7 +247,7 @@ fn imported_data_symbol_evaluates_to_the_bound_pointer_not_slot_address() {
     );
     f.ret(&[pointer]);
     let fragment = resolve(
-        codegen::compile_image(&f.body, &bindings(), &[], None).unwrap(),
+        codegen::compile_image(&f.body, &bindings(), &[], None, None).unwrap(),
         "environment",
         0x5000,
     );
@@ -276,6 +277,7 @@ fn linux_caller_can_feed_the_same_owned_graph_to_the_existing_elf_writer() {
         bindings: &bindings(),
         definitions: &[],
         imports: &[],
+        universe: None,
     })
     .unwrap();
     assert!(world.macho_request("linux").is_err());
@@ -404,11 +406,6 @@ fn world_never_invents_descriptor_adapter_tls_or_invalid_blob_addresses() {
             target: [2; 32],
             has_environment: false,
         },
-        Symbol::Global {
-            key: [3; 32],
-            thread_local: true,
-            bytes: 8,
-        },
         Symbol::Data(1),
     ] {
         let mut f = fixture(1);
@@ -416,6 +413,27 @@ fn world_never_invents_descriptor_adapter_tls_or_invalid_blob_addresses() {
         f.ret(&[]);
         assert!(build(&[f.body], &[], &[]).is_err());
     }
+}
+
+#[test]
+fn tls_global_lands_in_bss_like_a_plain_global() {
+    let tls = Symbol::Global {
+        key: [3; 32],
+        thread_local: true,
+        bytes: 8,
+    };
+    let mut f = fixture(1);
+    let name = mangle::mangle_symbol(&tls);
+    symbol(&mut f, tls);
+    f.ret(&[]);
+    let world = build(&[f.body], &[], &[]).unwrap();
+    assert!(world.symbols.contains_key(&name));
+    let bss = world
+        .sections
+        .iter()
+        .find(|section| matches!(&section.content, SectionContent::ZeroFill(bytes) if *bytes > 0))
+        .expect("TLS global must materialize a __bss zero-fill section");
+    assert!(matches!(bss.segment, Segment::Data));
 }
 
 #[test]

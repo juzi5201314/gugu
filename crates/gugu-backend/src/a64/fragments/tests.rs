@@ -34,6 +34,9 @@ mod linux_resolver;
 #[path = "linux_vm_tests.rs"]
 mod linux_memory;
 
+#[path = "runtime_tests.rs"]
+mod runtime;
+
 fn instructions(fragment: &Fragment) -> Vec<Inst> {
     let (words, remainder) = fragment.bytes.as_chunks::<4>();
     assert!(remainder.is_empty());

@@ -3,6 +3,7 @@ mod atomic;
 mod atomic_vm;
 mod calls;
 mod control;
+mod definitions;
 mod foreign;
 mod foreign_vm;
 mod foreign_worker;
