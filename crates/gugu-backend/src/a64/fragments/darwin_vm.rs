@@ -134,62 +134,8 @@ fn reserve() -> Fragment {
             64 + usize::from(i) * 8,
         );
     }
-    // x19 = bytes, x20 = align, x21 = 当前拥有基址, x22 = 对齐基址, x23 = 剩余长度, x24 = 保存的 errno。
-    b.add(Reg::x(19), RESULT, 0);
-    b.add(Reg::x(20), Reg::x(1), 0);
-    let mut invalid: Vec<(u32, u8)> = Vec::new();
-    for r in [19, 20] {
-        compare(&mut b, Reg::x(r), 0);
-        invalid.push((branch_cond(&mut b, EQ), EQ));
-    }
-    b.emit("sub.X.imm", [reg(Reg::x(9)), reg(Reg::x(20)), add_imm(1)]);
-    binary(&mut b, "and.X.shift", 10, 20, 9);
-    compare(&mut b, Reg::x(10), 0);
-    invalid.push((branch_cond(&mut b, NE), NE));
-    b.emit(
-        "adds.X.shift",
-        [
-            reg(Reg::x(23)),
-            reg(Reg::x(19)),
-            reg(Reg::x(20)),
-            unshifted(),
-        ],
-    );
-    invalid.push((branch_cond(&mut b, CS), CS));
-    // mmap(0, bytes + align, PROT_NONE, MAP_PRIVATE | MAP_ANON, -1, 0)
-    b.add(Reg::x(1), Reg::x(23), 0);
-    for (r, value) in [(0u8, 0u16), (2, 0), (3, 0x1002), (5, 0)] {
-        b.emit("movz.X", [reg(Reg::x(r)), movz(value)]);
-    }
-    b.emit("movn.X", [reg(Reg::x(4)), movz(0)]);
-    call_c(&mut b, "mmap");
-    minus_one(&mut b);
-    let failed = branch_cond(&mut b, EQ);
-    // x22 = (base + align - 1) & -align
-    b.add(Reg::x(21), RESULT, 0);
-    binary(&mut b, "add.X.shift", 22, 21, 20);
-    b.emit("sub.X.imm", [reg(Reg::x(22)), reg(Reg::x(22)), add_imm(1)]);
-    negate(&mut b, Reg::x(9), Reg::x(20));
-    binary(&mut b, "and.X.shift", 22, 22, 9);
-    // prefix: [base, aligned)
-    binary(&mut b, "sub.X.shift", 1, 22, 21);
-    compare(&mut b, Reg::x(1), 0);
-    let no_prefix = branch_cond(&mut b, EQ);
-    call_c(&mut b, "munmap");
-    b.emit("sbfm.X", [reg(RESULT), reg(RESULT), imm(0), imm(31)]);
-    minus_one(&mut b);
-    let prefix_failed = branch_cond(&mut b, EQ);
-    patch_cond(&mut b, no_prefix, EQ);
-    // tail: [aligned + bytes, aligned + align - prefix + bytes)
-    binary(&mut b, "sub.X.shift", 9, 22, 21);
-    binary(&mut b, "sub.X.shift", 1, 20, 9);
-    binary(&mut b, "sub.X.shift", 23, 23, 9);
-    b.add(Reg::x(21), Reg::x(22), 0);
-    binary(&mut b, "add.X.shift", 0, 22, 19);
-    call_c(&mut b, "munmap");
-    b.emit("sbfm.X", [reg(RESULT), reg(RESULT), imm(0), imm(31)]);
-    minus_one(&mut b);
-    let tail_failed = branch_cond(&mut b, EQ);
+    let (invalid, failed) = map(&mut b);
+    let trims = trim(&mut b);
     b.add(RESULT, Reg::x(22), 0);
     let done = branch(&mut b);
     // 参数无效：-EINVAL。
@@ -199,7 +145,7 @@ fn reserve() -> Fragment {
     b.emit("movn.X", [reg(RESULT), movz(EINVAL - 1)]);
     let invalid_done = branch(&mut b);
     // trim 失败：经 __error 取 errno 后释放仍拥有的映射范围，返回 -errno。
-    for at in [prefix_failed, tail_failed] {
+    for at in trims {
         patch_cond(&mut b, at, EQ);
     }
     errno_result(&mut b);
@@ -225,6 +171,74 @@ fn reserve() -> Fragment {
     }
     leave(&mut b, 96);
     b.finish()
+}
+
+/// 校验 x0/x1 并发出过量预留的 mmap。
+/// x19 = bytes, x20 = align, x23 = bytes + align；返回非法输入分支（保留各自条件）与 mmap
+/// 失败分支偏移（EQ 待补）。
+fn map(b: &mut Builder) -> (Vec<(u32, u8)>, u32) {
+    b.add(Reg::x(19), RESULT, 0);
+    b.add(Reg::x(20), Reg::x(1), 0);
+    let mut invalid: Vec<(u32, u8)> = Vec::new();
+    for r in [19, 20] {
+        compare(b, Reg::x(r), 0);
+        invalid.push((branch_cond(b, EQ), EQ));
+    }
+    b.emit("sub.X.imm", [reg(Reg::x(9)), reg(Reg::x(20)), add_imm(1)]);
+    binary(b, "and.X.shift", 10, 20, 9);
+    compare(b, Reg::x(10), 0);
+    invalid.push((branch_cond(b, NE), NE));
+    b.emit(
+        "adds.X.shift",
+        [
+            reg(Reg::x(23)),
+            reg(Reg::x(19)),
+            reg(Reg::x(20)),
+            unshifted(),
+        ],
+    );
+    invalid.push((branch_cond(b, CS), CS));
+    // mmap(0, bytes + align, PROT_NONE, MAP_PRIVATE | MAP_ANON, -1, 0)
+    b.add(Reg::x(1), Reg::x(23), 0);
+    for (r, value) in [(0u8, 0u16), (2, 0), (3, 0x1002), (5, 0)] {
+        b.emit("movz.X", [reg(Reg::x(r)), movz(value)]);
+    }
+    b.emit("movn.X", [reg(Reg::x(4)), movz(0)]);
+    call_c(b, "mmap");
+    minus_one(b);
+    let failed = branch_cond(b, EQ);
+    (invalid, failed)
+}
+
+/// x21 = 当前拥有基址, x22 = 对齐基址, x23 = 剩余映射长度, x24 = 保存的 errno。
+/// 分别 munmap 过量预留的首尾范围；返回前缀/尾部失败分支偏移（EQ 待补）。
+fn trim(b: &mut Builder) -> Vec<u32> {
+    // x22 = (base + align - 1) & -align
+    b.add(Reg::x(21), RESULT, 0);
+    binary(b, "add.X.shift", 22, 21, 20);
+    b.emit("sub.X.imm", [reg(Reg::x(22)), reg(Reg::x(22)), add_imm(1)]);
+    negate(b, Reg::x(9), Reg::x(20));
+    binary(b, "and.X.shift", 22, 22, 9);
+    // prefix: [base, aligned)
+    binary(b, "sub.X.shift", 1, 22, 21);
+    compare(b, Reg::x(1), 0);
+    let no_prefix = branch_cond(b, EQ);
+    call_c(b, "munmap");
+    b.emit("sbfm.X", [reg(RESULT), reg(RESULT), imm(0), imm(31)]);
+    minus_one(b);
+    let prefix_failed = branch_cond(b, EQ);
+    patch_cond(b, no_prefix, EQ);
+    // tail: [aligned + bytes, aligned + align - prefix + bytes)
+    binary(b, "sub.X.shift", 9, 22, 21);
+    binary(b, "sub.X.shift", 1, 20, 9);
+    binary(b, "sub.X.shift", 23, 23, 9);
+    b.add(Reg::x(21), Reg::x(22), 0);
+    binary(b, "add.X.shift", 0, 22, 19);
+    call_c(b, "munmap");
+    b.emit("sbfm.X", [reg(RESULT), reg(RESULT), imm(0), imm(31)]);
+    minus_one(b);
+    let tail_failed = branch_cond(b, EQ);
+    vec![prefix_failed, tail_failed]
 }
 
 fn binary(b: &mut Builder, key: &str, dst: u8, left: u8, right: u8) {
