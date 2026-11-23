@@ -56,7 +56,10 @@ fn aarch64_targets_are_registered_with_descriptors() {
         ("aarch64-linux", TargetName::Aarch64Linux),
         ("aarch64-macos", TargetName::Aarch64Macos),
     ] {
-        assert_eq!(TargetName::parse(name).expect("registered target"), expected);
+        assert_eq!(
+            TargetName::parse(name).expect("registered target"),
+            expected
+        );
         assert_eq!(
             TargetName::from_compiler_artifact(name).expect("registered target"),
             expected
