@@ -42,8 +42,10 @@ gugu build main.gg
 |------|------|
 | `x86_64-linux` | System V AMD64 ABI；系统调用用 `syscall` 指令，不依赖动态链接器才能运行。 |
 | `x86_64-windows` | Microsoft x64 ABI；PE 导入表只挂显式登记的系统 DLL，禁止把 CRT 当默认运行时。 |
+| `aarch64-linux` | AAPCS64；ELF64 static PIE 自包含启动，内核页大小经 auxv 探测，不依赖动态链接器才能运行。 |
+| `aarch64-macos` | Darwin AAPCS64 变体；Mach-O 64 PIE 经 dyld/`LC_MAIN` 进入，只导入 `libSystem.B.dylib`。 |
 
-同一套语言语义必须在两个目标上成立。调用约定、可执行文件格式和对齐可以因目标而变；类型布局若无 `#[repr(...)]` 约束，也可以因目标而变，但在给定目标上必须确定。
+同一套语言语义必须在所有已登记目标上成立。调用约定、可执行文件格式和对齐可以因目标而变；类型布局若无 `#[repr(...)]` 约束，也可以因目标而变，但在给定目标上必须确定。
 
 `i128` / `u128` 的语言布局在两个目标上都是 16 字节、对齐 16；`extern "C"` 的平台差异见[平台与 ABI 参考](platform-abi.md)和[类型](types.md)。
 

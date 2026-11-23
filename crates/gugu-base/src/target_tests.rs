@@ -40,7 +40,7 @@ fn aarch64_pointer_compression_uses_48_bit_addresses() {
 
 #[test]
 fn dimension_values_do_not_register_targets() {
-    for name in ["", "aarch64-linux", "aarch64-macos", "x86_64-macos"] {
+    for name in ["", "x86_64-macos"] {
         let error = TargetName::parse(name).expect_err("unregistered target");
         assert_eq!(error.requested(), name);
     }
@@ -51,14 +51,14 @@ fn dimension_values_do_not_register_targets() {
 }
 
 #[test]
-fn internal_aarch64_targets_carry_descriptors_without_registration() {
-    // 内部目标标识经编译器产物命名解析，但不进入公开注册表或宿主选择。
+fn aarch64_targets_are_registered_with_descriptors() {
     for (name, expected) in [
         ("aarch64-linux", TargetName::Aarch64Linux),
         ("aarch64-macos", TargetName::Aarch64Macos),
     ] {
+        assert_eq!(TargetName::parse(name).expect("registered target"), expected);
         assert_eq!(
-            TargetName::from_compiler_artifact(name).expect("internal target"),
+            TargetName::from_compiler_artifact(name).expect("registered target"),
             expected
         );
     }
@@ -83,7 +83,7 @@ fn internal_aarch64_targets_carry_descriptors_without_registration() {
     assert_eq!(macos.linux_interpreter, None);
     assert_eq!(macos.pointer_compression, PointerCompression::aarch64());
 
-    // 内部目标 sysroot 身份必须互不相同，且不同于已登记目标。
+    // 五个目标的 sysroot 身份必须互不相同。
     let digests = [
         target_sysroot_digest(TargetName::X86_64Linux),
         target_sysroot_digest(TargetName::X86_64Windows),
@@ -97,9 +97,11 @@ fn internal_aarch64_targets_carry_descriptors_without_registration() {
         }
     }
 
-    // 宿主目标选择永不返回未登记目标。
-    assert_ne!(TargetName::host(), Some(TargetName::Aarch64Linux));
-    assert_ne!(TargetName::host(), Some(TargetName::Aarch64Macos));
+    // 宿主目标选择只返回已登记目标（aarch64 宿主即对应 aarch64 目标）。
+    assert_ne!(TargetName::host(), Some(TargetName::X86_64Macos));
+    if let Some(host) = TargetName::host() {
+        assert_ne!(host, TargetName::X86_64Macos);
+    }
 }
 
 #[test]

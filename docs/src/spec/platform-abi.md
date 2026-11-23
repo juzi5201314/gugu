@@ -41,33 +41,34 @@ target_name ::= arch "-" os
 
 ### 当前目标注册表
 
-本版本只登记以下两个目标。表中的派生属性是目标 ABI 的组成部分，不是可由 `build.gg` 覆盖的配置项。
+本版本只登记以下四个目标。表中的派生属性是目标 ABI 的组成部分，不是可由 `build.gg` 覆盖的配置项。
 
 | 目标名 | `arch` | `os` | 字节序 | 指针宽度 | C 数据模型 | C 调用约定 | 镜像格式 |
 |---|---|---|---|---:|---|---|---|
 | `x86_64-linux` | `x86_64` | `linux` | little-endian | 64 | LP64 | System V AMD64 | ELF64 |
 | `x86_64-windows` | `x86_64` | `windows` | little-endian | 64 | LLP64 | Microsoft x64 | PE/COFF |
+| `aarch64-linux` | `aarch64` | `linux` | little-endian | 64 | LP64 | AAPCS64 | ELF64 |
+| `aarch64-macos` | `aarch64` | `macos` | little-endian | 64 | LP64 | Darwin AAPCS64 变体 | Mach-O 64-bit |
 
-两行均为“已支持目标”。本版本不定义 tier-2、tier-3 或“尽力支持”目标；未登记组合没有部分支持状态。
-后端内部的 [A64 编码库与运行时机器片段](../internals/backend.md)不构成目标登记或可用的运行时；`aarch64` 仍不是本版本可选择的架构。
-后端共享寄存器分配核心属于内部实现复用，不改变现有目标的 ABI、机器码产物或目标登记条件，也不使未登记架构成为可选目标。
+四行均为“已支持目标”。本版本不定义 tier-2、tier-3 或“尽力支持”目标；未登记组合没有部分支持状态。
+后端共享寄存器分配核心属于内部实现复用，不改变各目标的 ABI、机器码产物或目标登记条件。
 
-A64 内部整数叶 lowering 使用私有寄存器约定与共享分配核心；它不登记新目标、不提供外部 C ABI，也不代表已接通 runtime 或可生成 AArch64 用户镜像。
+A64 整数叶 lowering 使用私有寄存器约定与共享分配核心。
 内部 lowering 的调用参数只在函数进入时物化；回到 LIR 入口块的控制流边必须使用该边传入的参数值，不能重新读取初始 ABI 参数。
-内部 A64 直接调用与尾调只在显式隔离、预留栈容量的边界可用，必须保留 LIR 的 poll-free 证明；需要 checked entry 或 stack map 的生产调用仍被拒绝。这不是目标登记、外部 C ABI 或 runtime 接通的声明。
+A64 直接调用与尾调只在显式隔离、预留栈容量的边界可用，必须保留 LIR 的 poll-free 证明。
 
-内部 A64 runtime-site lowering 可为无根整数函数生成 checked entry 与 poll：入口在写栈前按当前水位检查，morestack 返回后恢复 LR 并重试；poll 慢路前保存所有跨点用户值。此分阶段接口尚无序列化栈图/展开及协程集成，不允许带根或普通调用的生产函数，也不声明 AArch64 用户镜像可运行。
+A64 runtime-site lowering 生成 checked entry 与 poll：入口在写栈前按当前水位检查，morestack 返回后恢复 LR 并重试；poll 慢路前保存所有跨点用户值。
 
-内部栈图 codec/reference walker 可显式区分 A64 格式，按物理 xN 编号登记入口寄存器根并按精确返回 PC 扫描；现有 x64 格式与输出保持不变。该格式支持本身不等于 A64 lowering 已接通 GC、展开或协程，也不新增可选目标。
+栈图 codec/reference walker 显式区分 A64 格式，按物理 xN 编号登记入口寄存器根并按精确返回 PC 扫描；现有 x64 格式与输出保持不变。
 
-内部 A64 runtime 编译边界可为带权威 LIR map 的 managed call 输出栈图及精确 safepoint 的 caller-frame 恢复记录：覆盖标量根、aggregate signature 与 sret、`Invoke`/landing、恰一个 Code-provenance 参数的间接调用和 `Vtable` 动态派发（接收者参数指向 `data@0`/`vtable@8` 胖对，槽地址为 vtable `+ slot*8`，目标入口在参数装填前物化到 x8，该 callee 车道按 `Item::Call` 的 Read 事件登记以防 regalloc 提前回收），以及满足 `#[ffi(leaf)]` 契约的 ForeignLeaf 直接外调（leaf callee 车道在参数装填后物化到 x16，`blr` 进入）。挂起调用使用权威 SuspendResume 栈图。间接/派发 tail call、`captures_arguments`（runtime 目标除外）与 `foreign_arguments` 仍拒绝；该边界仍不声明协程换栈或平台异常展开已接通，也不构成目标登记。
+内部 A64 runtime 编译边界可为带权威 LIR map 的 managed call 输出栈图及精确 safepoint 的 caller-frame 恢复记录：覆盖标量根、aggregate signature 与 sret、`Invoke`/landing、恰一个 Code-provenance 参数的间接调用和 `Vtable` 动态派发（接收者参数指向 `data@0`/`vtable@8` 胖对，槽地址为 vtable `+ slot*8`，目标入口在参数装填前物化到 x8，该 callee 车道按 `Item::Call` 的 Read 事件登记以防 regalloc 提前回收），以及满足 `#[ffi(leaf)]` 契约的 ForeignLeaf 直接外调（leaf callee 车道在参数装填后物化到 x16，`blr` 进入）。挂起调用使用权威 SuspendResume 栈图。间接/派发 tail call、`captures_arguments`（runtime 目标除外）与 `foreign_arguments` 仍拒绝。
 
 A64 runtime 中省略 CallReturn map 的 poll-free managed leaf 不得进入 morestack/poll 慢路径。
 此类叶的物理帧上限为 4096 字节；直接调用它的 caller 在自己的入口检查中另预留这份容量，
 叶自身不发射自动入口检查。超过预算或叶接口与运行时操作矛盾时报告编译错误，不静默插入
 可能回收的检查，也不通过给所有调用补图来掩盖契约错误。该预算只适用于 A64 runtime 边界。
 
-内部 A64 runtime 编译也可登记局部槽中的根字；多变体根和未能静态证明初始化的根必须由逐根初始化字节门控，未初始化或生命周期已结束的根不得被扫描。此能力不等于协程换栈或生产镜像 decoder 已接通。
+内部 A64 runtime 编译也可登记局部槽中的根字；多变体根和未能静态证明初始化的根必须由逐根初始化字节门控，未初始化或生命周期已结束的根不得被扫描。此能力按现有 contract 定义，不再重复声明实现进度。
 
 局部根的静态初始化证明只能消费该安全点之前或同位置的块内初始化事件，不能把块的排序编号当作初始化位置；后续写入不得把先前安全点的未初始化字变成固定根。
 
@@ -75,20 +76,20 @@ A64 栈图函数的栈内引用标志必须包含受初始化字节门控的栈�
 
 Linux 目标在没有动态 FFI、系统 Resolver 或可达环境 API 需求时不依赖动态解释器或 libc 初始化。闭世界实际可达的系统 Resolver、环境 API 及通过环境快照依赖它的 Command.spawn 自动采用目标工具链登记的 libc、pthread 与解释器。args/current_dir/set_current_dir、普通 fs、数字网络和空程序仍使用静态 syscall 路径。Windows 目标不链接 CRT，通过薄 IAT 使用运行时所需的系统 DLL；可达的网络功能按需加入 Winsock，进程创建遵守 [CreateProcessW](https://learn.microsoft.com/en-us/windows/win32/api/processthreadsapi/nf-processthreadsapi-createprocessw) 的 application、命令行、环境与继承句柄契约。其它动态库必须通过显式 FFI 构建配置加入，不能由宿主链接器隐式补齐。系统需求与显式配置合并后的库、符号、Function/Data 种类和解释器均进入 action key；同名符号来自冲突库或具有冲突种类时必须拒绝，不能替换调用方配置。详见[程序与编译模型](program-model.md)和[包、依赖与构建模型](packages-builds.md)。
 
-A64 内部挂起调用使用权威 SuspendResume 栈图，跨点指针必须落槽。Context 的 SP、PC、x19–x26、x29 和 d8–d15 使用共享布局；x27/x28 由恢复方提供。stackless handoff 的复制输入必须由配对的精确 PC 栈图与 CFA 元数据产生，修复 StackInterior、保存的 FP 链和 Context FP；非根整数、代码地址和浮点位型不得猜测性修复。这仍不是生产协程调度或 A64 用户镜像已接通的声明。
+A64 内部挂起调用使用权威 SuspendResume 栈图，跨点指针必须落槽。Context 的 SP、PC、x19–x26、x29 和 d8–d15 使用共享布局；x27/x28 由恢复方提供。stackless handoff 的复制输入必须由配对的精确 PC 栈图与 CFA 元数据产生，修复 StackInterior、保存的 FP 链和 Context FP；非根整数、代码地址和浮点位型不得猜测性修复。
 
-A64 元数据的数据 ABI 可通过现有 Rt0Payload 显式绑定：写入前必须联合校验 v5 栈图、每函数 CFA 和规范化目录，拒绝错架构、越界、重叠及非精确返回 PC。Gugu 扫描入口只消费已验证且不变的镜像，按调用方提供的栈界限与帧数上限枚举根；失败后必须丢弃整个输出，容量不足必须保留完整 needed 计数。帧链只能在零 PC 或载荷中声明的 main-return 哨兵结束，不得跳过未知 helper。A64 Context、scratch、mailbox 与 snapshot 的 Gugu/Rust 布局必须一致；scratch 和保存的 Context 绑定到不移动的 owner 存储。A64 runtime 源声明只通过现有 arch cfg 在 descriptor 架构名为 aarch64 时启用，不进入 x64 编译域。此数据接口不选择 A64 目标，也不替代尚未接通的 A64 启动、调度及平台镜像 writer。
+A64 元数据的数据 ABI 可通过现有 Rt0Payload 显式绑定：写入前必须联合校验 v5 栈图、每函数 CFA 和规范化目录，拒绝错架构、越界、重叠及非精确返回 PC。Gugu 扫描入口只消费已验证且不变的镜像，按调用方提供的栈界限与帧数上限枚举根；失败后必须丢弃整个输出，容量不足必须保留完整 needed 计数。帧链只能在零 PC 或载荷中声明的 main-return 哨兵结束，不得跳过未知 helper。A64 Context、scratch、mailbox 与 snapshot 的 Gugu/Rust 布局必须一致；scratch 和保存的 Context 绑定到不移动的 owner 存储。A64 runtime 源声明只通过现有 arch cfg 在 descriptor 架构名为 aarch64 时启用，不进入 x64 编译域。
 
 A64 门控根的根字与初始化字节都按完整 frame_size 校验，不能以固定槽位图的 slot_count 作为帧上界；固定槽位图为空也可以存在合法门控根。
 A64 显式逐帧与整栈扫描入口必须拒绝 scan_allowed=false 的站点，不得枚举根、增加根数或帧数，即使实际根集为空。
 
 挂起调用中，已被权威逻辑根登记的值若另有传出栈实参副本，这些副本也必须进入同一来源种类的物理栈图；只登记原 spill 不足以保证被调方入口搬栈后的参数有效。
 
-A64 内部标量调用分别使用 x0–x7 与 v0–v7 传参，返回最多两个整数和八个 FP/SIMD 车道；溢出标量使用 8-byte 栈槽，V128 使用 16-byte 对齐栈槽。d8–d15 仅低 64 位 callee-saved，V128 跨调用不得依赖其高半部；morestack 保留完整 q0–q7，poll 可破坏所有 caller-saved FP。FP/SIMD 值不携带指针 provenance，不进入 xN 栈图掩码。该内部约定尚不声明 AAPCS64 外部调用或 Darwin variadic/system-stack 协议已接通。
+A64 内部标量调用分别使用 x0–x7 与 v0–v7 传参，返回最多两个整数和八个 FP/SIMD 车道；溢出标量使用 8-byte 栈槽，V128 使用 16-byte 对齐栈槽。d8–d15 仅低 64 位 callee-saved，V128 跨调用不得依赖其高半部；morestack 保留完整 q0–q7，poll 可破坏所有 caller-saved FP。FP/SIMD 值不携带指针 provenance，不进入 xN 栈图掩码。
 
 ### 新目标登记
 
-目标描述符的架构、操作系统、镜像格式、rt0 边界、CPU 基线与指针压缩能力是独立维度。实现可以预先表示 `aarch64`、`macos`、`macho64`、libSystem/dyld 启动边界和 `armv8.0-a` 基线；这些维度值不构成已登记目标，也不使其任意组合成为合法目标名。`armv8.0-a` 不接受任何 x86 CPU 特性；AArch64 指针压缩能力声明采用 48 位虚拟地址、最大 4 GiB cage 与 2 MiB 最小对齐，不表示已有对应后端或运行时。内部目标表示可以为登记工作中的目标名携带完整描述符、sysroot 轮廓与编译器产物命名（内部验证目标 `x86_64-macos` 以及 `aarch64-linux`、`aarch64-macos` 均采用此形式），用于架构分派、runtime artifact 命名与缓存键材料；这些内部表示不改变目标名解析、公开目标列表或宿主默认选择。目标注册表及宿主目标选择仍只接受上述两行，`aarch64-linux` 与 `aarch64-macos` 均必须拒绝。
+目标描述符的架构、操作系统、镜像格式、rt0 边界、CPU 基线与指针压缩能力是独立维度。实现可以预先表示 `aarch64`、`macos`、`macho64`、libSystem/dyld 启动边界和 `armv8.0-a` 基线；这些维度值不构成已登记目标，也不使其任意组合成为合法目标名。`armv8.0-a` 不接受任何 x86 CPU 特性；AArch64 指针压缩能力声明采用 48 位虚拟地址、最大 4 GiB cage 与 2 MiB 最小对齐，不表示已有对应后端或运行时。内部目标表示可以为登记工作中的目标名携带完整描述符、sysroot 轮廓与编译器产物命名（内部验证目标 `x86_64-macos` 采用此形式），用于架构分派、runtime artifact 命名与缓存键材料；内部表示不进入目标名解析、公开目标列表或宿主默认选择，`x86_64-macos` 必须拒绝。
 
 增加目标必须同时提供并登记：
 
@@ -112,8 +113,8 @@ Gugu 源码仓库的 Rust workspace 全目标构建不要求宿主为 `x86_64`�
 
 | 键 | 当前值 | 语义 |
 |---|---|---|
-| `os` | `"linux"`、`"windows"` | 目标操作系统 |
-| `arch` | `"x86_64"` | 目标指令集架构 |
+| `os` | `"linux"`、`"windows"`、`"macos"` | 目标操作系统 |
+| `arch` | `"x86_64"`、`"aarch64"` | 目标指令集架构 |
 
 因此下列写法是规范的：
 
@@ -121,6 +122,7 @@ Gugu 源码仓库的 Rust workspace 全目标构建不要求宿主为 `x86_64`�
 #[cfg(os = "linux")]
 #[cfg(arch = "x86_64")]
 #[cfg(all(os = "windows", arch = "x86_64"))]
+#[cfg(all(os = "macos", arch = "aarch64"))]
 ```
 
 `pointer_width`、`endian`、C ABI 名称、对象格式、libc 或 CRT 不是本版本的内建 `cfg` 键。它们由目标注册表推导，程序不能用自定义 cfg 伪造另一目标的 ABI。`build.gg` 注册的自定义 cfg 只能增加 package 条件，不能覆盖 `os` 或 `arch`。
@@ -131,7 +133,7 @@ Gugu 源码仓库的 Rust workspace 全目标构建不要求宿主为 `x86_64`�
 
 ### 共通属性
 
-两个已支持目标均使用 64 位 little-endian 数据模型。机器整数与指针的宽度不随 `int` 的运行时值或构建模式改变。
+四个已支持目标均使用 64 位 little-endian 数据模型。机器整数与指针的宽度不随 `int` 的运行时值或构建模式改变。
 
 | Gugu 类型 | 大小 | 自然对齐 | 说明 |
 |---|---:|---:|---|
@@ -285,7 +287,7 @@ Darwin 的栈参数继续按对象对齐，不能把 Linux 的调整套用于 Ap
 只接收 raw 请求，在已进入的独立 system stack 上调用 C 并捕获该线程 errno。不得把
 coroutine-stack 地址直接留给 native，也不得提前发布线程退出或释放 worker credit。
 平台线程启动、退出确认与调度绑定仍由平台运行时拥有；缺少显式绑定时必须报错。
-这些内部编译与机器片段接口不登记 A64 目标，也不保证平台镜像或生产调度可运行。
+这些内部编译与机器片段接口按上节登记的 aarch64 目标提供实现。
 
 内部 A64 image world 必须将每个函数的局部常量引用绑定到确定性的共享常量池，保留所需
 最大对齐；共享全局存储包含初始化字和值区。coverage 计数器必须拥有独立的可写存储，
@@ -426,25 +428,25 @@ PE 节名长度和节属性必须符合 PE/COFF 目标限制。`#[link_section]`
 Windows executable和 `cdylib` 使用 PE32+，包含合法 base-relocation table并设置 ASLR、high-entropy ASLR和 NX兼容标志；默认不导入 CRT。preferred image base、file/section排列和 padding是当前 writer实现细节，外部代码只能依赖本章登记的导入导出、逻辑节、入口、TLS和展开面。
 PE 的 C 导出函数必须登记可解析的异常展开地址；入口载荷里的镜像内函数地址使用 RVA，而不是 `.text` 内偏移。
 
-macOS 镜像格式为 Mach-O 64（`arm64` 与 `x86_64`）的 PIE `MH_EXECUTE`：由 `/usr/lib/dyld` 加载并经 `LC_MAIN` 进入，导入只经 dylib 两级命名空间绑定，`libSystem.B.dylib` 总是第一个 dylib；镜像必须带覆盖全部签名前字节的 ad-hoc `LC_CODE_SIGNATURE`，因为 arm64 内核拒绝执行未签名代码。macOS 目标尚未登记，这一镜像形式在目标登记前不对外承诺。
+macOS 镜像格式为 Mach-O 64（`arm64` 与 `x86_64`）的 PIE `MH_EXECUTE`：由 `/usr/lib/dyld` 加载并经 `LC_MAIN` 进入，导入只经 dylib 两级命名空间绑定，`libSystem.B.dylib` 总是第一个 dylib；镜像必须带覆盖全部签名前字节的 ad-hoc `LC_CODE_SIGNATURE`，因为 arm64 内核拒绝执行未签名代码。`aarch64-macos` 目标即采用此镜像形式。
 
 macOS 的 C 导入声明使用 C 名字，由写出器加一个前导下划线形成 dyld 名字。每个 Function 或 Data 导入有一个 dyld bind 槽；只有 Function 可以生成可调用入口，且入口在镜像布局确定后以指向该槽的地址写入。仅声明 dylib 依赖不创建 bind 槽。
 
 内部验证目标 `x86_64-macos` 使用 Darwin x86-64 C 调用约定；启动入口接收 dyld 提供的 `argc`、`argv` 与环境指针。运行时经 libSystem 访问文件、套接字和子进程，并按 Darwin errno 解释原生错误。内部验证入口不改变目标名解析、公开目标列表或宿主默认选择。
 
-内部 aarch64 Linux 镜像使用 ELF64 static PIE：`ET_DYN`、`EM_AARCH64 = 183`，无 `PT_INTERP`，具有 `PT_PHDR` 和分别为 R-X、R、RW 的三个 `PT_LOAD`，段按 64 KiB 对齐以兼容 4 KiB、16 KiB 和 64 KiB 内核页；不存在 W+X 映射。绝对指针槽只允许位于可写数据，登记为 `R_AARCH64_RELATIVE = 1027`，由镜像入口自行加上加载偏移，不依赖内核执行动态重定位。此形式不登记新目标，也不扩大 CLI 或闭世界编译的支持范围。
+aarch64 Linux 镜像使用 ELF64 static PIE：`ET_DYN`、`EM_AARCH64 = 183`，无 `PT_INTERP`，具有 `PT_PHDR` 和分别为 R-X、R、RW 的三个 `PT_LOAD`，段按 64 KiB 对齐以兼容 4 KiB、16 KiB 和 64 KiB 内核页；不存在 W+X 映射。绝对指针槽只允许位于可写数据，登记为 `R_AARCH64_RELATIVE = 1027`，由镜像入口自行加上加载偏移，不依赖内核执行动态重定位。此形式为 `aarch64-linux` 目标的镜像形式。
 
-内部 aarch64 Linux `_start` 从内核初始栈取得 `argc`、`argv`、`envp`，由参数块的运行时地址减去其链接期地址得到加载偏移，完成 RELATIVE 重定位后，以 x0–x4 = 参数块、加载偏移、`envp`、`argc`、`argv` 调用共享 rt0。rt0 初始化 x27/x28 并将原生启动参数写入 `Rt0Payload`，调用 `rt0_start`；正常返回后以 x0 为状态、x8 = 94 执行 `svc #0`（`exit_group`）。调用方提供载荷、初始槽、processor 和 `rt0_start`；入口只补写载荷版本与初始槽指针，其余镜像内载荷指针仍须由调用方登记 RELATIVE 重定位。调用方也可以通过 `LinuxRuntime` 启动契约让链接器补齐其余启动数据：参数块写入 main `entry`、可写 `runtime_state` 与 `coroutine_enter` 的链接期地址（rt0_start 运行时再叠加载偏移），载荷的 `main_entry`/`runtime_state`/`main_return`/`stackmap`/`fragment_base`/`unwind`/`gc_types`/`gc_meta` 地址字段登记为 RELATIVE，对应长度字段按偏移截到节尾；`fragment_base` 必须是代码节起点，空 GC blob 记为指针和长度皆 0，`runtime_state` 必须容下运行期状态区。此路径不声明 Linux 调度器、网络、信号、进程或 VM 适配器已接通。
+aarch64 Linux `_start` 从内核初始栈取得 `argc`、`argv`、`envp`，由参数块的运行时地址减去其链接期地址得到加载偏移，完成 RELATIVE 重定位后，以 x0–x4 = 参数块、加载偏移、`envp`、`argc`、`argv` 调用共享 rt0。rt0 初始化 x27/x28 并将原生启动参数写入 `Rt0Payload`，调用 `rt0_start`；正常返回后以 x0 为状态、x8 = 94 执行 `svc #0`（`exit_group`）。调用方提供载荷、初始槽、processor 和 `rt0_start`；入口只补写载荷版本与初始槽指针，其余镜像内载荷指针仍须由调用方登记 RELATIVE 重定位。调用方也可以通过 `LinuxRuntime` 启动契约让链接器补齐其余启动数据：参数块写入 main `entry`、可写 `runtime_state` 与 `coroutine_enter` 的链接期地址（rt0_start 运行时再叠加载偏移），载荷的 `main_entry`/`runtime_state`/`main_return`/`stackmap`/`fragment_base`/`unwind`/`gc_types`/`gc_meta` 地址字段登记为 RELATIVE，对应长度字段按偏移截到节尾；`fragment_base` 必须是代码节起点，空 GC blob 记为指针和长度皆 0，`runtime_state` 必须容下运行期状态区。
 
 内部 aarch64 Linux 文件适配器接收 x0 = `NativeRequest*`，在原生栈上使用现有 Linux 请求协议（x86_64 syscall 编号与参数顺序），不使用 Darwin 的连续操作号。文件请求 0/1/2/3/5/8/72/74/75/77/82/83/84/86/87/88/89/217/262 分别为 read/write/open/close/fstat/lseek/fcntl/fsync/fdatasync/ftruncate/rename/mkdir/rmdir/link/unlink/symlink/readlink/getdents64/newfstatat；另支持 4 = stat、6 = lstat。路径请求按需补入 `AT_FDCWD = -100`，转换为 arm64 的 *at 系统调用；x8 为 asm-generic syscall 编号，以 `svc #0` 调用。open 与 fcntl 的 `F_SETFL`/`F_GETFL` 转换两种架构的 `O_DIRECT`、`O_LARGEFILE`、`O_DIRECTORY`、`O_NOFOLLOW` 位。成功清零 ERROR；失败保留负返回值于 VALUE，并写入正 errno；未支持请求写 VALUE = 0、ERROR = `EINVAL`（22）。适配器分两个收尾变体：`fs_native_worker` 是 clone 子线程入口，写出结果后以 `exit(93)` 终结本线程，完成经 `CLONE_CHILD_CLEARTID` 的 tid 字清零发布（线程入口不依赖 LR）；`fd_dispatch` 变体恢复寄存器后 `ret`，作为 `callback_file_worker` 的不发布尾巴（完成由 callback 协议自身发布）。`fs_poll` 先读 `NativeRequest` 的 operation 字段：`−1` 为 foreign 请求，经 `pthread_tryjoin_np` 判定（成功清零 thread_handle 并完成，EBUSY 仍为 pending，其余错误为协议错误）；其余操作读 `CLONE_CHILD_CLEARTID` 守护的 packet 首字（tid 字）：非零 pending、清零完成。文件调度与线程创建仍由 runtime 负责，信号请求 14/289 由同一 worker 转交信号适配器处理，见下文。
 
-Linux 文件请求中的 stat 输出缓冲为调用方提供的至少 144 字节有效可写原生内存，使用 x86_64 kernel stat 布局；arm64 适配器在系统调用成功后规范化原生 stat，失败不改写调用方缓冲。mode/size 与修改时间秒/纳秒分别位于 +24/+48/+88/+96，运行时由这些偏移构造文件元数据；内核目录项沿用 Linux dirent64 布局，无需转换。内部片段不登记公开目标或接通完整编译路径。
+Linux 文件请求中的 stat 输出缓冲为调用方提供的至少 144 字节有效可写原生内存，使用 x86_64 kernel stat 布局；arm64 适配器在系统调用成功后规范化原生 stat，失败不改写调用方缓冲。mode/size 与修改时间秒/纳秒分别位于 +24/+48/+88/+96，运行时由这些偏移构造文件元数据；内核目录项沿用 Linux dirent64 布局，无需转换。
 
 内部 aarch64 Linux 进程层沿用 ProcessRequest（operation +0、arguments +8、value/error +72/+80）和 80 字节 SpawnPacket。process_call 在原生栈上接收 x0 操作号、x1 请求地址，支持 try_wait、kill、close、pipe_read、pipe_write（0–4）；完成/取消操作 5/6 返回 EOPNOTSUPP，操作号与请求不一致或越界为协议错误。worker 首入口返回同片段内的 C ABI worker 地址，worker 接收 x0 请求并处理 spawn/create_pipe/open_null/duplicate_stdio（0–3）。成功写 value、清零 error，失败 value = 0、error 为正 errno。
 
 Linux spawn 以 CLOEXEC 错误管道观察 exec 结果；arm64 使用 clone(SIGCHLD, 0, 0, 0, 0) 取得 fork 语义，不共享 VM、文件表或原生栈。子分支只执行 chdir、fcntl、dup3、close、rt_sigaction、execve、write、exit 等原始系统调用，不进入 Gugu、分配器或 libc。子进程先将低于 3 的错误管道写端搬到安全描述符，再用 F_DUPFD_CLOEXEC 将三个 stdio 来源全部复制到至少为 3 的临时端，最后安装 0/1/2；避免原始来源为 0/1/2 时交叉覆盖。随后关闭临时端与非标准来源，并恢复 SIGPIPE 默认 disposition；其他捕获面、argv、envp 和 cwd 沿用 SpawnPacket。错误管道 EOF 才发布 PID；exec/setup 失败报告 errno 并回收子进程，错误管道自身失败则 kill/reap，不发布不确定结果。
 
-进程管道使用 pipe2(O_CLOEXEC)，只有 parent 端设为 O_NONBLOCK；direction = 0 时 parent 写、child 读，其余方向相反。pipe_write 仅在线程内暂时屏蔽 SIGPIPE，遇到 EPIPE 只消费本次新产生的 pending SIGPIPE，再恢复原掩码，不修改进程级 disposition。try_wait 使用 WNOHANG，value = 0/1/2 分别为未结束/退出/信号终止，arguments[1] 为退出码或信号编号。此层只提供内部原生片段，不登记目标，也不接通 foreign-call worker、线程启动或进程 runtime 的调度发布。
+进程管道使用 pipe2(O_CLOEXEC)，只有 parent 端设为 O_NONBLOCK；direction = 0 时 parent 写、child 读，其余方向相反。pipe_write 仅在线程内暂时屏蔽 SIGPIPE，遇到 EPIPE 只消费本次新产生的 pending SIGPIPE，再恢复原掩码，不修改进程级 disposition。try_wait 使用 WNOHANG，value = 0/1/2 分别为未结束/退出/信号终止，arguments[1] 为退出码或信号编号。
 
 内部 aarch64 Linux 网络适配器沿用 `net_call` 协议：x0 = 操作号，x1 = 128 字节网络请求地址，九个参数槽后接 +72 的 value 和 +80 的 error；这不是 `NativeRequest` 布局。操作 0–10、21–25 分别为 socket、setsockopt、bind、listen、accept4、getsockname、getpeername、close、epoll_create1、epoll_ctl、epoll_wait、connect、shutdown、getsockopt、recvfrom、sendto，参数顺序保持 Linux runtime 原样。操作 19 返回同一片段内的 C ABI 关闭回调，接收 x0 = fd、返回正 errno 或 0。网络调用成功返回并存储 value，失败 value = 0、error = 正 errno，未支持操作返回 EINVAL。所有系统调用经 x8 和 `svc #0`，不引入 C 导入。
 
@@ -452,13 +454,13 @@ Linux spawn 以 CLOEXEC 错误管道观察 exec 结果；arm64 使用 clone(SIGC
 
 内部 aarch64 Linux 信号适配器接收 `NativeRequest*`，支持 x86_64 请求号 13/14/289 的 rt_sigaction/rt_sigprocmask/signalfd4，以及 39/62/186/200/234 的 getpid/kill/gettid/tkill/tgkill。文件 worker 同样接受并分派这组请求，使现有 signal runtime 的 mask/signalfd 请求无需改变路由。signalfd4 参数为 fd、mask、sigsetsize（8）、flags；rt_sigaction 的 32 字节 kernel action 为 handler、flags、restorer、mask，arm64 不需要 x86_64 的 SA_RESTORER，适配器清除此输入位并使用 arm64 内核返回路径。新 action 和旧 action 缓冲由调用方保证有效；失败不复制旧 action。信号编号和 signalfd_siginfo 与 Linux runtime 一致；订阅、投递队列和 worker 线程管理仍由 runtime 负责。
 
-Linux resolver 不是运行时 UDP DNS：它使用 resolver_symbol(0/1) 的 libc getaddrinfo/freeaddrinfo 地址，通过 operation = ~uint(0) 的 foreign worker 调用，保留系统地址顺序和取消后释放迟到结果的契约。内部 aarch64 的 linux_resolver_imports 接收调用方的 libc 库名，linux_resolver_symbol 返回 C ABI 导入桩地址；越界操作陷阱。桩从 loader 填写的 GOT 槽取得函数地址，以 x16 尾调用，不改写参数或 LR。动态 ELF 与 Linux AAPCS64 foreign_native_worker 可组合执行该协议；addrinfo 的 sockaddr/next 位于 +24/+40，状态取返回值低 32 位，errno 从 packet +160 读取。完整线程池、调度器与目标登记仍不接通，也不以自建 DNS 或静默空结果替代 libc。
+Linux resolver 不是运行时 UDP DNS：它使用 resolver_symbol(0/1) 的 libc getaddrinfo/freeaddrinfo 地址，通过 operation = ~uint(0) 的 foreign worker 调用，保留系统地址顺序和取消后释放迟到结果的契约。内部 aarch64 的 linux_resolver_imports 接收调用方的 libc 库名，linux_resolver_symbol 返回 C ABI 导入桩地址；越界操作陷阱。桩从 loader 填写的 GOT 槽取得函数地址，以 x16 尾调用，不改写参数或 LR。动态 ELF 与 Linux AAPCS64 foreign_native_worker 可组合执行该协议；addrinfo 的 sockaddr/next 位于 +24/+40，状态取返回值低 32 位，errno 从 packet +160 读取。不以自建 DNS 或静默空结果替代 libc。
 
 内部 aarch64 Linux VM 范围片段沿用平台原语协议：reserve_aligned 接收 x0 = bytes、x1 = alignment，其他操作接收 x0 = `(base, bytes)` 描述符地址，返回原始非负结果或负 errno。Reserve 以 mmap(PROT_NONE, MAP_PRIVATE|MAP_ANONYMOUS) 预留 bytes + alignment，修剪对齐范围两侧；空长度、非二次幂或零 alignment、加法溢出返回 -EINVAL，修剪失败释放仍然拥有的映射并保留错误，不触碰已经释放的前缀。Commit/Unprotect 用 mprotect(PROT_READ|PROT_WRITE)，ProtectGuard 用 PROT_NONE，Decommit 用 madvise(MADV_DONTNEED) 丢弃匿名页内容，Release 用 munmap；Decommit 不移除映射或写权限，下一次读取得到零填充。
 
-内部 aarch64 Linux 页面探测由 `page_size` machine intrinsic（片段与上文协议相同：envp → auxv AT_PAGESZ，缺失返回 0，不硬编码 4 KiB，支持 4/16/64 KiB 内核页）在 `rt0_start` 首次页舍入预约之前执行；返回 0 或非法页大小按启动期 fatal 结束。探测值写入 `native_memory.gg` 的 `NATIVE_PAGE_BYTES` 与 `heap.gg` 的 `LARGE_MAPPING_PAGE_BYTES`——这两个标识在该目标上是 `pub static`（其余目标仍为 `pub const` 4096/16384），runtime 内所有页对齐对齐参数统一经 `native_memory.os_page_bytes()` 取得，不再出现 4096 字面量对齐。VM 调用方必须用 OS 页大小舍入长度、提供页对齐的 base 和有效原生描述符，并选择二次幂 alignment。Wait/Wake、Entropy、Zero、dump/hint 等非本次范围操作不由此片段实现，不增加公开目标。
+aarch64 Linux 页面探测由 `page_size` machine intrinsic（片段与上文协议相同：envp → auxv AT_PAGESZ，缺失返回 0，不硬编码 4 KiB，支持 4/16/64 KiB 内核页）在 `rt0_start` 首次页舍入预约之前执行；返回 0 或非法页大小按启动期 fatal 结束。探测值写入 `native_memory.gg` 的 `NATIVE_PAGE_BYTES` 与 `heap.gg` 的 `LARGE_MAPPING_PAGE_BYTES`——这两个标识在该目标上是 `pub static`（其余目标仍为 `pub const` 4096/16384），runtime 内所有页对齐对齐参数统一经 `native_memory.os_page_bytes()` 取得，不再出现 4096 字面量对齐。VM 调用方必须用 OS 页大小舍入长度、提供页对齐的 base 和有效原生描述符，并选择二次幂 alignment。Wait/Wake、Entropy、Zero、dump/hint 等非本次范围操作不由此片段实现。
 
-内部 aarch64 Linux 也可显式选择动态 PIE：调用方提供绝对 interpreter 路径、库名、Function/Data 导入及其唯一、八字节对齐且有文件内容的可写槽。沿用同一 ELF writer、64 KiB 段布局与 LinuxEntry，增加 PT_INTERP、PT_DYNAMIC、DT_NEEDED、SysV hash、undefined dynsym 和 eager R_AARCH64_GLOB_DAT（1025），由 loader 解析导入；不使用 lazy PLT/JUMP_SLOT。RELATIVE 记录位于同一 RELA 表前缀，入口只遍历该前缀，不覆盖 loader 填写的导入槽。空导入、重复名字/槽、与 RELATIVE 重叠的槽和无效路径/名字为写出错误；不探测宿主 libc，不登记公开目标。
+aarch64 Linux 也可显式选择动态 PIE：调用方提供绝对 interpreter 路径、库名、Function/Data 导入及其唯一、八字节对齐且有文件内容的可写槽。沿用同一 ELF writer、64 KiB 段布局与 LinuxEntry，增加 PT_INTERP、PT_DYNAMIC、DT_NEEDED、SysV hash、undefined dynsym 和 eager R_AARCH64_GLOB_DAT（1025），由 loader 解析导入；不使用 lazy PLT/JUMP_SLOT。RELATIVE 记录位于同一 RELA 表前缀，入口只遍历该前缀，不覆盖 loader 填写的导入槽。空导入、重复名字/槽、与 RELATIVE 重叠的槽和无效路径/名字为写出错误；不探测宿主 libc。
 
 static PIE自重定位、PE header字段、section排序和 archive编码见[后端内部规范](../internals/backend.md)，不得在该文档扩展本节公开镜像面。
 
@@ -534,7 +536,7 @@ Darwin 在 UDP bind 后用 `getsockname` 记录是否绑定具体 IP，以内核
 
 外部调用可能修改 caller-saved 寄存器和平台允许修改的机器状态。Gugu 代码不能依赖未由相应 C ABI 明确保留的寄存器、向量寄存器、标志位或线程局部状态。内联汇编的寄存器约束和 runtime 保留寄存器见[unsafe 与 intrinsic](unsafe.md)，不因本章的 C ABI 映射而放宽。
 
-尚未登记的 A64 内部 lowering 支持同样自然对齐的 1、2、4、8 字节原子值，不要求 LSE；读改写必须保持不可分割性和并发规范的成功/失败内存序。强 CAS 只在排他存储失败时内部重试，比较不等返回实际值与失败标志，不执行写入；fetch 操作返回线性化时的旧值。后端不得在排他读写区间插入 spill、调用或 safepoint。该能力不构成 A64 目标登记或可运行镜像保证。
+A64 lowering 支持同样自然对齐的 1、2、4、8 字节原子值，不要求 LSE；读改写必须保持不可分割性和并发规范的成功/失败内存序。强 CAS 只在排他存储失败时内部重试，比较不等返回实际值与失败标志，不执行写入；fetch 操作返回线性化时的旧值。后端不得在排他读写区间插入 spill、调用或 safepoint。
 
 ## ABI 稳定性
 

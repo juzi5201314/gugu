@@ -11,11 +11,9 @@ pub enum TargetName {
     /// x86_64 macOS internal compiler target; not accepted by the registry.
     #[doc(hidden)]
     X86_64Macos,
-    /// aarch64 Linux internal compiler target; not accepted by the registry.
-    #[doc(hidden)]
+    /// aarch64 Linux，使用 ELF64 与 AAPCS64。
     Aarch64Linux,
-    /// aarch64 macOS internal compiler target; not accepted by the registry.
-    #[doc(hidden)]
+    /// aarch64 macOS，使用 Mach-O64 与 Darwin AAPCS64。
     Aarch64Macos,
 }
 
@@ -25,6 +23,8 @@ impl TargetName {
         match value {
             "x86_64-linux" => Ok(Self::X86_64Linux),
             "x86_64-windows" => Ok(Self::X86_64Windows),
+            "aarch64-linux" => Ok(Self::Aarch64Linux),
+            "aarch64-macos" => Ok(Self::Aarch64Macos),
             _ => Err(TargetParseError {
                 requested: value.to_owned(),
             }),
@@ -287,9 +287,21 @@ fn host_target() -> Option<TargetName> {
     Some(TargetName::X86_64Windows)
 }
 
+#[cfg(all(target_arch = "aarch64", target_os = "linux"))]
+fn host_target() -> Option<TargetName> {
+    Some(TargetName::Aarch64Linux)
+}
+
+#[cfg(all(target_arch = "aarch64", target_os = "macos"))]
+fn host_target() -> Option<TargetName> {
+    Some(TargetName::Aarch64Macos)
+}
+
 #[cfg(not(any(
     all(target_arch = "x86_64", target_os = "linux"),
     all(target_arch = "x86_64", target_os = "windows"),
+    all(target_arch = "aarch64", target_os = "linux"),
+    all(target_arch = "aarch64", target_os = "macos"),
 )))]
 fn host_target() -> Option<TargetName> {
     None

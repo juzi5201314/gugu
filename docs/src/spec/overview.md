@@ -105,7 +105,7 @@ UTF-8，扩展名 `.gg`。文件是模块，目录是包；规范排版见[格�
 | 抽象分析 | 对未知运行时值传播范围、别名、内存版本、效果和控制流事实的健全全程序分析。 |
 | 物理位置 | `std.src.file` / `line` / `column` 取到的调用表达式在源文件中的位置。 |
 | IAT | Windows PE 的导入地址表（Import Address Table）。「薄 IAT」= 只导入 ntdll/kernel32 等少量符号，不链 CRT。 |
-| 已支持目标 | 本规范当前登记并要求支持的目标：`x86_64-linux` 与 `x86_64-windows`。目标模型与 ABI 见[平台与 ABI 参考](platform-abi.md)。 |
+| 已支持目标 | 本规范当前登记并要求支持的目标：`x86_64-linux`、`x86_64-windows`、`aarch64-linux` 与 `aarch64-macos`。目标模型与 ABI 见[平台与 ABI 参考](platform-abi.md)。 |
 | runtime 状态 | `Booting`、`Running`、`Waiting` 和 `Terminating`；状态转换见[运行时与运维语义](runtime.md)。 |
 | fatal | runtime 无法安全恢复的进程级故障；不进入 `Panic`，不能被 `catch` 或 `Join.wait()` 截获。 |
 | 终止类别 | `success`、`program-failure`、`runtime-failure`、`explicit-exit` 和 `signal`；退出码与结构化原因见[运行时与运维语义](runtime.md)。 |
