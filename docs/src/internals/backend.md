@@ -802,10 +802,25 @@ candidate 后按 restore ABI 恢复系统上下文）、`gc_enter`（HOT/SP 切�
 `__gugu_linux_stub_*` C 函数桩与 `linux_import_slot_symbol` 八字节文件回填 GOT 槽。
 `runtime_imports(platform)` 汇总各片段声明的原生导入：Darwin 全部经 LIB_SYSTEM
 （含 exit/write/pthread_threadid_np，按名去重），Linux 为 resolver 与外调工作线程
-共用的 libc 面（getaddrinfo/freeaddrinfo/gettid/__errno_location）。尚未提供片段的 glue 名（fs_start/fs_poll、callback_*、
-net_close、process_native_worker、monotonic/wall nanos、parallelism_probe、
-signal_install、startup/environment、stack/cage/callback glue、panic glue 与源码侧
-`gc_dispatch` body）在链接期以未定义符号显式失败，不做占位 no-op。
+共用的 libc 面（getaddrinfo/freeaddrinfo/gettid/__errno_location）。
+
+`runtime_definitions` 另含两批 `native.rs`/`callback.rs` 机器片段：cage 与栈
+（`cage_control` 返回 `__gugu_cage_control` 记录的地址；记录由
+`CageControlRecord::boot_bytes(cage_bytes)` 从 `ProgramRequest.cage_bytes` 生成，
+`stack_read_word`/`stack_copy_raw` 沿 coroutine 栈深度锚读写，`stack_copy_raw`
+拷贝循环内联发射不依赖 memcpy glue）、回调（`callback_control`/`callback_queue`
+携带 16-byte 对齐的 `stlxr` 队列协议，`callback_file_worker` 经
+`callback_poll` 消费）与启动/平台杂项（`startup`/`environment`、`fs_start`/`fs_poll`、
+`monotonic`/`wall` 纳秒、`parallelism_probe`、`net_close`、`process_native_worker`、
+Linux 的 `linux_foreign_start`/`linux_foreign_poll` 按
+`BLOCKING_WORKER_STACK_BYTES = 65536` 以 `Operand::Wide { shift: 16 }`
+拼装，超过 imm12 不加截断）。未绑定到任何 Definition 的
+`__gugu_runtime_*` 重定位与指针目标由 world 构建期统一重写为
+`__gugu_stub_exit`（定义即 `fragments::process_exit`），与 x64
+`resolve_target` 的兜底语义一致；绑定名缺定义仍是链接期硬错误。
+仍未提供片段的 glue 名（`signal_install`/`signal_handler`、panic glue 与源码侧
+`gc_dispatch` body）不可达时不发射引用，可达路径引用按上述兜底处理，
+不做占位 no-op。
 
 ### A64 外调参数包与内部 lowering（4d.3）
 
@@ -876,10 +891,13 @@ function assembler 同时保留 ADRP/ADD 地址重定位与 call 重定位；无
 - `ForeignLeaf`、可 unwind 或 tail 外调、foreign callback/export adapter：未绑定其
   system-stack/异常/回调路径；外调当前只接受普通和 dirty bridge，拒绝 coroutine
   stack 裸地址泄漏、GC 车道、过对齐/过大签名和超 native stack budget。
-- `Invoke`、`ResumePanic` 尚未有专用 terminator lowering；结构化跳转、条件跳转、
-  switch、return、tail managed call、trap 和 unreachable 已支持。
-- 普通 managed 调用仍要求 scalar internal ABI 和直接实例；aggregate/sret、间接/erased
-  调用与捕获环境依赖 runtime/adapter 路径。整数除余仍要求静态非零除数证明；窄宽度
+- `Invoke`/`ResumePanic` 已接入：invoke 发射调用、landing 记录进入 unwind 表，
+  `ResumePanic` 走 panic glue；结构化跳转、条件跳转、switch、return、tail
+  managed call、trap 和 unreachable 均已支持。
+- 普通 managed 调用支持直接实例、绑定 runtime 目标与恰一个 Code-provenance
+  参数的间接调用；aggregate/sret 按 caller 临时副本/结果缓冲地址处理。`Vtable`
+  目标、`captures_arguments`（runtime 目标除外）与 `foreign_arguments` 仍拒绝，
+  依赖 runtime/adapter 路径。整数除余仍要求静态非零除数证明；窄宽度
   的非法 carry/wide、非法转换和超帧范围显式拒绝。
 
 这些拒绝不隐藏为 no-op；特别是泛型 SIMD 与动态除零检查不是已实现的 PR 6/8 能力。

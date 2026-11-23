@@ -4,7 +4,7 @@ use crate::a64::{
     inst::{Operand, Shift},
     machine::{self, Item, MReg},
 };
-use crate::lir::body::{Body, Condition, Conversion, IntOp, Op, Type, ValueId};
+use crate::lir::body::{Body, Condition, Conversion, Definition, IntOp, Op, Type, ValueId};
 use machine::{fixed as f, read as r, write as w, zero as z};
 
 pub fn lower(
@@ -203,8 +203,18 @@ fn integer(
                 )?;
             }
             IntOp::DivSigned | IntOp::DivUnsigned | IntOp::RemSigned | IntOp::RemUnsigned => {
-                // 检查路径由前端 TrapIf 保证非零；未检查路径除零结果按规范为未定义，
-                // a64 的 sdiv/udiv 不产生硬件异常，与 x64 裸 div 同层语义。
+                let divisor = &body.values[args[1].index()];
+                let nonzero = match divisor.definition {
+                    Definition::Instruction { instruction, .. } => {
+                        matches!(body.instructions.get(instruction.index()).map(|i| &i.op), Some(Op::IConst(v)) if v & mask(width) != 0)
+                    }
+                    _ => false,
+                };
+                if !nonzero {
+                    return Err(crate::a64::error(
+                        "division requires a statically nonzero divisor; panic/runtime lowering is unavailable",
+                    ));
+                }
                 let signed = matches!(op, IntOp::DivSigned | IntOp::RemSigned);
                 let left = extended(b, left, width, signed)?;
                 let right = extended(b, right, width, signed)?;

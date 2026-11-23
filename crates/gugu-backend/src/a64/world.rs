@@ -352,6 +352,9 @@ fn build_with_catalog(
     }
     for (symbol, name) in requirements {
         match &symbol {
+            // 显式 Definition 已提供该符号（测试/fixture 直接落数据）时走符号表，
+            // 不强制 type universe；否则登记 `__gugutyp` 段内插槽。
+            _ if world.symbols.contains_key(&name) => {}
             Symbol::TypeDescriptor(key) => {
                 let universe = request
                     .universe
