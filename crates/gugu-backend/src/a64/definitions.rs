@@ -145,7 +145,8 @@ pub fn runtime_definitions(platform: Platform) -> Vec<Definition> {
     match platform {
         Platform::Linux => definitions.extend(
             [
-                Definition::fragment(rt("fs_native_worker"), fragments::linux_fd_dispatch()),
+                Definition::fragment(rt("fs_native_worker"), fragments::linux_fd_dispatch(true)),
+                Definition::fragment(rt("fd_dispatch"), fragments::linux_fd_dispatch(false)),
                 Definition::fragment(rt("net_call"), fragments::linux_net_dispatch()),
                 Definition::fragment(rt("resolver_symbol"), fragments::linux_resolver_symbol()),
                 Definition::fragment(rt("process_call"), fragments::linux_process_call()),

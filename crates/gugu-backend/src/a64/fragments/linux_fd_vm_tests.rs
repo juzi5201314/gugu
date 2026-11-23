@@ -106,7 +106,14 @@ impl Vm {
                 "b" => next = jump(pc, &args[0]),
                 "b.cond" if self.condition(&args[1]) => next = jump(pc, &args[0]),
                 "b.cond" => {}
-                "svc" => syscall(self),
+                "svc" => {
+                    // exit(93)/exit_group(94) 不返回：回调观察后 VM 直接以 x0 收束。
+                    let number = self.registers[8];
+                    syscall(self);
+                    if number == 93 || number == 94 {
+                        return self.registers[0];
+                    }
+                }
                 "bl" => call(self, pc as u64),
                 "adr" => self.set(&args[0], jump(pc, &args[1]) as u64),
                 "adrp" => self.set(&args[0], jump(pc & !4095, &args[1]) as u64),
@@ -259,6 +266,32 @@ impl Vm {
         };
         self.set(&args[0], value);
     }
+}
+
+#[test]
+fn fs_poll_reads_operation_for_foreign_and_tid_word_for_completion() {
+    let code = instructions(&linux_fs_poll());
+    // 文件请求：tid 字非零 → pending(0)，内核 CHILD_CLEARTID 清零后 → done(1)。
+    let mut vm = Vm::new(7, [0; 6]);
+    vm.put(REQUEST, 1234, 8);
+    let mut unexpected = |_: &mut Vm| panic!("unexpected syscall");
+    assert_eq!(vm.run_result(&code, &mut unexpected), 0);
+    vm.put(REQUEST, 0, 8);
+    assert_eq!(vm.run_result(&code, &mut unexpected), 1);
+    // foreign 请求（operation==-1）的 tid 字不是操作码：必须按 OPERATION 分流到 tryjoin。
+    let mut vm = Vm::new(u64::MAX, [0; 6]);
+    vm.put(REQUEST, 1234, 8);
+    vm.put(REQUEST + 80, 0xfeed, 8);
+    let joined = vm.run_calls(&code, |vm, _| {
+        assert_eq!(vm.registers[0], 0xfeed);
+        vm.registers[0] = 0;
+    });
+    assert_eq!(joined, 1);
+    assert_eq!(vm.read(REQUEST + 80, 8), 0);
+    let mut vm = Vm::new(u64::MAX, [0; 6]);
+    vm.put(REQUEST + 80, 0xfeed, 8);
+    let pending = vm.run_calls(&code, |vm, _| vm.registers[0] = 16);
+    assert_eq!(pending, 0);
 }
 
 fn addend(operand: &Operand) -> u64 {

@@ -66,9 +66,15 @@ const ZERO: Reg = Reg::zr(Width::X);
 const FRAME_BYTES: usize = 160;
 const SAVED: [(usize, Reg); 4] = [(128, REQUEST), (136, OUTPUT), (144, Reg::x(29)), (152, LR)];
 
-/// x0 = NativeRequest on a native stack; no imports, threads, or completion publication.
+/// x0 = NativeRequest on a native stack; no imports.
 /// Operation IDs and result buffers use the existing x86_64-numbered Linux request ABI.
-pub fn linux_fd_dispatch() -> Fragment {
+///
+/// `exit_thread` 对应 x64 `linux_file_worker(true)`：clone 子线程的入口变体，
+/// 写出结果后以 `exit(93)` 终结本线程，内核经 `CLONE_CHILD_CLEARTID` 清 packet[0]
+/// 唤醒 `fs_poll`；不恢复寄存器也不依赖 LR（clone 子的 LR 是父帧残留）。非退出
+/// 变体注册为 `fd_dispatch`，是 `callback_file_worker` 的 `b` 尾巴，恢复寄存器后
+/// `ret` 回 managed 调用方（对应 x64 `worker(false)`）。
+pub fn linux_fd_dispatch(exit_thread: bool) -> Fragment {
     let mut b = Builder::default();
     b.emit("sub.X.imm", [reg(SP), reg(SP), add_imm(FRAME_BYTES)]);
     for (offset, saved) in SAVED {
@@ -105,12 +111,19 @@ pub fn linux_fd_dispatch() -> Fragment {
     for at in exits {
         b.patch_branch(at, "b", &[], &[]);
     }
-    for (offset, saved) in SAVED {
-        b.memory("ldr.X.Unsigned", saved, SP, offset);
+    if exit_thread {
+        b.emit("movz.X", [reg(Reg::x(0)), movz(0)]);
+        b.emit("movz.X", [reg(Reg::x(8)), movz(93)]);
+        b.emit("svc", [imm(0)]);
+        b.emit("brk", [imm(0)]);
+    } else {
+        for (offset, saved) in SAVED {
+            b.memory("ldr.X.Unsigned", saved, SP, offset);
+        }
+        b.emit("movz.X", [reg(Reg::x(0)), movz(0)]);
+        b.add(SP, SP, FRAME_BYTES);
+        b.ret();
     }
-    b.emit("movz.X", [reg(Reg::x(0)), movz(0)]);
-    b.add(SP, SP, FRAME_BYTES);
-    b.ret();
     b.finish()
 }
 

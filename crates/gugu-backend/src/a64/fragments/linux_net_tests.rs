@@ -149,7 +149,7 @@ fn net_close_returns_a_local_c_abi_callback() {
 
 #[test]
 fn signal_requests_work_standalone_and_through_file_worker() {
-    for fragment in [linux_signal_dispatch(), linux_fd_dispatch()] {
+    for fragment in [linux_signal_dispatch(), linux_fd_dispatch(false)] {
         let code = instructions(&fragment);
         for (op, nr, count) in [
             (14, 135, 4),

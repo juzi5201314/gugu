@@ -169,7 +169,7 @@ impl Probe {
         let fragments = [
             linux_net_dispatch(),
             linux_signal_dispatch(),
-            linux_fd_dispatch(),
+            linux_fd_dispatch(false),
         ];
         let mut sections = vec![section(Segment::Text, SectionContent::Code(vec![]))];
         for fragment in fragments {

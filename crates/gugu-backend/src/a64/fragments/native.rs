@@ -198,10 +198,11 @@ fn linux_foreign_start(b: &mut Builder) {
 /// `fs_poll`：x0 = packet；op==−1 用 pthread_tryjoin_np，否则查 tid 字。
 pub fn linux_fs_poll() -> Fragment {
     let mut b = Builder::default();
-    load(&mut b, A, Reg::x(0), 0);
-    b.emit("adds.X.imm", [reg(XZR), reg(A), add_imm(1)]);
+    load(&mut b, B, Reg::x(0), OPERATION);
+    b.emit("adds.X.imm", [reg(XZR), reg(B), add_imm(1)]);
     let foreign = cond(&mut b, EQ);
     // tid 是内核 32 位字；提交前高 32 位已清零。
+    load(&mut b, A, Reg::x(0), 0);
     compare(&mut b, A, 0);
     let pending = cond(&mut b, NE);
     b.emit("movz.X", [reg(Reg::x(0)), movz(1)]);
@@ -220,6 +221,7 @@ fn linux_foreign_poll(b: &mut Builder) {
     load(b, Reg::x(0), Reg::x(19), THREAD_HANDLE);
     b.emit("movz.X", [reg(Reg::x(1)), movz(0)]);
     linux_call(b, "pthread_tryjoin_np");
+    compare(b, Reg::x(0), 0);
     let pending = cond(b, NE);
     store(b, Reg::x(19), THREAD_HANDLE, XZR);
     b.emit("movz.X", [reg(Reg::x(0)), movz(1)]);
