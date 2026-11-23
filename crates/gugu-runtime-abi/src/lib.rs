@@ -334,6 +334,8 @@ pub enum RuntimeMachineOp {
     CallbackControl,
     CallbackQueue,
     ThreadId,
+    /// 从进程入口 envp 扫 auxv 取 AT_PAGESZ；缺失返回 0。当前仅 aarch64-linux 登记实现。
+    PageSize,
 }
 
 impl RuntimeMachineOp {
@@ -365,6 +367,7 @@ impl RuntimeMachineOp {
             Self::CallbackControl => "callback_control",
             Self::CallbackQueue => "callback_queue",
             Self::ThreadId => "thread_id",
+            Self::PageSize => "page_size",
         }
     }
 }
@@ -439,6 +442,10 @@ pub const GLUE_DEFS: &[GlueDef] = &[
     },
     GlueDef {
         glue: "thread_id",
+        def: GlueDefKind::Fragment,
+    },
+    GlueDef {
+        glue: "page_size",
         def: GlueDefKind::Fragment,
     },
     GlueDef {

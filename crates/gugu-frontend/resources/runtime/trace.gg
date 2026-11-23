@@ -92,7 +92,7 @@ struct TraceExtent { base: uint, bytes: uint }
 /// 保留游标页；`boot` 在屏障状态页之后调用。
 pub fn trace_init(processor: uint) {
     unsafe {
-        let base = mapping.reserve_aligned(TRACE_SCRATCH_BYTES, uint(4096))
+        let base = mapping.reserve_aligned(TRACE_SCRATCH_BYTES, mapping.os_page_bytes())
         if base == 0 { heap_fail() }
         let extent = TraceExtent { base, bytes: TRACE_SCRATCH_BYTES }
         if mapping.commit(std.mem.transmute[*TraceExtent, uint](std.ptr.addr_of(extent))) != 0 {

@@ -726,7 +726,8 @@ fn runtime_machine_call_valid(
         | Kind::FsPoll
         | Kind::StackReadWord
         | Kind::ResolverSymbol
-        | Kind::EnvironmentSymbol => {
+        | Kind::EnvironmentSymbol
+        | Kind::PageSize => {
             args.len() == 1 && results.len() == 1 && word(&args[0]) && word(&results[0])
         }
         Kind::StackCopyRaw => args.len() == 4 && args.iter().all(word) && results.is_empty(),

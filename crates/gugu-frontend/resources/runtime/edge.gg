@@ -27,7 +27,7 @@ fn edge_zero(base: uint) {
 }
 
 pub fn edge_new(cycle: uint) uint {
-    let base = unsafe { mapping.reserve_aligned(EDGE_STATE_BYTES, uint(4096)) }
+    let base = unsafe { mapping.reserve_aligned(EDGE_STATE_BYTES, mapping.os_page_bytes()) }
     if base == 0 { heap_fail() }
     let extent = EdgeExtent { base: base, bytes: EDGE_STATE_BYTES }
     if unsafe { mapping.commit(std.mem.transmute[*EdgeExtent, uint](std.ptr.addr_of(extent))) } != 0 {

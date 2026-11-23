@@ -42,6 +42,8 @@ GC 控制类 machine intrinsic（`gc_config()` 及后续 GC 协调入口）只�
 
 私有 `cage_control()` 无参数并返回本镜像非移动 cage 控制记录的机器字地址，遵守相同 runtime 来源门禁；它不分配、不挂起、不触发 GC。记录必须位于可写、不可执行的映射，成功解码与拒绝计数由解码机器路径更新，公开 `stats()` 通过 runtime 内部原子读取这些实际计数，不维护一份没有事件来源的副本。未启用 cage 时记录保持零计数。
 
+`page_size(environment)` machine intrinsic 接收进程入口捕获的 envp 指针（与 `Rt0Payload.boot_environment` 同来源，调用方先清标记位），越过环境表终止零项后在 auxv 中查找 AT_PAGESZ（6），返回内核页大小字节数；auxv 缺失或不含该项时返回 0，不得回退到固定页大小。该原语不分配、不挂起、不调用 libc。当前仅内部 aarch64-linux 目标登记了机器片段实现；其他目标不绑定该 glue，引用即编译期拒绝。遵守相同 runtime 来源门禁，用户源码不可调用。
+
 镜像是闭世界构建：compiler 发出的每一个 runtime glue 符号都必须来自登记的 runtime 定义；迁移期间尚未接管的入口只能出现在 compiler 的显式缺口清单中，并不得作为运行期能力或镜像正确性证明。未知入口在 lowering 阶段即拒绝，不能由 ELF/PE writer 解析为退出桩，也不能由用户源码提供同名替代实现。该内部门禁不扩大 `std.runtime` 的公开调用面；它只保证 compiler、镜像 runtime 与 metadata 使用同一份入口目录。
 写屏障有普通和已预留两种入口。预留入口只可由 compiler 在已验证 permit 后发出，二者都必须保持 `read-old → shade → store → card-mark` 的可观察顺序和固定三参 ABI；预留入口不得在 store 之后临时扩容或停点。当前镜像已落地普通对象的 mark shade、page-cover/card 记账和 processor 固定 edge staging（512 条、满载设 overflow，不静默丢边）；owner-local consume、flush、credit 结算与 edge/candidate 消费仍属于回收阶段。
 Mach-O 镜像也必须在可写文件内容中保存启动 cage 容量；未启用时该字段为零。

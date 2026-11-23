@@ -1,5 +1,7 @@
 use std.runtime.scheduler.{boot, finish_hot, heap_alloc, live_count, resume_ready, system_context_area, callback_gate, callback_service, callback_pending, COROUTINE_COLD_PAYLOAD_STATE_OFFSET, COROUTINE_COLD_SPAWN_PUBLISHED_BIT, COROUTINE_COLD_SUBTREE_GROUP_OFFSET, COROUTINE_COLD_PANIC_RESULT_OFFSET, COROUTINE_COLD_PANIC_WAITED, COROUTINE_COLD_PANIC_GROUPED, COROUTINE_COLD_PANIC_DETACHED, COROUTINE_COLD_JOIN_WAITER_OFFSET}
 use std.runtime.heap.{copy_bytes}
+#[cfg(all(os = "linux", arch = "aarch64"))]
+use std.runtime.heap as heap_mapping
 use std.runtime.pressure.{pressure_service}
 use std.runtime.gc.{gc_config_check}
 use std.runtime.collect.{gc_boot}
@@ -341,7 +343,19 @@ pub fn rt0_start(params: *Rt0Params, bias: uint) uint {
         if gc_config_check(std.runtime.gc_config()) != 0 {
             fatal_runtime()
         }
-        let startup_page = std.platform.reserve_aligned(uint(4096), uint(4096))
+        // aarch64-linux 的内核页可为 4/16/64 KiB：先用 envp 尾的 auxv 探测真实页大小，
+        // 再决定 reserve 的对齐；探测缺失不回落到固定 4096。
+        #[cfg(all(os = "linux", arch = "aarch64"))]
+        let startup_align = {
+            let os_page = unsafe { std.runtime.page_size(payload.boot_environment & ~uint(1)) }
+            if os_page == 0 { fatal_configuration() }
+            mapping.adopt_native_page_size(os_page)
+            heap_mapping.adopt_large_mapping_page_size(os_page)
+            os_page
+        }
+        #[cfg(not(all(os = "linux", arch = "aarch64")))]
+        let startup_align: uint = 4096
+        let startup_page = std.platform.reserve_aligned(uint(4096), startup_align)
         if startup_page == 0 { fatal_configuration() }
         let startup_range = StackRangeDescriptor { base: startup_page, bytes: 4096 }
         if std.platform.commit(std.mem.transmute[*StackRangeDescriptor, uint](std.ptr.addr_of(startup_range))) != 0 {
@@ -357,7 +371,7 @@ pub fn rt0_start(params: *Rt0Params, bias: uint) uint {
         // 因此活跃 StackInterior 指针无需搬迁，且未触及的页始终不可访问。
         let reserve: uint = 1073741824
         let capacity: uint = 65536
-        let stack_base = std.platform.reserve_aligned(reserve, uint(4096))
+        let stack_base = std.platform.reserve_aligned(reserve, startup_align)
         if stack_base == 0 || stack_base > uint(140737488355327) || stack_base > uint(140737488355327) - reserve {
             fatal_runtime()
         }
@@ -369,7 +383,7 @@ pub fn rt0_start(params: *Rt0Params, bias: uint) uint {
         let cold = state + 128
         store_word(state + 0, slot)
         #[cfg(arch = "aarch64")]
-        let a64_block = std.platform.reserve_aligned(uint(4096), uint(4096))
+        let a64_block = std.platform.reserve_aligned(uint(4096), startup_align)
         #[cfg(arch = "aarch64")]
         {
             if a64_block == 0 { fatal_runtime() }
@@ -395,7 +409,7 @@ pub fn rt0_start(params: *Rt0Params, bias: uint) uint {
             store_word(state + 32, cold)
             store_word(state + 88, 0)
         }
-        let processor_page = std.platform.reserve_aligned(uint(4096), uint(4096))
+        let processor_page = std.platform.reserve_aligned(uint(4096), startup_align)
         if processor_page == 0 { fatal_runtime() }
         let processor_range = StackRangeDescriptor { base: processor_page, bytes: 4096 }
         if std.platform.commit(std.mem.transmute[*StackRangeDescriptor, uint](std.ptr.addr_of(processor_range))) != 0 {

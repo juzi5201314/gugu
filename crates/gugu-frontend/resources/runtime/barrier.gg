@@ -79,7 +79,7 @@ pub const BARRIER_STAMP_EMPTY: uint = 0
 /// 建立 barrier 状态页：card buffer、stamp 表与 edge staging 都在独立 raw 页上，不进 processor 页。
 pub fn barrier_init(processor: uint) {
     unsafe {
-        let base = mapping.reserve_aligned(BARRIER_SCRATCH_BYTES, uint(4096))
+        let base = mapping.reserve_aligned(BARRIER_SCRATCH_BYTES, mapping.os_page_bytes())
         if base == 0 { heap_fail() }
         let extent = BarrierExtent { base, bytes: BARRIER_SCRATCH_BYTES }
         if mapping.commit(std.mem.transmute[*BarrierExtent, uint](std.ptr.addr_of(extent))) != 0 {

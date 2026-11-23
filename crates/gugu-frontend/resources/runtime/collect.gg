@@ -1044,7 +1044,7 @@ pub fn gc_boot(processor: uint) {
     // 之后所有读取都走 `gc_coordinator` 的「已发布」断言。
     let coordinator = coordinator_create(processor, heap_word(processor + 4080))
     unsafe {
-        let base = mapping.reserve_aligned(GC_SYSTEM_STACK_BYTES, uint(4096))
+        let base = mapping.reserve_aligned(GC_SYSTEM_STACK_BYTES, mapping.os_page_bytes())
         if base == 0 { heap_fail() } else { let _ = 0 }
         let range = GcExtent { base: base, bytes: GC_SYSTEM_STACK_BYTES }
         if mapping.commit(std.mem.transmute[*GcExtent, uint](std.ptr.addr_of(range))) != 0 { heap_fail() } else { let _ = 0 }

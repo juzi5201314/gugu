@@ -10,10 +10,20 @@ pub const NATIVE_RESERVED_OFFSET: uint = 3968
 pub const NATIVE_COMMITTED_OFFSET: uint = 3976
 pub const NATIVE_MAPPINGS_OFFSET: uint = 3984
 pub const NATIVE_PEAK_OFFSET: uint = 3992
-#[cfg(not(all(os = "macos", arch = "aarch64")))]
+#[cfg(not(any(all(os = "macos", arch = "aarch64"), all(os = "linux", arch = "aarch64"))))]
 pub const NATIVE_PAGE_BYTES: uint = 4096
 #[cfg(all(os = "macos", arch = "aarch64"))]
 pub const NATIVE_PAGE_BYTES: uint = 16384
+// aarch64-linux 内核页可为 4/16/64 KiB：rt0_start 用 auxv 探测值覆盖初值，未探测前保留 4096。
+#[cfg(all(os = "linux", arch = "aarch64"))]
+pub static NATIVE_PAGE_BYTES: uint = 4096
+
+/// 仅 rt0 启动期调用一次；bytes 必须是合法的 arm64 Linux 内核页大小。
+#[cfg(all(os = "linux", arch = "aarch64"))]
+pub fn adopt_native_page_size(bytes: uint) {
+    if bytes != 4096 && bytes != 16384 && bytes != 65536 { fail() }
+    NATIVE_PAGE_BYTES = bytes
+}
 
 fn word(address: uint) uint { unsafe { std.ptr.read_unaligned[uint](std.mem.transmute[uint, *uint](address)) } }
 fn put(address: uint, value: uint) { unsafe { std.ptr.ptr_write[uint](std.mem.transmute[uint, *uint](address), value) } }
@@ -34,6 +44,10 @@ pub fn reserve_stack(bytes: uint) uint {
     if base != 0 { add(processor(), STACK_RESERVED_OFFSET, page_bytes(bytes)) }
     base
 }
+
+/// 当前内核页大小：aarch64-linux 为 rt0 写入的探测值，其余目标为编译期常量。
+/// reserve_aligned 的对齐实参与所有「须 OS 页对齐」的舍入统一走这里。
+pub fn os_page_bytes() uint { NATIVE_PAGE_BYTES }
 
 /// 仅由活跃协程建立/增长栈调用；系统栈与 metadata 继续使用普通 commit。
 pub fn commit_stack(extent: uint) uint {

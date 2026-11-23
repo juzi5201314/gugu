@@ -484,7 +484,7 @@ fn registry_probe(cold: uint, frame: uint) uint {
 /// 根图探针：等待中协程的帧链必须按保存的 PC/RSP 精确枚举出托管根，raw 副本不得进入根集合。
 pub fn root_map_probe() uint {
     unsafe {
-        let page = mapping.reserve_aligned(uint(65536), uint(4096))
+        let page = mapping.reserve_aligned(uint(65536), mapping.os_page_bytes())
         if page == 0 { return 51 }
         let range = ProbeRange { base: page, bytes: 65536 }
         if mapping.commit(std.mem.transmute[*ProbeRange, uint](std.ptr.addr_of(range))) != 0 { return 52 }

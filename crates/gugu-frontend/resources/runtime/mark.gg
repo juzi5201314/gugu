@@ -101,7 +101,7 @@ pub const MARK_TICKET_CYCLE_OFFSET: uint = 16
 pub const MARK_TICKET_RECORDS_OFFSET: uint = 64
 
 pub fn mark_ticket_new(cycle: uint) uint {
-    let state = unsafe { mapping.reserve_aligned(MARK_TICKET_STATE_BYTES, uint(4096)) }
+    let state = unsafe { mapping.reserve_aligned(MARK_TICKET_STATE_BYTES, mapping.os_page_bytes()) }
     if state == 0 { unsafe { std.runtime.process_exit(2) } }
     let extent = MarkExtent { base: state, bytes: MARK_TICKET_STATE_BYTES }
     if unsafe { mapping.commit(std.mem.transmute[*MarkExtent, uint](std.ptr.addr_of(extent))) } != 0 {
