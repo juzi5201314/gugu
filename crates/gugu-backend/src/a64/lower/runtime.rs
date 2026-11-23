@@ -26,20 +26,31 @@ fn region(op: &Op) -> Option<Vec<u64>> {
     })
 }
 
-/// 与 x64 `slow_alloc` 相同的四通道慢路 ABI：type_id、payload 字节数、对齐、flags。
-fn alloc(
-    body: &Body,
-    instruction: &Instruction,
+/// 隐含调用的点位与操作数上下文。
+struct CallSite<'a> {
+    body: &'a Body,
+    instruction: &'a Instruction,
     block: u32,
     site: u32,
+    args: &'a [ValueId],
+    results: &'a [ValueId],
+}
+
+/// 与 x64 `slow_alloc` 相同的四通道慢路 ABI：type_id、payload 字节数、对齐、flags。
+fn alloc(
+    call: &CallSite<'_>,
     b: &mut Builder<'_>,
     descriptor: [u8; 32],
     align: u32,
     placement: PlacementKind,
     compressed: bool,
-    args: &[ValueId],
-    results: &[ValueId],
 ) -> Result<(), Error> {
+    let body = call.body;
+    let instruction = call.instruction;
+    let block = call.block;
+    let site = call.site;
+    let args = call.args;
+    let results = call.results;
     let code = match placement {
         PlacementKind::TurnRegion => 0u64,
         PlacementKind::LocalHeap => 1,
@@ -94,16 +105,13 @@ fn alloc(
 }
 
 /// 机器片段/平台原语调用：操作数按序落在 x0-x7，不经 catalog 查 body。
-fn machine_call(
-    body: &Body,
-    instruction: &Instruction,
-    block: u32,
-    site: u32,
-    b: &mut Builder<'_>,
-    name: &str,
-    args: &[ValueId],
-    results: &[ValueId],
-) -> Result<(), Error> {
+fn machine_call(call: &CallSite<'_>, b: &mut Builder<'_>, name: &str) -> Result<(), Error> {
+    let body = call.body;
+    let instruction = call.instruction;
+    let block = call.block;
+    let site = call.site;
+    let args = call.args;
+    let results = call.results;
     for id in args.iter().chain(results.iter()) {
         if abi::class(body.values[id.index()].kind.ty) != abi::GPR {
             return Err(crate::a64::error(
@@ -148,8 +156,16 @@ pub(crate) fn lower(
     if runtime::proof_marker(&instruction.op) {
         return Ok(());
     }
+    let call = CallSite {
+        body,
+        instruction,
+        block,
+        site,
+        args,
+        results,
+    };
     if let Some(name) = runtime::machine_binding(&instruction.op) {
-        return machine_call(body, instruction, block, site, b, &name, args, results);
+        return machine_call(&call, b, &name);
     }
     match &instruction.op {
         Op::GcAlloc {
@@ -158,35 +174,18 @@ pub(crate) fn lower(
             placement,
             compressed,
         } => {
-            return alloc(
-                body,
-                instruction,
-                block,
-                site,
-                b,
-                *descriptor,
-                *align,
-                *placement,
-                *compressed,
-                args,
-                results,
-            );
+            return alloc(&call, b, *descriptor, *align, *placement, *compressed);
         }
         Op::RegionAlloc {
             descriptor, align, ..
         } => {
             return alloc(
-                body,
-                instruction,
-                block,
-                site,
+                &call,
                 b,
                 *descriptor,
                 *align,
                 PlacementKind::TurnRegion,
                 false,
-                args,
-                results,
             );
         }
         _ => {}
