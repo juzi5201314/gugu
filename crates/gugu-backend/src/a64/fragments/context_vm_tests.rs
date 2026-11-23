@@ -266,7 +266,7 @@ fn maps(rva: u64, entry: bool) -> crate::runtime::stack::a64::FrameMetadata {
 }
 
 fn mailbox(vm: &Vm, address: u64) -> MorestackMailbox {
-    let words = vm.words(address, 7);
+    let words = vm.words(address, 9);
     MorestackMailbox {
         hot: words[0],
         entry_sp: words[1],
@@ -275,6 +275,8 @@ fn mailbox(vm: &Vm, address: u64) -> MorestackMailbox {
         scratch: words[4],
         mutator_context: words[5],
         system_context: words[6],
+        return_value: words[7],
+        processor: words[8],
     }
 }
 

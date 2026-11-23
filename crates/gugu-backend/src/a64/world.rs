@@ -54,6 +54,7 @@ pub struct BuildRequest<'a> {
     pub bindings: &'a RuntimeBindings,
     pub definitions: &'a [Definition],
     pub imports: &'a [NativeImport],
+    pub universe: Option<&'a crate::late::universe::TypeUniverse>,
 }
 
 #[derive(Clone, Debug, Eq, PartialEq)]
@@ -172,9 +173,6 @@ fn body_symbols(
                             .ok_or_else(|| fail("A64 local data index out of bounds"))?;
                         pool[&data.bytes].0.clone()
                     }
-                    Symbol::Global {
-                        thread_local: true, ..
-                    } => return Err(fail("A64 TLS requires thread-owned runtime storage")),
                     Symbol::Global { bytes, .. } => {
                         let name = mangle::mangle_symbol(symbol);
                         shared(
@@ -282,7 +280,8 @@ fn build_with_catalog(
             return Err(fail("A64 world/LIR platform mismatch"));
         }
         let symbols = body_symbols(body, &pool, &mut definitions, request.imports)?;
-        let fragment = codegen::compile_image(body, request.bindings, &symbols, catalog)?;
+        let fragment =
+            codegen::compile_image(body, request.bindings, &symbols, catalog, request.universe)?;
         requirements.extend(symbols);
         metadata.insert(
             fragment.symbol.clone(),
@@ -303,6 +302,19 @@ fn build_with_catalog(
         )?;
     }
     let mut world = assemble(request.platform, definitions, metadata, request.imports)?;
+    if let Some(catalog) = catalog {
+        for (name, body) in catalog.bindings() {
+            let source = super::abi::symbol(&body.instance);
+            let Some(&at) = world.symbols.get(&source) else {
+                return Err(fail(format!("A64 runtime body {name} is missing")));
+            };
+            let alias = mangle::mangle_runtime(name);
+            world.symbols.insert(alias.clone(), at);
+            if let Some(&size) = world.sizes.get(&source) {
+                world.sizes.insert(alias, size);
+            }
+        }
+    }
     world.entry = *world
         .symbols
         .get(&super::abi::symbol(&request.entry))

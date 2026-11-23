@@ -7,6 +7,7 @@ mod bits;
 pub mod codegen;
 pub mod contract;
 pub mod decode;
+pub mod definitions;
 pub mod elf;
 pub mod encode;
 pub mod foreign;

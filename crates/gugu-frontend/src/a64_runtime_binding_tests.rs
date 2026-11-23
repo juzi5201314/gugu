@@ -46,6 +46,7 @@ fn a64_catalog_uses_canonical_frozen_runtime_definitions_not_names_or_aliases() 
             },
             definitions: &[],
             imports: &[],
+            universe: None,
         },
         &catalog,
     )

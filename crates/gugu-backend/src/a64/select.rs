@@ -9,23 +9,24 @@ use crate::lir::body::{Body, Op, Terminator, Type, ValueId};
 use std::ops::Range;
 
 pub fn select(body: &Body) -> Result<Function, Error> {
-    select_mode(body, true, false, None, None)
+    select_mode(body, true, false, None, None, None)
 }
 
 pub fn select_function(body: &Body) -> Result<Function, Error> {
-    select_mode(body, false, false, None, None)
+    select_mode(body, false, false, None, None, None)
 }
 
 pub fn select_runtime(body: &Body) -> Result<Function, Error> {
-    select_mode(body, false, true, None, None)
+    select_mode(body, false, true, None, None, None)
 }
 
 pub(crate) fn select_image(
     body: &Body,
     symbols: &[(crate::lir::body::Symbol, String)],
     runtime_catalog: Option<&super::runtime::Catalog<'_>>,
+    universe: Option<&crate::late::universe::TypeUniverse>,
 ) -> Result<Function, Error> {
-    select_mode(body, false, true, Some(symbols), runtime_catalog)
+    select_mode(body, false, true, Some(symbols), runtime_catalog, universe)
 }
 
 fn select_mode(
@@ -34,6 +35,7 @@ fn select_mode(
     runtime: bool,
     symbols: Option<&[(crate::lir::body::Symbol, String)]>,
     runtime_catalog: Option<&super::runtime::Catalog<'_>>,
+    universe: Option<&crate::late::universe::TypeUniverse>,
 ) -> Result<Function, Error> {
     validate(body, leaf, runtime).map_err(|e| Error(format!("{} entry: {e}", body.name)))?;
     let count = body.blocks.len();
@@ -56,6 +58,7 @@ fn select_mode(
     };
     let mut b = Builder {
         runtime_catalog,
+        universe,
         symbols,
         function: &mut function,
         items: vec![],
@@ -83,6 +86,7 @@ fn select_mode(
         let mut cursor = 0;
         let mut b = Builder {
             runtime_catalog,
+            universe,
             symbols,
             function: &mut function,
             items: vec![],
@@ -174,6 +178,7 @@ fn select_mode(
             .collect();
         let mut b = Builder {
             runtime_catalog,
+            universe,
             symbols,
             function: &mut function,
             items: vec![],

@@ -10,10 +10,12 @@ use super::{
     machine::{self, Access, Function, Item, MInst, MOperand, MReg, Site},
     reg::Width,
 };
+use crate::late::universe::TypeUniverse;
 use crate::lir::body::{Body, Instruction, Type, ValueId};
 
 pub struct Builder<'a> {
     pub runtime_catalog: Option<&'a super::runtime::Catalog<'a>>,
+    pub universe: Option<&'a TypeUniverse>,
     pub symbols: Option<&'a [(crate::lir::body::Symbol, String)]>,
     pub function: &'a mut Function,
     pub items: Vec<Site>,

@@ -69,6 +69,7 @@ impl<'a> Catalog<'a> {
                         }
                         _ => None,
                     },
+                    op if machine_binding(op).is_some() => None,
                     op => operation_name(op)
                         .map(|name| self.function(name).map(|body| body.instance))
                         .transpose()?,
@@ -81,6 +82,11 @@ impl<'a> Catalog<'a> {
             }
         }
         Ok(())
+    }
+
+    /// glue → 绑定的源 body；世界用它为每个 Item glue 发射 `__gugu_runtime_*` 别名符号。
+    pub fn bindings(&self) -> impl Iterator<Item = (&'static str, &'a Body)> {
+        self.functions.iter().map(|(name, body)| (*name, *body))
     }
 
     pub fn function(&self, name: &str) -> Result<&'a Body, Error> {
@@ -139,7 +145,8 @@ impl<'a> Catalog<'a> {
         }
         abi::arguments(parameters.iter().map(|kind| kind.ty))?;
         abi::results(results.iter().map(|kind| kind.ty))?;
-        Ok((body, abi::symbol(&body.instance)))
+        // 运行时调用统一走 `__gugu_runtime_*` 命名空间；Item glue 的别名由世界符号表发射。
+        Ok((body, mangle::mangle_runtime(name)))
     }
 
     pub(crate) fn call_target(&self, call: &Call) -> Result<String, Error> {
@@ -184,6 +191,16 @@ impl<'a> Catalog<'a> {
                 })
                 .collect(),
         }
+    }
+}
+
+/// 机器片段绑定的 op：`RuntimeMachineCall` 用 `machine.name()`，`PlatformCall` 用 `platform_*`。
+/// 它们绕过 catalog 直接调 `mangle_runtime` 符号；片段定义或源绑定别名在世界中给出。
+pub(crate) fn machine_binding(op: &Op) -> Option<String> {
+    match op {
+        Op::RuntimeMachineCall(machine) => Some(machine.name().into()),
+        Op::PlatformCall(platform) => Some(format!("platform_{}", platform.name())),
+        _ => None,
     }
 }
 

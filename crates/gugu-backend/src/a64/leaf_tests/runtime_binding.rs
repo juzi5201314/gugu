@@ -39,7 +39,14 @@ fn anchor(f: &mut Fixture, site: usize) {
 }
 
 fn compile(body: &Body, catalog: &Catalog<'_>) -> Result<codegen::LeafFragment, Error> {
-    codegen::compile_image(body, &runtime_vm::bindings(), &[], Some(catalog))
+    codegen::compile_image(body, &runtime_vm::bindings(), &[], Some(catalog), None)
+}
+
+/// Source-bound glue: callers target `__gugu_runtime_*`, so the linked callee wears the alias the world emits.
+fn bound_callee(body: &Body, glue: &str) -> codegen::LeafFragment {
+    let mut callee = codegen::compile_runtime(body, &runtime_vm::bindings()).unwrap();
+    callee.symbol = crate::x64::mangle::mangle_runtime(glue);
+    callee
 }
 
 #[test]
@@ -71,13 +78,12 @@ fn source_runtime_call_uses_the_actual_body_and_preserves_register_stack_abi() {
     let fragment = compile(&bodies[0], &catalog).unwrap();
     assert!(codegen::compile_runtime(&bodies[0], &runtime_vm::bindings()).is_err());
     assert!(
-        fragment
-            .relocations
-            .iter()
-            .any(|rel| rel.relocation.target == abi::symbol(&[2; 32]))
+        fragment.relocations.iter().any(
+            |rel| rel.relocation.target == crate::x64::mangle::mangle_runtime("string_compare")
+        )
     );
     assert_eq!(fragment.frame.outgoing, 16);
-    let callee = codegen::compile_runtime(&bodies[1], &runtime_vm::bindings()).unwrap();
+    let callee = bound_callee(&bodies[1], "string_compare");
     assert_eq!(
         runtime_vm::run_linked(
             &fragment,
@@ -125,7 +131,7 @@ fn runtime_allocation_call_keeps_canonical_allocation_map_and_managed_argument()
             .iter()
             .any(|map| map.slots[0].iter().any(|word| *word != 0))
     );
-    let callee = codegen::compile_runtime(&bodies[1], &runtime_vm::bindings()).unwrap();
+    let callee = bound_callee(&bodies[1], "value_copy");
     assert_eq!(
         runtime_vm::run_linked(
             &fragment,
@@ -157,7 +163,7 @@ fn implicit_handle_operation_uses_checked_word_lanes_and_a_real_frame() {
             .iter()
             .any(|site| site.kind == sites::SiteKind::CallReturn)
     );
-    let callee = codegen::compile_runtime(&bodies[1], &runtime_vm::bindings()).unwrap();
+    let callee = bound_callee(&bodies[1], "gc_resolve_shared_handle");
     assert_eq!(
         runtime_vm::run_linked(
             &fragment,
@@ -197,7 +203,7 @@ fn region_identity_and_export_summary_are_real_synthesized_arguments() {
     let bodies = [caller.body, callee.body];
     let catalog = Catalog::model(&bodies, &[("gc_region_publish", [2; 32])]);
     let fragment = compile(&bodies[0], &catalog).unwrap();
-    let callee = codegen::compile_runtime(&bodies[1], &runtime_vm::bindings()).unwrap();
+    let callee = bound_callee(&bodies[1], "gc_region_publish");
     let stubs = runtime_vm::stubs();
     let (_, memory) = vm::execute_inner(
         &fragment,
@@ -365,6 +371,7 @@ fn runtime_world_requires_real_compiled_callees_not_same_named_fragments() {
         bindings: &bindings,
         definitions: &definitions,
         imports: &[],
+        universe: None,
     };
     let world = codegen::build_runtime(request(2), &catalog).unwrap();
     assert!(world.symbols.contains_key(&abi::symbol(&[2; 32])));
@@ -386,6 +393,7 @@ fn runtime_world_requires_real_compiled_callees_not_same_named_fragments() {
             bindings: &bindings,
             definitions: &definitions,
             imports: &[],
+            universe: None,
         },
         &catalog,
     )
@@ -415,6 +423,7 @@ fn frozen_catalog_rejects_body_drift_and_an_empty_request() {
                 bindings: &runtime_vm::bindings(),
                 definitions: &[],
                 imports: &[],
+                universe: None,
             },
             &catalog,
         );
