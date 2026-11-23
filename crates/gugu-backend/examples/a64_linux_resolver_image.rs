@@ -2,15 +2,13 @@
 #[path = "support/a64_linux_probe.rs"]
 pub mod probe;
 
-use gugu_backend::{
-    NativeImport,
-    a64::{
-        elf::{DynamicLink, Import, Location},
-        foreign::Platform,
-        fragments::{
-            foreign_native_worker, linux_import_slot_symbol, linux_import_stub,
-            linux_import_stub_symbol, linux_resolver_imports, linux_resolver_symbol,
-        },
+use gugu_backend::a64::{
+    definitions::runtime_imports,
+    elf::{DynamicLink, Import, Location},
+    foreign::Platform,
+    fragments::{
+        foreign_native_worker, linux_import_slot_symbol, linux_import_stub,
+        linux_import_stub_symbol, linux_resolver_symbol,
     },
 };
 use gugu_runtime_abi::{foreign_packet as packet, foreign_schema as schema};
@@ -18,9 +16,14 @@ use probe::{Arg, Arg::*, Probe};
 use std::collections::BTreeMap;
 
 fn imports(p: &mut Probe, interpreter: &str, library: &str) -> BTreeMap<String, Location> {
-    let imports: Vec<_> = linux_resolver_imports(library)
+    // 走生产面：导入表直接取 runtime_imports 的完整 libc 面，仅按调用方选择 musl/glibc
+    // 覆盖库名；槽与桩符号仍由 linux_import_definitions 的命名约定消费。
+    let imports: Vec<_> = runtime_imports(Platform::Linux)
         .into_iter()
-        .chain(["gettid", "__errno_location"].map(|name| NativeImport::function(library, name)))
+        .map(|mut native| {
+            native.library = library.to_owned();
+            native
+        })
         .map(|native| Import {
             native,
             slot: p.data(vec![0; 8]),

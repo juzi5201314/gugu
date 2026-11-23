@@ -4,9 +4,15 @@ use std::collections::BTreeSet;
 use crate::{
     NativeImport,
     a64::{
-        definitions::{LINUX_LIBC, linux_import_definitions, runtime_definitions, runtime_imports},
+        definitions::{
+            DARWIN_EXTRA_IMPORTS, LINUX_LIBC, linux_import_definitions, runtime_definitions,
+            runtime_imports,
+        },
         foreign::Platform,
-        fragments::{linux_import_slot_symbol, linux_import_stub_symbol},
+        fragments::{
+            darwin_fd_imports, darwin_net_imports, darwin_process_imports, darwin_resolver_imports,
+            darwin_vm_imports, linux_import_slot_symbol, linux_import_stub_symbol,
+        },
         world::Definition,
     },
     macho::{LIB_SYSTEM, SectionContent, Segment},
@@ -141,27 +147,17 @@ fn runtime_imports_match_platform_import_surfaces() {
         "Linux imports are the resolver plus worker libc surface"
     );
     let darwin = runtime_imports(Platform::Darwin);
-    // 世界校验拒绝重复 import：合并各自申报面后按名去重。
-    let mut seen = std::collections::BTreeSet::new();
-    for import in &darwin {
-        assert!(
-            seen.insert(&import.name),
-            "duplicate import {}",
-            import.name
-        );
-        assert_eq!(import.library, LIB_SYSTEM);
-    }
-    for name in [
-        "exit",
-        "write",
-        "pthread_threadid_np",
-        "__error",
-        "getpagesize",
-        "mmap",
-    ] {
-        assert!(
-            darwin.iter().any(|import| import.name == name),
-            "missing import {name}"
-        );
-    }
+    // Darwin 面必须是各片段申报导入的完整去重并集：缺名立即失败。
+    let mut expected: Vec<NativeImport> = [
+        darwin_vm_imports(),
+        darwin_fd_imports(),
+        darwin_net_imports(),
+        darwin_process_imports(),
+        darwin_resolver_imports(),
+    ]
+    .concat();
+    expected.extend(DARWIN_EXTRA_IMPORTS.map(|name| NativeImport::function(LIB_SYSTEM, name)));
+    let mut seen = BTreeSet::new();
+    expected.retain(|import| seen.insert(import.name.clone()));
+    assert_eq!(darwin, expected);
 }

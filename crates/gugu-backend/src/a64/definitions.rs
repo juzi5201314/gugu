@@ -22,7 +22,7 @@ pub const LINUX_LIBC: &str = "libc.so.6";
 const LINUX_C_IMPORTS: [&str; 4] = ["getaddrinfo", "freeaddrinfo", "gettid", "__errno_location"];
 
 /// Darwin 侧经 libSystem 调用的额外入口（VM/FD/NET/进程/resolver 导入各自申报）。
-const DARWIN_EXTRA_IMPORTS: [&str; 3] = ["exit", "write", "pthread_threadid_np"];
+pub(crate) const DARWIN_EXTRA_IMPORTS: [&str; 3] = ["exit", "write", "pthread_threadid_np"];
 
 /// 平台已实现的 `platform_*` VM 原语；guard/unprotect 有片段覆盖，其余保持未绑定。
 const PLATFORM_OPS: [PlatformOp; 6] = [
