@@ -29,6 +29,31 @@ pub struct DarwinEntry {
     pub payload: Location,
     pub initial_slot: Location,
     pub processor: Location,
+    /// 绑定镜像 runtime 时补齐的启动契约；`None` 走只含 rt0_start 的探针形态。
+    pub runtime: Option<DarwinRuntime>,
+}
+
+/// 生产 runtime 启动契约：main 入口、runtime 状态区、协程入口、返回哨兵与元数据节。
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub struct DarwinRuntime {
+    /// 用户 `main` 入口。
+    pub entry: Location,
+    /// runtime 状态区（可写零初始化）。
+    pub runtime_state: Location,
+    /// 子协程入口片段。
+    pub coroutine_enter: Location,
+    /// main 返回哨兵片段。
+    pub main_return: Location,
+    /// 函数 RVA 的基址（代码节起点）。
+    pub fragment_base: Location,
+    /// 栈图节。
+    pub stackmap: Location,
+    /// 统一展开节。
+    pub unwind: Location,
+    /// 类型段；`None` 时字段写 0。
+    pub gc_types: Option<Location>,
+    /// GC metadata blob；`None` 时字段写 0。
+    pub gc_meta: Option<Location>,
 }
 
 /// 添加 arm64 Darwin 启动节，绑定 libSystem 的 exit 并写出签名镜像。
@@ -177,6 +202,67 @@ fn validate_entry(request: &MachORequest, entry: DarwinEntry) -> Result<(), Stri
             return Err(format!("invalid arm64 Mach-O {name} location {at:?}"));
         }
     }
+    if let Some(runtime) = entry.runtime {
+        for (name, at) in [
+            ("entry", runtime.entry),
+            ("coroutine_enter", runtime.coroutine_enter),
+            ("main_return", runtime.main_return),
+        ] {
+            let valid = request.sections.get(at.section).is_some_and(|section| {
+                matches!(section.content, SectionContent::Code(_))
+                    && at.offset % 4 == 0
+                    && at.offset < section.content.size()
+            });
+            if !valid {
+                return Err(format!("invalid arm64 Mach-O {name} location {at:?}"));
+            }
+        }
+        let valid = request
+            .sections
+            .get(runtime.fragment_base.section)
+            .is_some_and(|section| {
+                matches!(section.content, SectionContent::Code(_))
+                    && runtime.fragment_base.offset == 0
+            });
+        if !valid {
+            return Err(format!(
+                "invalid arm64 Mach-O fragment_base location {:?}",
+                runtime.fragment_base
+            ));
+        }
+        for (name, at, size, writable) in [
+            (
+                "runtime_state",
+                runtime.runtime_state,
+                crate::runtime::entry::state::BYTES,
+                true,
+            ),
+            ("stackmap", runtime.stackmap, 0, false),
+            ("unwind", runtime.unwind, 0, false),
+        ] {
+            let valid = request.sections.get(at.section).is_some_and(|section| {
+                (!writable || section.segment == Segment::Data)
+                    && at
+                        .offset
+                        .checked_add(size)
+                        .is_some_and(|end| end <= section.content.size())
+            });
+            if !valid {
+                return Err(format!("invalid arm64 Mach-O {name} location {at:?}"));
+            }
+        }
+        for (name, at) in [("gc_types", runtime.gc_types), ("gc_meta", runtime.gc_meta)] {
+            let valid = at.is_none_or(|at| {
+                request
+                    .sections
+                    .get(at.section)
+                    .is_some_and(|section| at.offset <= section.content.size())
+            });
+            if !valid {
+                return Err(format!("invalid arm64 Mach-O {name} location {at:?}"));
+            }
+        }
+    }
     Ok(())
 }
 
@@ -191,7 +277,7 @@ fn write_startup_data(
     let SectionContent::Data(bytes) = &mut request.sections[params.section].content else {
         unreachable!()
     };
-    for (word, value) in [
+    let mut words = vec![
         (rt0_params::BIAS_BASELINE, rva(params)?),
         (rt0_params::BOOT_R14, slot),
         (rt0_params::PROCESSOR, rva(entry.processor)?),
@@ -199,16 +285,67 @@ fn write_startup_data(
         (rt0_params::PAYLOAD_VA, rva(entry.payload)?),
         (rt0_params::PAYLOAD_LEN, Rt0Payload::bytes()),
         (rt0_params::INITIAL_SLOT, slot),
-    ] {
+    ];
+    if let Some(runtime) = entry.runtime {
+        words.extend([
+            (rt0_params::ENTRY, rva(runtime.entry)?),
+            (rt0_params::RUNTIME_STATE, rva(runtime.runtime_state)?),
+            (rt0_params::COROUTINE_ENTER, rva(runtime.coroutine_enter)?),
+        ]);
+    }
+    for (word, value) in words {
         bytes[word * 8..word * 8 + 8].copy_from_slice(&value.to_le_bytes());
     }
     let SectionContent::Data(bytes) = &mut request.sections[entry.payload.section].content else {
         unreachable!()
     };
-    for (offset, value) in [
+    let mut fields = vec![
         (offset_of!(Rt0Payload, revision), Rt0Payload::REVISION),
         (offset_of!(Rt0Payload, initial_slot), slot),
-    ] {
+    ];
+    if let Some(runtime) = entry.runtime {
+        let len = |at: Location| -> Result<u64, String> {
+            layout.sections[at.section]
+                .size
+                .checked_sub(at.offset)
+                .ok_or_else(|| format!("invalid arm64 Mach-O metadata location {at:?}"))
+        };
+        let blob = |at: Option<Location>| -> Result<(u64, u64), String> {
+            match at {
+                None => Ok((0, 0)),
+                Some(at) => {
+                    let len = len(at)?;
+                    Ok((if len == 0 { 0 } else { rva(at)? }, len))
+                }
+            }
+        };
+        let (types, types_len) = blob(runtime.gc_types)?;
+        let (meta, meta_len) = blob(runtime.gc_meta)?;
+        fields.extend([
+            (offset_of!(Rt0Payload, main_entry), rva(runtime.entry)?),
+            (
+                offset_of!(Rt0Payload, runtime_state),
+                rva(runtime.runtime_state)?,
+            ),
+            (
+                offset_of!(Rt0Payload, main_return),
+                rva(runtime.main_return)?,
+            ),
+            (offset_of!(Rt0Payload, stackmap), rva(runtime.stackmap)?),
+            (
+                offset_of!(Rt0Payload, fragment_base),
+                rva(runtime.fragment_base)?,
+            ),
+            (offset_of!(Rt0Payload, stackmap_len), len(runtime.stackmap)?),
+            (offset_of!(Rt0Payload, unwind), rva(runtime.unwind)?),
+            (offset_of!(Rt0Payload, unwind_len), len(runtime.unwind)?),
+            (offset_of!(Rt0Payload, gc_types), types),
+            (offset_of!(Rt0Payload, gc_types_len), types_len),
+            (offset_of!(Rt0Payload, gc_meta), meta),
+            (offset_of!(Rt0Payload, gc_meta_len), meta_len),
+        ]);
+    }
+    for (offset, value) in fields {
         let offset = entry.payload.offset as usize + offset;
         bytes[offset..offset + 8].copy_from_slice(&value.to_le_bytes());
     }

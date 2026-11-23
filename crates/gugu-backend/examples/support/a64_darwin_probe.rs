@@ -302,6 +302,7 @@ impl Probe {
                     section: 2,
                     offset: INITIAL_SLOT_BYTES,
                 },
+                runtime: None,
             },
         )?;
         std::fs::write(path, image.bytes)?;
