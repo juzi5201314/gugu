@@ -11,6 +11,12 @@ pub enum TargetName {
     /// x86_64 macOS internal compiler target; not accepted by the registry.
     #[doc(hidden)]
     X86_64Macos,
+    /// aarch64 Linux internal compiler target; not accepted by the registry.
+    #[doc(hidden)]
+    Aarch64Linux,
+    /// aarch64 macOS internal compiler target; not accepted by the registry.
+    #[doc(hidden)]
+    Aarch64Macos,
 }
 
 impl TargetName {
@@ -28,10 +34,11 @@ impl TargetName {
     /// 解码编译器内部产物的目标名，不参与命令行目标注册。
     #[doc(hidden)]
     pub fn from_compiler_artifact(value: &str) -> Result<Self, TargetParseError> {
-        if value == Self::X86_64Macos.name() {
-            Ok(Self::X86_64Macos)
-        } else {
-            Self::parse(value)
+        match value {
+            "x86_64-macos" => Ok(Self::X86_64Macos),
+            "aarch64-linux" => Ok(Self::Aarch64Linux),
+            "aarch64-macos" => Ok(Self::Aarch64Macos),
+            _ => Self::parse(value),
         }
     }
 
@@ -41,6 +48,8 @@ impl TargetName {
             Self::X86_64Linux => "x86_64-linux",
             Self::X86_64Windows => "x86_64-windows",
             Self::X86_64Macos => "x86_64-macos",
+            Self::Aarch64Linux => "aarch64-linux",
+            Self::Aarch64Macos => "aarch64-macos",
         }
     }
 
@@ -57,10 +66,16 @@ impl TargetName {
             std::sync::LazyLock::new(|| TargetName::X86_64Windows.build_descriptor());
         static MACOS: std::sync::LazyLock<TargetDescriptor> =
             std::sync::LazyLock::new(|| TargetName::X86_64Macos.build_descriptor());
+        static AARCH64_LINUX: std::sync::LazyLock<TargetDescriptor> =
+            std::sync::LazyLock::new(|| TargetName::Aarch64Linux.build_descriptor());
+        static AARCH64_MACOS: std::sync::LazyLock<TargetDescriptor> =
+            std::sync::LazyLock::new(|| TargetName::Aarch64Macos.build_descriptor());
         match self {
             Self::X86_64Linux => *LINUX,
             Self::X86_64Windows => *WINDOWS,
             Self::X86_64Macos => *MACOS,
+            Self::Aarch64Linux => *AARCH64_LINUX,
+            Self::Aarch64Macos => *AARCH64_MACOS,
         }
     }
 
@@ -69,25 +84,37 @@ impl TargetName {
         let sysroot = sysroot_entry(self);
         TargetDescriptor {
             name: self,
-            arch: Architecture::X86_64,
+            arch: match self {
+                Self::X86_64Linux | Self::X86_64Windows | Self::X86_64Macos => Architecture::X86_64,
+                Self::Aarch64Linux | Self::Aarch64Macos => Architecture::Aarch64,
+            },
             os: match self {
-                Self::X86_64Linux => OperatingSystem::Linux,
+                Self::X86_64Linux | Self::Aarch64Linux => OperatingSystem::Linux,
                 Self::X86_64Windows => OperatingSystem::Windows,
-                Self::X86_64Macos => OperatingSystem::Macos,
+                Self::X86_64Macos | Self::Aarch64Macos => OperatingSystem::Macos,
             },
             object_format: match self {
-                Self::X86_64Linux => ObjectFormat::Elf64,
+                Self::X86_64Linux | Self::Aarch64Linux => ObjectFormat::Elf64,
                 Self::X86_64Windows => ObjectFormat::Pe32Plus,
-                Self::X86_64Macos => ObjectFormat::MachO64,
+                Self::X86_64Macos | Self::Aarch64Macos => ObjectFormat::MachO64,
             },
             pointer_width: 64,
             rt0: match self {
-                Self::X86_64Linux => Rt0Kind::LinuxSyscall,
+                Self::X86_64Linux | Self::Aarch64Linux => Rt0Kind::LinuxSyscall,
                 Self::X86_64Windows => Rt0Kind::WindowsThinImport,
-                Self::X86_64Macos => Rt0Kind::MacosLibSystem,
+                Self::X86_64Macos | Self::Aarch64Macos => Rt0Kind::MacosLibSystem,
             },
-            page_size: TARGET_PAGE_SIZE,
-            cpu_baseline: CpuBaseline::X86_64V1,
+            page_size: match self {
+                // aarch64 macOS 的硬件页是 16 KiB；其余目标按 4 KiB 常规页。
+                Self::Aarch64Macos => 16 * 1024,
+                _ => TARGET_PAGE_SIZE,
+            },
+            cpu_baseline: match self {
+                Self::X86_64Linux | Self::X86_64Windows | Self::X86_64Macos => {
+                    CpuBaseline::X86_64V1
+                }
+                Self::Aarch64Linux | Self::Aarch64Macos => CpuBaseline::Armv8A,
+            },
             linux_interpreter: sysroot.interpreter,
             sysroot_digest: target_sysroot_digest(self),
             import_policy_revision: IMPORT_POLICY_REVISION,
@@ -196,6 +223,16 @@ const TARGET_SYSROOTS: &[SysrootEntry] = &[
     },
     SysrootEntry {
         name: TargetName::X86_64Macos,
+        interpreter: None,
+        import_libraries: &["/usr/lib/libSystem.B.dylib"],
+    },
+    SysrootEntry {
+        name: TargetName::Aarch64Linux,
+        interpreter: Some("/lib/ld-linux-aarch64.so.1"),
+        import_libraries: &[],
+    },
+    SysrootEntry {
+        name: TargetName::Aarch64Macos,
         interpreter: None,
         import_libraries: &["/usr/lib/libSystem.B.dylib"],
     },
@@ -398,6 +435,7 @@ impl PointerCompression {
             TargetName::X86_64Linux | TargetName::X86_64Windows | TargetName::X86_64Macos => {
                 Self::x86_64()
             }
+            TargetName::Aarch64Linux | TargetName::Aarch64Macos => Self::aarch64(),
         }
     }
 }

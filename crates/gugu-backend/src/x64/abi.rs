@@ -147,6 +147,9 @@ pub fn classify_call(call: &Call, target: TargetName) -> Result<AbiLayout, Lower
         | CallKind::ForeignLeaf { .. } => match target {
             TargetName::X86_64Linux | TargetName::X86_64Macos => Convention::SysV,
             TargetName::X86_64Windows => Convention::Win64,
+            TargetName::Aarch64Linux | TargetName::Aarch64Macos => {
+                unreachable!("aarch64 目标不进入 x64 ABI")
+            }
         },
     };
     let callee = match call.target {

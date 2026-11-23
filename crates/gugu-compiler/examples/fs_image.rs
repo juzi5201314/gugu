@@ -45,6 +45,8 @@ fn main() {
         TargetName::X86_64Linux => ("/tmp/gugu_fs_image", plan.linux_image()),
         TargetName::X86_64Windows => ("/tmp/gugu_fs_image.exe", plan.windows_image()),
         TargetName::X86_64Macos => ("/tmp/gugu_fs_image.macho", plan.macos_image()),
+        TargetName::Aarch64Linux => ("/tmp/gugu_fs_image.a64", plan.linux_image()),
+        TargetName::Aarch64Macos => ("/tmp/gugu_fs_image.a64.macho", plan.macos_image()),
     };
     fs::write(name, bytes).expect("写出手工验证镜像");
     println!("{name}");

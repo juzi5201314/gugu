@@ -39,6 +39,9 @@ pub(super) fn resolver_fragment(target: TargetName) -> FragmentBlob {
                 b.emit("mov", MOV, Access::Read, vec![iat(name), reg(gpr(Rax))]);
             }
             TargetName::X86_64Macos => darwin::c_address(&mut b, Rax, name),
+            TargetName::Aarch64Linux | TargetName::Aarch64Macos => {
+                unreachable!("aarch64 目标不进入 x64 平台片段")
+            }
         };
         ret(&mut b);
         b.define(next);
@@ -52,6 +55,9 @@ pub(super) fn fragment(target: TargetName) -> FragmentBlob {
         TargetName::X86_64Linux => linux(),
         TargetName::X86_64Windows => windows(),
         TargetName::X86_64Macos => darwin(),
+        TargetName::Aarch64Linux | TargetName::Aarch64Macos => {
+            unreachable!("aarch64 目标不进入 x64 平台片段")
+        }
     };
     let callback = code.label();
     // 关闭回调独立采用 C ABI；net_call 的 op=19 返回它的 code pointer。
@@ -87,6 +93,9 @@ pub(super) fn fragment(target: TargetName) -> FragmentBlob {
             code.define(success);
             adjust(&mut code, "add", Rsp, 40);
             ret(&mut code);
+        }
+        TargetName::Aarch64Linux | TargetName::Aarch64Macos => {
+            unreachable!("aarch64 目标不进入 x64 平台片段")
         }
     }
     let signal_handler = (target == TargetName::X86_64Macos).then(|| {
