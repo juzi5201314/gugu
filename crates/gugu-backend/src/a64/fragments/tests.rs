@@ -14,6 +14,9 @@ mod context_vm;
 #[path = "darwin_process_tests.rs"]
 mod darwin_process;
 
+#[path = "darwin_vm_tests.rs"]
+mod darwin_vm;
+
 #[path = "linux_fd_tests.rs"]
 mod linux_fd;
 

@@ -82,6 +82,20 @@ impl Vm {
     }
 
     pub fn run_result(&mut self, code: &[Inst], mut syscall: impl FnMut(&mut Self)) -> u64 {
+        self.run_inner(code, &mut syscall, &mut |_, _| panic!("unexpected call"))
+    }
+
+    /// `bl` 外部调用交给 `call` 闭包（实参为指令字节偏移）；不允许 `svc`。
+    pub fn run_calls(&mut self, code: &[Inst], mut call: impl FnMut(&mut Self, u64)) -> u64 {
+        self.run_inner(code, &mut |_| panic!("unexpected syscall"), &mut call)
+    }
+
+    fn run_inner(
+        &mut self,
+        code: &[Inst],
+        syscall: &mut impl FnMut(&mut Self),
+        call: &mut impl FnMut(&mut Self, u64),
+    ) -> u64 {
         let mut pc = 0;
         let saved = self.registers[19..31].to_vec();
         for _ in 0..2048 {
@@ -93,6 +107,7 @@ impl Vm {
                 "b.cond" if self.condition(&args[1]) => next = jump(pc, &args[0]),
                 "b.cond" => {}
                 "svc" => syscall(self),
+                "bl" => call(self, pc as u64),
                 "adr" => self.set(&args[0], jump(pc, &args[1]) as u64),
                 "adrp" => self.set(&args[0], jump(pc & !4095, &args[1]) as u64),
                 "cbnz.X" if self.get(&args[0]) != 0 => next = jump(pc, &args[1]),
