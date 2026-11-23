@@ -66,3 +66,14 @@ fn aarch64_targets_have_distinct_action_keys() {
     );
 }
 
+
+/// 探测缺口：带 println 的真实程序在当前 a64 后端是否全链路可编译。
+#[test]
+fn probe_println() {
+    let output = Compiler::shared().compile(CompileRequest::single_file(
+        "main.gg",
+        "use std.io.{println}\nfn main() { println(\"hello\") }\n",
+        TargetName::Aarch64Linux,
+    ));
+    assert!(output.is_success(), "{:?}", output.diagnostics().items());
+}
