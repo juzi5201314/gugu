@@ -74,7 +74,7 @@ A64 runtime 中省略 CallReturn map 的 poll-free managed leaf 不得进入 mor
 
 A64 栈图函数的栈内引用标志必须包含受初始化字节门控的栈内引用，不能因为固定槽位图和寄存器掩码为空而省略。
 
-Linux 目标在没有动态 FFI、系统 Resolver 或可达环境 API 需求时不依赖动态解释器或 libc 初始化。闭世界实际可达的系统 Resolver、环境 API 及通过环境快照依赖它的 Command.spawn 自动采用目标工具链登记的 libc、pthread 与解释器。args/current_dir/set_current_dir、普通 fs、数字网络和空程序仍使用静态 syscall 路径。Windows 目标不链接 CRT，通过薄 IAT 使用运行时所需的系统 DLL；可达的网络功能按需加入 Winsock，进程创建遵守 [CreateProcessW](https://learn.microsoft.com/en-us/windows/win32/api/processthreadsapi/nf-processthreadsapi-createprocessw) 的 application、命令行、环境与继承句柄契约。其它动态库必须通过显式 FFI 构建配置加入，不能由宿主链接器隐式补齐。系统需求与显式配置合并后的库、符号、Function/Data 种类和解释器均进入 action key；同名符号来自冲突库或具有冲突种类时必须拒绝，不能替换调用方配置。详见[程序与编译模型](program-model.md)和[包、依赖与构建模型](packages-builds.md)。
+Linux 目标在没有动态 FFI、系统 Resolver 或可达环境 API 需求时不依赖动态解释器或 libc 初始化。闭世界实际可达的系统 Resolver、环境 API 及通过环境快照依赖它的 Command.spawn 自动采用目标工具链登记的 libc、pthread 与解释器。args/current_dir/set_current_dir、普通 fs、数字网络和空程序仍使用静态 syscall 路径。Windows 目标不链接 CRT，通过薄 IAT 使用运行时所需的系统 DLL；可达的网络功能按需加入 Winsock，进程创建遵守 [CreateProcessW](https://learn.microsoft.com/en-us/windows/win32/api/processthreadsapi/nf-processthreadsapi-createprocessw) 的 application、命令行、环境与继承句柄契约。镜像内每个 IAT 引用都必须指向导入目录已登记的槽；缺失登记是链接错误，不能改写成缺失符号桩地址。其它动态库必须通过显式 FFI 构建配置加入，不能由宿主链接器隐式补齐。系统需求与显式配置合并后的库、符号、Function/Data 种类和解释器均进入 action key；同名符号来自冲突库或具有冲突种类时必须拒绝，不能替换调用方配置。详见[程序与编译模型](program-model.md)和[包、依赖与构建模型](packages-builds.md)。
 
 A64 内部挂起调用使用权威 SuspendResume 栈图，跨点指针必须落槽。Context 的 SP、PC、x19–x26、x29 和 d8–d15 使用共享布局；x27/x28 由恢复方提供。stackless handoff 的复制输入必须由配对的精确 PC 栈图与 CFA 元数据产生，修复 StackInterior、保存的 FP 链和 Context FP；非根整数、代码地址和浮点位型不得猜测性修复。
 
