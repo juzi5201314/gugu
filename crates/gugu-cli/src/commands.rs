@@ -472,8 +472,8 @@ fn run_run(positional: Option<&str>, args: &[OsString], options: &GlobalArgs) ->
             "gugu run 需要唯一 package；workspace 请用 -p 指定",
         );
     }
-    let name = match resolve_run_name(&packages[0], positional, options) {
-        Ok(name) => name,
+    let (selection, kind) = match run_target_selection(&packages[0], positional, options) {
+        Ok(selected) => selected,
         Err(message) => return fail(format, 2, message),
     };
     compile_and_exec(
@@ -481,11 +481,29 @@ fn run_run(positional: Option<&str>, args: &[OsString], options: &GlobalArgs) ->
         &packages,
         options,
         target,
-        &TargetSelection::Bin(Some(name)),
+        &selection,
         RunDomain::Default,
-        &[TargetKind::Bin],
+        &[kind],
         args,
     )
+}
+
+fn run_target_selection(
+    package: &Package,
+    positional: Option<&str>,
+    options: &GlobalArgs,
+) -> Result<(TargetSelection, TargetKind), String> {
+    if let Some(example) = options.example.as_deref() {
+        if positional.is_some() {
+            return Err("gugu run 的位置 target 与 --example 不能同时使用".to_owned());
+        }
+        return Ok((
+            TargetSelection::Example(Some(example.to_owned())),
+            TargetKind::Example,
+        ));
+    }
+    let name = resolve_run_name(package, positional, options)?;
+    Ok((TargetSelection::Bin(Some(name)), TargetKind::Bin))
 }
 
 fn run_test_or_bench(test: bool, args: &[OsString], options: &GlobalArgs) -> i32 {
@@ -558,6 +576,46 @@ mod tests {
         );
         assert_eq!(package_name_from(Path::new("/tmp/9lives")), None);
         assert_eq!(package_name_from(Path::new("/tmp/---")), None);
+    }
+
+    fn package_with_example() -> Package {
+        Package::new(
+            PathBuf::from("/pkg"),
+            PathBuf::from("/pkg/gugu.toml"),
+            None,
+            "demo".to_owned(),
+            "0.1.0".to_owned(),
+            Vec::new(),
+            vec![Target::new(
+                TargetKind::Example,
+                "demo".to_owned(),
+                PathBuf::from("/pkg/examples/demo.gg"),
+                PathBuf::from("/pkg/examples"),
+                Vec::new(),
+                true,
+            )],
+        )
+    }
+
+    #[test]
+    fn run_target_selection_honors_example() {
+        let package = package_with_example();
+        let options = GlobalArgs {
+            example: Some("demo".to_owned()),
+            ..GlobalArgs::default()
+        };
+        assert_eq!(
+            run_target_selection(&package, None, &options),
+            Ok((
+                TargetSelection::Example(Some("demo".to_owned())),
+                TargetKind::Example
+            ))
+        );
+        assert!(
+            run_target_selection(&package, Some("bin"), &options)
+                .unwrap_err()
+                .contains("不能同时使用")
+        );
     }
 
     #[test]
