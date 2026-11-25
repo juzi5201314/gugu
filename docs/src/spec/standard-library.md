@@ -937,7 +937,7 @@ Linux UnixDatagram 提供 bind、connect/disconnect、send/send_to、recv/recv_f
 
 `std.process.Command` 只接受 executable + argv，不经过 shell；Stdio 可设为 inherit、null、pipe 或已有 File。Child 提供 stdin/stdout/stderr、wait、wait_cancel、try_wait、kill、detach、id 与幂等 close。Command.spawn 在一个线性化点捕获全局 OS 环境和 runtime 虚拟 cwd，再应用 builder 上的 env/remove_env/cwd 覆盖。
 
-`process.Error` 与 `env.Error` 均直接重导出 `std.io.Error`。Command 的副本共享 builder 身份；spawn/output 在入口复制配置，arg 保持追加顺序，同名 env/remove_env 以最后一次调用为准。Linux 名称按 byte 比较，Windows 使用系统 ordinal ignore-case 比较。
+`process.Error` 与 `env.Error` 均直接重导出 `std.io.Error`。Command 的副本共享 builder 身份；spawn/output 在入口复制配置，`arg` 与批量 `args` 保持追加顺序，同名 env/remove_env 以最后一次调用为准。Linux 名称按 byte 比较，Windows 使用系统 ordinal ignore-case 比较。
 
 executable 是 Path，不搜索 PATH、不补扩展名、不解释 shell。相对 executable 基于本次子进程 cwd；相对 cwd 覆盖基于捕获的虚拟 cwd。空 executable、NUL、空环境名称和含 `=` 的名称均为 InvalidInput；setter 不返回 Result，故 spawn/output 在任何 OS 副作用前统一验证。空参数和空环境值合法，空值不是删除。
 
