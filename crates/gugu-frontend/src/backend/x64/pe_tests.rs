@@ -398,6 +398,75 @@ fn explicit_import_thunks_point_to_aligned_names_and_exact_iat() {
 }
 
 #[test]
+fn runtime_core_iat_relocations_resolve_to_registered_slots() {
+    let names = [
+        "CreateEventW",
+        "GetSystemInfo",
+        "GetSystemTimePreciseAsFileTime",
+        "SetEvent",
+    ];
+    let mut code = Vec::new();
+    let mut relocs = Vec::new();
+    for name in names {
+        code.extend_from_slice(&[0xff, 0x15, 0, 0, 0, 0]);
+        relocs.push(ObjectReloc {
+            offset: code.len() as u32 - 4,
+            kind: RelocKindCode::PcRel32,
+            target: format!("__gugu_iat_{name}"),
+            addend: 0,
+        });
+    }
+    code.push(0xc3);
+    let (image, layout) =
+        link_with_layout(&request("main", vec![symbol("main", code, relocs)])).expect("exe");
+    let bytes = &image.bytes;
+    let u32_at = |at: usize| u32::from_le_bytes(bytes[at..at + 4].try_into().unwrap()) as usize;
+    let u64_at = |at: usize| u64::from_le_bytes(bytes[at..at + 8].try_into().unwrap());
+    let directory = 88 + 112;
+    let iat_base = u32_at(directory + 96);
+    let iat_end = iat_base + u32_at(directory + 100);
+    let start = u64::from(image.entry_rva) + layout["main"];
+    for (index, name) in names.into_iter().enumerate() {
+        let instruction = start + index as u64 * 6;
+        let at = file_offset(bytes, instruction as u32);
+        assert_eq!(&bytes[at..at + 2], &[0xff, 0x15]);
+        let displacement = i32::from_le_bytes(bytes[at + 2..at + 6].try_into().unwrap());
+        let slot = (instruction + 6).wrapping_add_signed(i64::from(displacement)) as usize;
+        assert!(
+            (iat_base..iat_end).contains(&slot),
+            "{name} 的调用必须读 IAT，而不是文本或缺失符号桩"
+        );
+        let hint_name = file_offset(bytes, u64_at(file_offset(bytes, slot as u32)) as u32);
+        assert_eq!(
+            &bytes[hint_name + 2..hint_name + 2 + name.len()],
+            name.as_bytes()
+        );
+    }
+}
+
+#[test]
+fn unregistered_iat_relocation_is_a_link_error() {
+    let image = link(&request(
+        "main",
+        vec![symbol(
+            "main",
+            vec![0xff, 0x15, 0, 0, 0, 0, 0xc3],
+            vec![ObjectReloc {
+                offset: 2,
+                kind: RelocKindCode::PcRel32,
+                target: "__gugu_iat_NotARegisteredImport".to_owned(),
+                addend: 0,
+            }],
+        )],
+    ));
+    let error = image.expect_err("未登记 IAT 目标必须失败");
+    assert!(
+        error.contains("__gugu_iat_NotARegisteredImport"),
+        "失败信息必须点名导入槽：{error}"
+    );
+}
+
+#[test]
 fn cdylib_sets_image_file_dll_without_changing_imports() {
     let mut request = request("main", vec![symbol("main", vec![0xc3], Vec::new())]);
     request.dll = true;

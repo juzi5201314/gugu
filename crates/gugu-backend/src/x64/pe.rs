@@ -32,6 +32,7 @@ const IMPORTS: &[(&str, &[&str])] = &[
         &[
             "ExitProcess",
             "SetConsoleCtrlHandler",
+            "SetEvent",
             "GetStdHandle",
             "WriteFile",
             "GetEnvironmentStringsW",
@@ -40,6 +41,9 @@ const IMPORTS: &[(&str, &[&str])] = &[
             "GetCurrentDirectoryW",
             "GetCurrentProcessId",
             "GetSystemDirectoryW",
+            "GetSystemInfo",
+            "GetSystemTimePreciseAsFileTime",
+            "CreateEventW",
             "CreateThread",
             "WaitForSingleObject",
             "Sleep",
@@ -1160,7 +1164,9 @@ fn patch_fragments(
             if !seen.insert(slot) {
                 return Err(format!("重定位槽 {slot:#x} 重复"));
             }
-            let target_rva = if let Some(offset) = iat_offset(&reloc.target, imports) {
+            let target_rva = if reloc.target.starts_with("__gugu_iat_") {
+                let offset = iat_offset(&reloc.target, imports)
+                    .ok_or_else(|| format!("Windows 导入槽 {} 未登记进 IAT", reloc.target))?;
                 data_rva + offset
             } else if let Some(offset) = request.type_descriptors.get(reloc.target.as_str()) {
                 type_section_rva + offset
