@@ -15,7 +15,7 @@ use serde_json::json;
 use crate::{
     GlobalArgs,
     commands::{discover, fail, format_of, load_project, parse_target_or_exit},
-    output::OutputFormat,
+    output::{OutputFormat, emit_event},
 };
 
 // ---------------------------------------------------------------------------
@@ -143,6 +143,85 @@ fn print_tree(
     }
 }
 
+fn package_source_json(source: &gugu_compiler::PackageSource) -> serde_json::Value {
+    match source {
+        gugu_compiler::PackageSource::Path { path } => json!({ "kind": "path", "path": path }),
+        gugu_compiler::PackageSource::Git { url, commit, tree } => json!({
+            "kind": "git",
+            "url": url,
+            "commit": commit,
+            "tree": tree,
+        }),
+        gugu_compiler::PackageSource::Registry { registry } => json!({
+            "kind": "registry",
+            "registry": registry,
+        }),
+    }
+}
+
+fn tree_json(
+    lock: &LockGraph,
+    id: &gugu_compiler::PackageId,
+    depth: Option<u32>,
+    expanded: &mut BTreeSet<String>,
+    duplicates: bool,
+) -> serde_json::Value {
+    let key = id.to_string();
+    let repeated = expanded.contains(&key);
+    expanded.insert(key);
+    let truncated = matches!(depth, Some(0));
+    let mut dependencies = Vec::new();
+    if !(repeated && !duplicates) && !truncated {
+        let next_depth = depth.map(|value| value.saturating_sub(1));
+        for child in lock_children(lock, id) {
+            dependencies.push(tree_json(lock, child, next_depth, expanded, duplicates));
+        }
+    }
+    json!({
+        "name": id.name(),
+        "version": id.version().to_string(),
+        "source": package_source_json(id.source()),
+        "repeated": repeated,
+        "truncated": truncated,
+        "dependencies": dependencies,
+    })
+}
+
+fn emit_tree_json(
+    lock: &LockGraph,
+    roots: &[&gugu_compiler::PackageId],
+    depth: Option<u32>,
+    duplicates: bool,
+) {
+    let roots = roots
+        .iter()
+        .map(|id| {
+            let mut expanded = BTreeSet::new();
+            tree_json(lock, id, depth, &mut expanded, duplicates)
+        })
+        .collect::<Vec<_>>();
+    emit_event("package-tree", json!({ "roots": roots }));
+}
+
+fn output_tree(
+    format: OutputFormat,
+    lock: &LockGraph,
+    roots: &[&gugu_compiler::PackageId],
+    depth: Option<u32>,
+    duplicates: bool,
+) {
+    match format {
+        OutputFormat::Text => {
+            for id in roots {
+                let mut expanded = BTreeSet::new();
+                print_tree(lock, id, depth, "", true, &mut expanded, duplicates);
+            }
+        }
+        OutputFormat::Json => emit_tree_json(lock, roots, depth, duplicates),
+        OutputFormat::JsonDiagnosticShort => {}
+    }
+}
+
 pub(crate) fn run_tree(
     depth: Option<u32>,
     duplicates: bool,
@@ -169,36 +248,28 @@ pub(crate) fn run_tree(
         else {
             return fail(format, 2, format!("锁图中没有 package `{name}`"));
         };
-        for package in &lock.packages {
-            if package.id == needle {
-                continue;
-            }
-            if reaches(lock, &package.id, &needle) {
-                let mut seen = BTreeSet::new();
-                print_tree(lock, &package.id, depth, "", true, &mut seen, duplicates);
-            }
-        }
+        let roots = lock
+            .packages
+            .iter()
+            .filter(|package| package.id != needle && reaches(lock, &package.id, &needle))
+            .map(|package| &package.id)
+            .collect::<Vec<_>>();
+        output_tree(format, lock, &roots, depth, duplicates);
         return 0;
     }
-    for package in &lock.packages {
-        // 只把 workspace 根作为树的根：以 Path source 出现在 packages 中的项。
-        if !matches!(
-            package.id.source(),
-            gugu_compiler::PackageSource::Path { .. }
-        ) {
-            continue;
-        }
-        let mut expanded = BTreeSet::new();
-        print_tree(
-            lock,
-            &package.id,
-            depth,
-            "",
-            true,
-            &mut expanded,
-            duplicates,
-        );
-    }
+    // 只把 workspace 根作为树的根：以 Path source 出现在 packages 中的项。
+    let roots = lock
+        .packages
+        .iter()
+        .filter(|package| {
+            matches!(
+                package.id.source(),
+                gugu_compiler::PackageSource::Path { .. }
+            )
+        })
+        .map(|package| &package.id)
+        .collect::<Vec<_>>();
+    output_tree(format, lock, &roots, depth, duplicates);
     0
 }
 
@@ -832,6 +903,74 @@ mod tests {
         assert!(!glob_match("*.pem", "keys/cert.pem"));
         assert!(!glob_match("a*c", "ax"));
         assert!(glob_match("a*c", "axxxc"));
+    }
+
+    fn lock_id(name: &str) -> gugu_compiler::PackageId {
+        gugu_compiler::PackageId::new(
+            name,
+            gugu_compiler::Version::new(1, 0, 0),
+            gugu_compiler::PackageSource::Path {
+                path: name.to_owned(),
+            },
+        )
+    }
+
+    fn lock_dependency(
+        name: &str,
+        package: gugu_compiler::PackageId,
+    ) -> gugu_compiler::LockedDependency {
+        gugu_compiler::LockedDependency {
+            alias: name.to_owned(),
+            package,
+            domain: gugu_compiler::DependencyDomain::Normal,
+            target: None,
+            features: Vec::new(),
+            default_features: true,
+        }
+    }
+
+    #[test]
+    fn tree_json_preserves_depth_repeat_and_source_shape() {
+        let root = lock_id("root");
+        let child = lock_id("child");
+        let shared = lock_id("shared");
+        let lock = LockGraph {
+            version: 1,
+            packages: vec![
+                gugu_compiler::LockedPackage {
+                    id: root.clone(),
+                    checksum: None,
+                    dependencies: vec![
+                        lock_dependency("child", child.clone()),
+                        lock_dependency("shared", shared.clone()),
+                    ],
+                    features: Default::default(),
+                },
+                gugu_compiler::LockedPackage {
+                    id: child.clone(),
+                    checksum: None,
+                    dependencies: vec![lock_dependency("shared", shared.clone())],
+                    features: Default::default(),
+                },
+                gugu_compiler::LockedPackage {
+                    id: shared.clone(),
+                    checksum: None,
+                    dependencies: Vec::new(),
+                    features: Default::default(),
+                },
+            ],
+        };
+        let mut expanded = BTreeSet::new();
+        let tree = tree_json(&lock, &root, None, &mut expanded, false);
+        assert_eq!(tree["name"], "root");
+        assert_eq!(tree["version"], "1.0.0");
+        assert_eq!(tree["source"], json!({ "kind": "path", "path": "root" }));
+        assert_eq!(tree["dependencies"][0]["name"], "child");
+        assert_eq!(tree["dependencies"][1]["repeated"], true);
+        let mut expanded = BTreeSet::new();
+        let truncated = tree_json(&lock, &root, Some(0), &mut expanded, false);
+        assert_eq!(truncated["truncated"], true);
+        assert_eq!(truncated["dependencies"].as_array().unwrap().len(), 0);
     }
 
     #[test]
