@@ -108,7 +108,7 @@ runtime 契约签名的记录目录不计入 executable mono/GIR/LIR body 数量
 
 ### `gugu run [target] [args...]`
 
-编译并运行 bin target。无 target 时按 `default-run` 或唯一 bin 选择；多个 bin 且无 `default-run` 是错误。`--` 之后的参数原样传给程序。可执行镜像只能在宿主目标上运行：`--target` 不是宿主目标时按用法错误拒绝，退出码 `2`。进程透传子镜像的退出码。
+编译并运行 bin target；`--example <name>` 改为编译并运行指定 example target。无 target 时按 `default-run` 或唯一 bin 选择；多个 bin 且无 `default-run` 是错误。位置 target 与 `--example` 不能同时使用。`--` 之后的参数原样传给程序。可执行镜像只能在宿主目标上运行：`--target` 不是宿主目标时按用法错误拒绝，退出码 `2`。进程透传子镜像的退出码。
 
 ### `gugu test`
 
