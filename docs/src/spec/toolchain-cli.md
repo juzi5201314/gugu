@@ -152,6 +152,8 @@ runtime 契约签名的记录目录不计入 executable mono/GIR/LIR body 数量
 
 打印依赖树。`--depth <n>` 限制深度；`--duplicates` 只显示重复版本；`--invert <package>` 显示反向依赖。
 
+`--format json` 发布一个 `package-tree` 事件，payload 的 `roots` 数组按 text 树相同的根顺序排列。每个节点至少含 `name`、`version`、`source`、`repeated`、`truncated` 与 `dependencies`；`source.kind` 为 `path`、`git` 或 `registry`，并分别携带 `path`、`url`/`commit`/`tree` 或 `registry` 字段。`repeated` 标记此前已在同一棵树中出现过的节点，`truncated` 标记深度上限截断的节点。`json-diagnostic-short` 成功时不发布树结果，错误仍按诊断通道输出。
+
 ### `gugu vendor`
 
 生成 `vendor/` 目录，见[包、依赖与构建模型](packages-builds.md)。
@@ -239,6 +241,7 @@ NDJSON，每行一个 JSON 对象。信封：
 - `bench-result`：bench 测量
 - `package-resolve`：依赖解析结果
 - `fmt-diff` / `fmt-result`：格式化检查与结果
+- `package-tree`：依赖树结果
 - `publish-result`：package 发布结果
 - `yank-result`：版本撤回结果
 
