@@ -288,7 +288,7 @@ fn string.lines(self: &Self) impl IntoIter
 
 严格 decode 在第一个非法序列处返回包含 byte/code-unit offset 的 EncodingError；lossy decode 以 U+FFFD 替换每个 maximal invalid subsequence。graphemes 返回 extended grapheme cluster 的 COW string 快照，words 与 lines 按随附 Unicode 版本的默认边界算法返回快照。
 
-工具链升级可以升级 Unicode 数据并改变属性、case mapping、normalization 或 segmentation 结果；`unicode_version` 使程序能够记录该版本。string 的默认 Eq、Ord 与 Hash 始终按原始 UTF-8 byte，不随 Unicode 表改变。
+工具链升级可以升级 Unicode 数据并改变属性、case mapping、normalization 或 segmentation 结果；`unicode_version` 使程序能够记录该版本，当前返回 17.0.0。string 的默认 Eq、Ord 与 Hash 始终按原始 UTF-8 byte，不随 Unicode 表改变。
 
 ## 静态格式化 {#static-formatting}
 

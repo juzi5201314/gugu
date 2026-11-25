@@ -20,6 +20,8 @@ mod signal;
 #[cfg(feature = "slow-tests")]
 mod src;
 #[cfg(feature = "slow-tests")]
+mod text;
+#[cfg(feature = "slow-tests")]
 mod time;
 #[cfg(feature = "slow-tests")]
 mod traits;
