@@ -1,0 +1,7 @@
+//! 重复 close channel 必须走 panic 报告路径。
+
+fn main() {
+    let channel = chan[int](1)
+    channel.close()
+    channel.close()
+}

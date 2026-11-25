@@ -41,5 +41,7 @@ run_case hello 0
 run_case sum 7
 run_case collections 0
 run_case formatting 0
+run_case channel_negative_capacity 1
+run_case channel_double_close 1
 # Bound allocations per process while checking every UAX #15 test row.
 run_case normalization 0 "$fixtures"/NormalizationTest.*.utf8
