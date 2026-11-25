@@ -131,7 +131,6 @@ fn render(source: &str, tokens: &[Token], trivia: &[Trivia]) -> String {
                 output.push('\n');
                 line_start = true;
             }
-            TokenKind::Comma => output.push(' '),
             _ => {}
         }
         previous = Some(token.kind);
@@ -165,8 +164,60 @@ fn needs_space(previous: Option<TokenKind>, current: TokenKind) -> bool {
             | TokenKind::PathSep
             | TokenKind::Semi,
         ) => false,
-        (_, TokenKind::LParen | TokenKind::LBracket) => false,
+        (_, TokenKind::LParen | TokenKind::LBracket) => {
+            !previous.is_some_and(permits_adjacent_delimiter)
+        }
         (Some(TokenKind::Comma), _) => true,
         _ => true,
+    }
+}
+
+fn permits_adjacent_delimiter(kind: TokenKind) -> bool {
+    matches!(
+        kind,
+        TokenKind::Ident
+            | TokenKind::Int
+            | TokenKind::Float
+            | TokenKind::Char
+            | TokenKind::ByteChar
+            | TokenKind::String
+            | TokenKind::ByteString
+            | TokenKind::CString
+            | TokenKind::RawString
+            | TokenKind::FStringEnd
+            | TokenKind::Hash
+            | TokenKind::KwAsm
+            | TokenKind::KwGlobalAsm
+            | TokenKind::KwChan
+            | TokenKind::KwTypeId
+            | TokenKind::KwTypeIdCount
+            | TokenKind::KwSizeOf
+            | TokenKind::KwAlignOf
+            | TokenKind::KwOffsetOf
+            | TokenKind::RParen
+            | TokenKind::RBracket
+    )
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn comma_and_assignment_spacing_follow_style_contract() {
+        let source = "fn main() {\n    let arr=[1,2,3]\n    match arr[0]{1=>println(\"one\"),_=>println(\"other\")}\n}\n";
+        assert_eq!(
+            format_source("main.gg", source).expect("格式化成功"),
+            "fn main() {\n    let arr = [1, 2, 3]\n    match arr[0] {\n        1 => println(\"one\"), _ => println(\"other\")\n    }\n}\n"
+        );
+    }
+
+    #[test]
+    fn call_like_constructions_keep_adjacent_delimiters() {
+        let source = "#[allow(large_copy)]\nfn main() {\n    let c=chan[int](0)\n    _=size_of[int]()\n    unsafe { asm(\"nop\") }\n}\n";
+        assert_eq!(
+            format_source("main.gg", source).expect("格式化成功"),
+            "#[allow(large_copy)]\nfn main() {\n    let c = chan[int](0)\n    _ = size_of[int]()\n    unsafe {\n        asm(\"nop\")\n    }\n}\n"
+        );
     }
 }
