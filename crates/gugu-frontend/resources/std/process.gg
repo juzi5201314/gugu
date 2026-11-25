@@ -21,6 +21,7 @@ impl Command {
         Command { configuration: &configuration }
     }
     pub fn arg(self: &Self, value: OsString) { self.configuration.arguments.push(value) }
+    pub fn args(self: &Self, values: &[OsString]) { for value in values { self.arg(value) } }
     pub fn env(self: &Self, name: OsString, value: OsString) { self.configuration.environment.push((name, Some(value))) }
     pub fn remove_env(self: &Self, name: OsString) { self.configuration.environment.push((name, None)) }
     pub fn cwd(self: &Self, path: Path) { self.configuration.cwd = Some(path) }

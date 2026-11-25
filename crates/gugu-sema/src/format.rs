@@ -74,6 +74,7 @@ fn render(source: &str, tokens: &[Token], trivia: &[Trivia]) -> String {
     let mut output = String::with_capacity(source.len() + 16);
     let mut indent = 0usize;
     let mut line_start = true;
+    let mut before_previous = None;
     let mut previous = None;
     for token in tokens.iter().filter(|token| token.kind != TokenKind::Eof) {
         let start = usize::try_from(token.trivia_start).expect("trivia 下标可表示");
@@ -115,7 +116,7 @@ fn render(source: &str, tokens: &[Token], trivia: &[Trivia]) -> String {
                 line_start = true;
             }
         }
-        if !line_start && needs_space(previous, token.kind) {
+        if !line_start && needs_space(before_previous, previous, token.kind) {
             output.push(' ');
         }
         write_indent(&mut output, indent, line_start);
@@ -131,9 +132,9 @@ fn render(source: &str, tokens: &[Token], trivia: &[Trivia]) -> String {
                 output.push('\n');
                 line_start = true;
             }
-            TokenKind::Comma => output.push(' '),
             _ => {}
         }
+        before_previous = previous;
         previous = Some(token.kind);
     }
     while output.ends_with([' ', '\n']) {
@@ -149,7 +150,11 @@ fn write_indent(output: &mut String, indent: usize, line_start: bool) {
     }
 }
 
-fn needs_space(previous: Option<TokenKind>, current: TokenKind) -> bool {
+fn needs_space(
+    before_previous: Option<TokenKind>,
+    previous: Option<TokenKind>,
+    current: TokenKind,
+) -> bool {
     match (previous, current) {
         (
             Some(TokenKind::LParen | TokenKind::LBracket | TokenKind::Dot | TokenKind::PathSep),
@@ -165,8 +170,104 @@ fn needs_space(previous: Option<TokenKind>, current: TokenKind) -> bool {
             | TokenKind::PathSep
             | TokenKind::Semi,
         ) => false,
-        (_, TokenKind::LParen | TokenKind::LBracket) => false,
+        (_, TokenKind::LParen | TokenKind::LBracket) => {
+            if previous.is_some_and(|kind| unary_prefix(kind, before_previous)) {
+                false
+            } else {
+                !previous.is_some_and(permits_adjacent_delimiter)
+            }
+        }
         (Some(TokenKind::Comma), _) => true,
         _ => true,
+    }
+}
+
+fn unary_prefix(kind: TokenKind, before: Option<TokenKind>) -> bool {
+    if matches!(kind, TokenKind::Not | TokenKind::Tilde) {
+        return true;
+    }
+    matches!(kind, TokenKind::Minus | TokenKind::And | TokenKind::Star)
+        && !before.is_some_and(ends_expression)
+}
+
+fn ends_expression(kind: TokenKind) -> bool {
+    matches!(
+        kind,
+        TokenKind::Ident
+            | TokenKind::Int
+            | TokenKind::Float
+            | TokenKind::Char
+            | TokenKind::ByteChar
+            | TokenKind::String
+            | TokenKind::ByteString
+            | TokenKind::CString
+            | TokenKind::RawString
+            | TokenKind::FStringEnd
+            | TokenKind::FStringInterpClose
+            | TokenKind::KwFalse
+            | TokenKind::KwTrue
+            | TokenKind::RParen
+            | TokenKind::RBracket
+            | TokenKind::RBrace
+            | TokenKind::Question
+    )
+}
+
+fn permits_adjacent_delimiter(kind: TokenKind) -> bool {
+    matches!(
+        kind,
+        TokenKind::Ident
+            | TokenKind::Int
+            | TokenKind::Float
+            | TokenKind::Char
+            | TokenKind::ByteChar
+            | TokenKind::String
+            | TokenKind::ByteString
+            | TokenKind::CString
+            | TokenKind::RawString
+            | TokenKind::FStringEnd
+            | TokenKind::Hash
+            | TokenKind::KwAsm
+            | TokenKind::KwGlobalAsm
+            | TokenKind::KwChan
+            | TokenKind::KwTypeId
+            | TokenKind::KwTypeIdCount
+            | TokenKind::KwSizeOf
+            | TokenKind::KwAlignOf
+            | TokenKind::KwOffsetOf
+            | TokenKind::RParen
+            | TokenKind::RBracket
+    )
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn comma_and_assignment_spacing_follow_style_contract() {
+        let source = "fn main() {\n    let arr=[1,2,3]\n    match arr[0]{1=>println(\"one\"),_=>println(\"other\")}\n}\n";
+        assert_eq!(
+            format_source("main.gg", source).expect("格式化成功"),
+            "fn main() {\n    let arr = [1, 2, 3]\n    match arr[0] {\n        1 => println(\"one\"), _ => println(\"other\")\n    }\n}\n"
+        );
+    }
+
+    #[test]
+    fn unary_and_binary_operator_delimiters_follow_expression_context() {
+        let source = "fn main() {\n    let a=!(1==2)\n    let b=-(1+2)\n    let c=1-(2+3)\n    let d=2*(3+4)\n    _=a\n    _=b\n    _=c\n    _=d\n}\n";
+        assert_eq!(
+            format_source("main.gg", source).expect("格式化成功"),
+            "fn main() {\n    let a = !(1 == 2)\n    let b = -(1 + 2)\n    let c = 1 - (2 + 3)\n    let d = 2 * (3 + 4)\n    _ = a\n    _ = b\n    _ = c\n    _ = d\n}\n"
+        );
+    }
+
+    #[test]
+    fn call_like_constructions_keep_adjacent_delimiters() {
+        let source = "#[allow(large_copy)]\nfn main() {\n    let c=chan[int](0)\n    _=size_of[int]()\n    unsafe { asm(\"nop\") }\n}\n";
+        assert_eq!(
+            format_source("main.gg", source).expect("格式化成功"),
+            "#[allow(large_copy)]\nfn main() {\n    let c = chan[int](0)\n    _ = size_of[int]()\n    unsafe {\n        asm(\"nop\")\n    }\n}\n"
+        );
     }
 }

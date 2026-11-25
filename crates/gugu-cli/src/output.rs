@@ -5,7 +5,7 @@ use std::{
 };
 
 use clap::ValueEnum;
-use gugu_compiler::{Compilation, TargetName};
+use gugu_compiler::{Architecture, Compilation, TargetName};
 use serde_json::{Value, json};
 
 use crate::GlobalArgs;
@@ -113,6 +113,13 @@ fn wants_dump_x64(options: &GlobalArgs) -> bool {
     options.z.iter().any(|flag| flag == "dump-x64")
 }
 
+fn machine_stats_label(target: TargetName) -> &'static str {
+    match target.descriptor().arch {
+        Architecture::X86_64 => "x64",
+        Architecture::Aarch64 => "a64",
+    }
+}
+
 pub(crate) fn print_compilation_text(
     compilation: &Compilation,
     check_only: bool,
@@ -174,7 +181,8 @@ pub(crate) fn print_compilation_text(
             );
         }
         println!(
-            "x64: {} sites, {} bytes, {} relocations",
+            "{}: {} sites, {} bytes, {} relocations",
+            machine_stats_label(plan.target()),
             plan.x64_site_count(),
             plan.x64_encoded_bytes(),
             plan.x64_relocation_count()
@@ -730,4 +738,18 @@ pub(crate) fn redact_secrets(message: &str) -> String {
         redacted.replace_range(start..end, "<redacted>");
     }
     redacted
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn machine_stats_label_follows_target_architecture() {
+        assert_eq!(machine_stats_label(TargetName::X86_64Linux), "x64");
+        assert_eq!(machine_stats_label(TargetName::X86_64Windows), "x64");
+        assert_eq!(machine_stats_label(TargetName::X86_64Macos), "x64");
+        assert_eq!(machine_stats_label(TargetName::Aarch64Linux), "a64");
+        assert_eq!(machine_stats_label(TargetName::Aarch64Macos), "a64");
+    }
 }
