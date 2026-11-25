@@ -7,6 +7,8 @@ accept_cases! {
         "use std.time.{SystemTime}\nfn main() { let a = SystemTime::now()\n _ = a.duration_since(a) }";
     std_time_checked_ops_02: true,
         "use std.time.{Duration, Instant}\nfn main() { let a = Instant::now()\n let d = Duration::from_millis(1)\n _ = a.checked_add(d)\n _ = a.checked_sub(d) }";
+    std_time_instant_comparison_and_subtraction_02a: true,
+        "use std.time.{Duration, Instant}\nfn main() { let a = Instant::now()\n let b = Instant::now()\n let ordered: bool = a < b\n let equal: bool = a == b\n let elapsed: Duration = b - a\n _ = ordered\n _ = equal\n _ = elapsed }";
     std_time_error_result_03: true,
         "use std.time.{Error, SystemTime}\nfn main() { let a = SystemTime::now()\n match a.duration_since(a) { Ok(_) => (), Err(e) => match e { Error::ClockWentBackward => () } } }";
     // `Instant.nanos` 不公开：外部不能构造或读取单调时刻的字面值。
