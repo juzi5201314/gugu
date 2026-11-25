@@ -139,7 +139,7 @@ fn wake_node(node: uint) {
 pub fn channel_new(capacity: int, desc: *()) uint {
     unsafe {
         let processor = proc_of(current_hot())
-        if capacity < 0 { die() }
+        if capacity < 0 { panic("channel capacity must not be negative") }
         let control = heap_alloc(processor, 128)
         let index: uint = 0
         while index < 128 {
@@ -159,7 +159,7 @@ pub fn channel_new(capacity: int, desc: *()) uint {
 
 #[used]
 pub fn channel_close(handle: uint) {
-    if word(handle + 24) != 0 { die() }
+    if word(handle + 24) != 0 { panic("close on closed channel") }
     store_word(handle + 24, 1)
     wake_node(pop_queue(handle + 56))
     wake_node(pop_queue(handle + 64))

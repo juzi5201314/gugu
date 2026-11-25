@@ -1,0 +1,9 @@
+//! 运行时求值的负 channel 容量必须走 panic 报告路径。
+
+use std.env.{args}
+
+fn main() {
+    let n = 0 - args().len()
+    let channel = chan[int](n)
+    channel.close()
+}
