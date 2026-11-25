@@ -1,6 +1,13 @@
 use super::{accept_cases, accepts};
 
 #[test]
+fn command_args_accepts_os_string_slices() {
+    assert!(accepts(
+        "use std.process.{Command}\nuse std.path.{Path, OsString}\nfn os(value: string) OsString = match OsString::from_string(value) { Ok(value) => value, Err(_) => panic(\"编码失败\") }\nfn main() { let command = Command::new(Path::from_string(\"child\"))\n let values = [os(\"a\"), os(\"b\")]\n command.args(values[0..]) }"
+    ));
+}
+
+#[test]
 fn runtime_publish_resolves_imports_and_canonical_paths() {
     assert!(accepts(
         "use std.runtime.{ownership_publish, root_publish}\nfn main() { let a = chan[int](0)\n let b = chan[int](0)\n ownership_publish(a, b)\n root_publish(b, a) }"
