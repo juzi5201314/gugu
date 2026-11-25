@@ -1,5 +1,9 @@
 use std.text.normalization_tables as tables
 
+pub struct UnicodeVersion { pub major: int, pub minor: int, pub patch: int }
+
+pub fn unicode_version() UnicodeVersion = UnicodeVersion { major: 17, minor: 0, patch: 0 }
+
 // 只读快照持有受管切片；切片的 interior root 保持整个 backing 可达。
 pub struct Bytes {
     data: &[byte],
