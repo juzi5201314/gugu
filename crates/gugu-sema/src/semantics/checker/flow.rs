@@ -1,4 +1,7 @@
 use super::*;
+
+#[cfg(test)]
+mod tests;
 impl Checker<'_, '_> {
     pub(super) fn merge(&mut self, base: &State, branches: &[State]) {
         let reachable: Vec<_> = branches.iter().filter(|s| s.reachable).collect();

@@ -7,6 +7,8 @@ mod array_init;
 mod callable;
 #[cfg(feature = "slow-tests")]
 mod comptime;
+#[cfg(feature = "slow-tests")]
+mod discarded_if;
 mod expand;
 mod hir;
 #[cfg(feature = "slow-tests")]
