@@ -37,3 +37,32 @@ accept_cases! {
     std_src_track_caller_as_argument_10: false,
         "#[track_caller]\nfn inner() int { std.src.caller().line }\nfn apply(f: fn() int) int { f() }\nfn main() { _ = apply(inner) }";
 }
+
+#[cfg(feature = "slow-tests")]
+#[test]
+fn std_src_imported_calls_fold_to_literals() {
+    use crate::frontend::hir;
+
+    let output = super::frontend(
+        &[(
+            "main.gg",
+            "use std.src as src\nuse std.src.{line}\nfn main() { let f = src.file()\n let l = line()\n _ = f\n _ = l }",
+        )],
+        &crate::QueryEngine::new(),
+    )
+    .unwrap();
+    let module = output.hir.module();
+    let owner = module
+        .owners
+        .iter()
+        .find(|owner| Some(owner.definition) == module.entry)
+        .unwrap();
+    assert!(owner.expressions.iter().any(|expression| matches!(
+        expression.kind,
+        hir::ExprKind::Literal(hir::Literal::String(_))
+    )));
+    assert!(owner.expressions.iter().any(|expression| matches!(
+        expression.kind,
+        hir::ExprKind::Literal(hir::Literal::Integer(_))
+    )));
+}

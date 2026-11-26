@@ -14,9 +14,11 @@ impl Checker<'_, '_> {
         {
             return None;
         }
+        let source_path = self.model.path(self.module, path);
         let path = self
             .model
-            .external_path(self.module, &self.model.path(self.module, path))?;
+            .external_path(self.module, &source_path)
+            .or_else(|| self.definition_path(&source_path))?;
         let kind = match path.as_str() {
             "std.src.file" => SourceField::File,
             "std.src.line" => SourceField::Line,
@@ -56,6 +58,18 @@ impl Checker<'_, '_> {
             column: span.column(),
         });
         Some(result)
+    }
+
+    fn definition_path(&self, path: &[&str]) -> Option<String> {
+        let definition = self.model.resolve(self.module, path).ok()?;
+        let item = &self.model.modules[definition.module].arena.items[definition.item.0 as usize];
+        let name = self.model.name(definition.module, item.name?);
+        let module = &self.model.modules[definition.module].path;
+        if module.is_empty() {
+            Some(name.to_owned())
+        } else {
+            Some(format!("{module}.{name}"))
+        }
     }
 
     /// `std.src.Location` 的命名类型；`caller()` 的返回类型由它决定。
