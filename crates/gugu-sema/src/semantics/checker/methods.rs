@@ -4,6 +4,9 @@ use super::super::traits::{MemberKind, TraitRef};
 use super::Checker;
 use crate::{DiagnosticCode, Span};
 
+#[cfg(test)]
+mod tests;
+
 impl Checker<'_, '_> {
     pub(super) fn method_call(
         &mut self,
