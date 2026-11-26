@@ -89,6 +89,13 @@ accept_cases! {
     initialization_merges_only_reachable_predecessors_03: false, "fn main() { let x: int\n _ = x }";
 }
 #[cfg(feature = "slow-tests")]
+accept_cases! {
+    panic_requires_a_string_argument_00: true, "fn main() { panic(\"bug\") }";
+    panic_requires_a_string_argument_01: false, "fn main() { panic(42) }";
+    panic_requires_a_string_argument_02: false, "fn main() { panic() }";
+}
+
+#[cfg(feature = "slow-tests")]
 #[test]
 fn boolean_product_coverage_is_structural() {
     assert!(accepts(

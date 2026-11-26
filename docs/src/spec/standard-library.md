@@ -1202,7 +1202,7 @@ fn SignalSubscription.dropped(self: &Self) uint
 
 `signals` 不能为空，重复项合并；默认队列容量为 16，显式容量必须大于 0。一个进程可以有多个订阅，每个订阅收到匹配信号的独立副本。相同信号在同一订阅尚未取走时合并，`occurrences` 饱和递增；计数饱和后的额外到达也计入 `dropped()`。不同信号各占一个队列项。队列满时不阻塞 OS 信号处理路径，新增事件计入 `dropped()`。`recv` 只挂起当前协程，`try_recv` 不阻塞；关闭且取尽队列后返回 `signal.Error::Closed`，未关闭但无事件时 `try_recv` 返回 `signal.Error::Empty`。最后一个 `SignalSubscription` 句柄 lease 释放等价于 `close()`。
 
-`std.panic.panic(message)` 是 `!` 返回的 lang item，必须带 `#[track_caller]`。它与 `catch` 共享当前协程的展开边界；未处理时由[运行时与运维语义](runtime.md)产生 `unhandled-panic` 报告。标准库不提供 Go 式 `recover`，也不提供可以抑制 fatal、替换默认报告或改变退出类别的全局 panic hook。被 `catch` 或 `Join.wait()` 处理的 panic 不自动写 runtime 报告。
+`std.panic.panic(message)` 是 `!` 返回的 lang item，必须带 `#[track_caller]`。它恰好接收一个 `string` 实参；其它类型或实参数量都是编译错误。它与 `catch` 共享当前协程的展开边界；未处理时由[运行时与运维语义](runtime.md)产生 `unhandled-panic` 报告。标准库不提供 Go 式 `recover`，也不提供可以抑制 fatal、替换默认报告或改变退出类别的全局 panic hook。被 `catch` 或 `Join.wait()` 处理的 panic 不自动写 runtime 报告。
 
 ```text
 #[track_caller]
