@@ -250,6 +250,25 @@ fn chained_tuple_field_access_is_not_lexed_as_float() {
 }
 
 #[test]
+fn array_rest_patterns_use_tail_positions() {
+    assert_eq!(
+        printed(
+            r#"
+            use std.io.{println}
+            fn main() {
+                let arr = [1, 2, 3, 4]
+                println(match arr { [.., 4] => true, _ => false })
+                println(match arr { [1, .., 3, 4] => true, _ => false })
+                println(match arr { [.., last] => last, _ => 0 })
+                println(match arr { [first, .., before, last] => first * 100 + before * 10 + last, _ => 0 })
+            }
+            "#,
+        ),
+        "true\ntrue\n4\n134\n"
+    );
+}
+
+#[test]
 fn generic_key_comparisons_dispatch_eq_and_ord() {
     assert_eq!(
         printed(&format!(
