@@ -266,12 +266,10 @@ impl Model<'_> {
                     | "Sub"
                     | "Mul"
                     | "Div"
-                    | "Rem"
                     | "AddAssign"
                     | "SubAssign"
                     | "MulAssign"
                     | "DivAssign"
-                    | "RemAssign"
             ),
             Ty::String => matches!(name, "Add" | "AddAssign"),
             _ => false,

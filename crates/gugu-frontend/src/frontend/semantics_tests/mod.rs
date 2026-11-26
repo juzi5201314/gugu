@@ -62,6 +62,25 @@ fn value_used_if_without_else_is_still_rejected_through_blocks() {
     ));
 }
 
+#[test]
+fn float_remainder_is_rejected_before_backend_lowering() {
+    let compilation = Compiler::shared().compile(CompileRequest::single_file(
+        "main.gg",
+        "fn main() { _ = 7.5 % 2.0 }",
+        TargetName::X86_64Linux,
+    ));
+    assert!(!compilation.is_success());
+    assert!(
+        compilation
+            .diagnostics()
+            .items()
+            .iter()
+            .any(|error| error.code() == crate::DiagnosticCode::InvalidExpression),
+        "{:?}",
+        compilation.diagnostics().items()
+    );
+}
+
 /// 逐条断言的语义用例：一条断言一次整体编译（约 1 秒），聚合会让单个测试超过 3 秒上限，
 /// 因此一行一个测试。`true` 表示该源码必须被接受，`false` 表示必须被拒绝。
 #[cfg(feature = "slow-tests")]

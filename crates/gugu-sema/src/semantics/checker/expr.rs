@@ -603,7 +603,7 @@ impl Checker<'_, '_> {
         let ty = self.unify(left, right, span);
         let valid = match op {
             BinOp::And | BinOp::Or => ty == Ty::Bool,
-            BinOp::BitAnd | BinOp::BitOr | BinOp::BitXor | BinOp::Shl | BinOp::Shr => {
+            BinOp::BitAnd | BinOp::BitOr | BinOp::BitXor | BinOp::Shl | BinOp::Shr | BinOp::Rem => {
                 self.is_integer(&ty)
             }
             BinOp::Eq | BinOp::Ne | BinOp::Lt | BinOp::Le | BinOp::Gt | BinOp::Ge => {
