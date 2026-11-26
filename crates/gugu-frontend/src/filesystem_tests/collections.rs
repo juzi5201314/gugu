@@ -233,7 +233,6 @@ fn tuple_and_variant_patterns_test_every_field() {
 }
 
 #[test]
-<<<<<<< HEAD
 fn struct_patterns_with_rest_use_declared_field_positions() {
     assert_eq!(
         printed(
@@ -253,8 +252,6 @@ fn struct_patterns_with_rest_use_declared_field_positions() {
 }
 
 #[test]
-||||||| bc0c55bb
-=======
 fn array_rest_patterns_use_tail_positions() {
     assert_eq!(
         printed(
@@ -274,7 +271,6 @@ fn array_rest_patterns_use_tail_positions() {
 }
 
 #[test]
->>>>>>> origin/master
 fn generic_key_comparisons_dispatch_eq_and_ord() {
     assert_eq!(
         printed(&format!(
