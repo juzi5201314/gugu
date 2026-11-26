@@ -148,6 +148,10 @@ accept_cases! {
         "fn main() { let n: u128 = 340282366920938463463374607431768211455\n _ = n }";
     literal_bounds_and_signed_patterns_04: false,
         "fn main() { let n: u128 = 340282366920938463463374607431768211456 }";
+    literal_bounds_and_signed_patterns_05: true,
+        "fn main() { let n = -9223372036854775808\n _ = n }";
+    literal_bounds_and_signed_patterns_06: false,
+        "fn main() { let n = 0 - 9223372036854775808\n _ = n }";
 }
 
 #[cfg(feature = "slow-tests")]
