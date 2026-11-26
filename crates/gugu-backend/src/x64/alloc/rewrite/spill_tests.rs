@@ -144,3 +144,30 @@ fn lea_pure_output_reuses_its_spilled_address_scratch() {
     assert_eq!(machine.run(&sequence), Stop::Return);
     assert_eq!(machine.word(stack + 8), 168);
 }
+
+#[test]
+fn spilled_two_address_result_stays_in_scratch_until_last_write() {
+    let mut b = Builder::new();
+    b.emit(
+        "mov",
+        &[OperandKind::Rm64, OperandKind::R64],
+        Access::Read,
+        vec![Operand::Reg(Reg::Virtual(1)), Operand::Reg(Reg::Virtual(0))],
+    );
+    b.emit(
+        "imul",
+        &[OperandKind::Rm64, OperandKind::R64],
+        Access::Read,
+        vec![
+            Operand::Reg(Reg::Gpr(Gpr::Rbx)),
+            Operand::Reg(Reg::Virtual(0)),
+        ],
+    );
+    let sequence = allocated(b.finish());
+    let mut machine = Machine::new(&[]);
+    let stack = machine.get(Gpr::Rsp);
+    machine.put(stack + 8, 5);
+    machine.set_reg(Gpr::Rbx, 7);
+    assert_eq!(machine.run(&sequence), Stop::Return);
+    assert_eq!(machine.word(stack), 35);
+}
