@@ -102,6 +102,8 @@ GirLocal {
 - `Downcast(VariantId)`；
 - `OpaqueCast(TyId)`。
 
+`ConstantIndex { offset, from_end: true }` 的 `offset` 是从尾部起计的 1 基距离：`1` 是最后一个元素、`2` 是倒数第二个元素；`from_end: false` 的 `offset` 仍是从头部起计的 0 基下标。
+
 投影序列存入 body 级连续 pool，`Place` 只保存 base 和 range。一个 place 中所有会执行用户代码或 panic 的下标表达式必须先求值到 local；投影本身不能隐藏调用。方法接收者按派发记录的解引用次数在原槽上追加 `Deref`，引用形参再对这个投影做 `Ref`；不能先复制被引用聚合再借用副本。`std.ptr.addr_of` 的实参是位点：降成 `RawAddress` 时必须保留该位点的投射链，不能像按值实参那样先求值成临时量再取址——那样拿到的是副本的地址，写穿与对象内偏移都不再成立。
 
 `Operand` 固定为 `Copy(Place)`、`MoveInternal(Place)`、`Constant(ConstId)`、
