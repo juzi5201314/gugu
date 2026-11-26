@@ -4,7 +4,7 @@ use super::{
     model::{DefRef, Model, Ty},
     patterns,
 };
-use crate::{Diagnostic, DiagnosticCode, Span};
+use crate::{Diagnostic, DiagnosticCode, Span, TargetName};
 use std::collections::BTreeMap;
 mod array_init;
 mod assembly;
@@ -72,6 +72,7 @@ struct Checker<'m, 'a> {
     model: &'m Model<'a>,
     early: &'m super::comptime::EarlyConstTable,
     module: usize,
+    target: TargetName,
     slots: Vec<Slot>,
     state: State,
     errors: Vec<Diagnostic>,
@@ -128,6 +129,7 @@ pub(super) fn check(
     model: &Model<'_>,
     early: &super::comptime::EarlyConstTable,
     installed: Option<&crate::sema_prefix::SemaPrefix>,
+    target: TargetName,
 ) -> Result<super::output::CheckedSemantics, Vec<Diagnostic>> {
     let mut errors = Vec::new();
     let mut bodies = Vec::new();
@@ -155,7 +157,7 @@ pub(super) fn check(
             if !parsed.configured.item_active(ItemId(index as u32)) {
                 continue;
             }
-            let mut checker = Checker::new(model, early, module);
+            let mut checker = Checker::new(model, early, module, target);
             match item.kind {
                 ItemKind::Function(id) => {
                     checker.function(id, None);
@@ -307,11 +309,13 @@ impl<'m, 'a> Checker<'m, 'a> {
         model: &'m Model<'a>,
         early: &'m super::comptime::EarlyConstTable,
         module: usize,
+        target: TargetName,
     ) -> Self {
         Self {
             model,
             early,
             module,
+            target,
             slots: Vec::new(),
             state: State {
                 names: BTreeMap::new(),

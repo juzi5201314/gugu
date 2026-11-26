@@ -6,7 +6,23 @@ use super::super::model::ConstantValue;
 use super::*;
 
 impl Checker<'_, '_> {
+    fn asm_target_unsupported(&self) -> bool {
+        matches!(
+            self.target,
+            TargetName::Aarch64Linux | TargetName::Aarch64Macos
+        )
+    }
+
     pub(super) fn global_asm(&mut self, template: ExprId) {
+        if self.asm_target_unsupported() {
+            let span = self.arena().exprs[template.0 as usize].span.clone();
+            self.error(
+                DiagnosticCode::InvalidExpression,
+                format!("目标 {} 暂不支持 global_asm", self.target),
+                span,
+            );
+            return;
+        }
         if let Some(template_text) = self.assembly_template(template) {
             self.assembly.push(AssemblyPlan {
                 expression: template,
@@ -35,6 +51,14 @@ impl Checker<'_, '_> {
                 }
             });
         let span = &self.arena().exprs[expression.0 as usize].span;
+        if self.asm_target_unsupported() {
+            self.error(
+                DiagnosticCode::InvalidExpression,
+                format!("目标 {} 暂不支持 asm", self.target),
+                span.clone(),
+            );
+            return Ty::Error;
+        }
         if self.unsafe_depth == 0 && context != AssemblyContext::Naked {
             self.error(
                 DiagnosticCode::InvalidExpression,

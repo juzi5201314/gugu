@@ -54,7 +54,7 @@ pub(super) fn check(
             early_dependency.key().clone(),
             early_dependency.fingerprint(),
         );
-        match checker::check(model, early, installed) {
+        match checker::check(model, early, installed, cfg.target()) {
             Ok(mut output) => {
                 output.input_fingerprint = input_fingerprint;
                 Ok((
