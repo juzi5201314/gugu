@@ -79,6 +79,24 @@ fn comptime_fstrings_apply_static_format_codes() {
 }
 
 #[test]
+fn comptime_fstrings_decode_text_escapes() {
+    let source =
+        "const LINE: string = f\"x\\ny\"\nconst ESCAPED: string = f\"a\\t\\\\b\"\nfn main() {}";
+    let output = frontend(&[("main.gg", source)], &QueryEngine::new()).expect("f-string 转义求值");
+    let values: Vec<_> = output
+        .semantics
+        .early_constants
+        .constants
+        .iter()
+        .filter(|entry| entry.key.expr == u32::MAX)
+        .map(|entry| entry.value.clone())
+        .collect();
+    use comptime::eval::ConstantValue;
+    assert!(values.contains(&ConstantValue::String("x\ny".to_owned())));
+    assert!(values.contains(&ConstantValue::String("a\t\\b".to_owned())));
+}
+
+#[test]
 fn comptime_format_faults_are_diagnostics() {
     // 负的动态计数是 comptime panic。
     let codes = diagnostics_of(
