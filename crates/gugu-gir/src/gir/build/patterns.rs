@@ -310,23 +310,48 @@ impl Builder<'_> {
         ok: BlockId,
         fail: BlockId,
     ) -> Result<(), Diagnostic> {
-        let mut patterns =
+        let prefix_patterns =
             self.owner.pattern_ids[prefix.start as usize..prefix.end as usize].to_vec();
-        patterns.extend(
-            self.owner.pattern_ids[suffix.start as usize..suffix.end as usize]
-                .iter()
-                .copied(),
-        );
-        self.test_fields(
-            place,
-            &patterns,
-            |index, _| Projection::ConstantIndex {
-                offset: u64::from(index),
-                from_end: false,
-            },
-            ok,
-            fail,
-        )
+        let suffix_patterns =
+            self.owner.pattern_ids[suffix.start as usize..suffix.end as usize].to_vec();
+        if prefix_patterns.is_empty() && suffix_patterns.is_empty() {
+            self.goto(ok);
+            return Ok(());
+        }
+        if !prefix_patterns.is_empty() {
+            let next = if suffix_patterns.is_empty() {
+                ok
+            } else {
+                self.fresh(false)
+            };
+            self.test_fields(
+                place,
+                &prefix_patterns,
+                |index, _| Projection::ConstantIndex {
+                    offset: u64::from(index),
+                    from_end: false,
+                },
+                next,
+                fail,
+            )?;
+            if next != ok {
+                self.switch_to(next);
+            }
+        }
+        if !suffix_patterns.is_empty() {
+            let suffix_len = suffix.end - suffix.start;
+            self.test_fields(
+                place,
+                &suffix_patterns,
+                |index, _| Projection::ConstantIndex {
+                    offset: u64::from(suffix_len - index),
+                    from_end: true,
+                },
+                ok,
+                fail,
+            )?;
+        }
+        Ok(())
     }
 
     fn test_or(
@@ -456,6 +481,7 @@ impl Builder<'_> {
             let dest = self.hir_to_gir[local.index()];
             self.assign(Place::local(dest), Rvalue::Use(Operand::Copy(place)));
         }
+        let suffix_len = suffix.end - suffix.start;
         for (index, inner) in self.owner.pattern_ids[suffix.start as usize..suffix.end as usize]
             .iter()
             .enumerate()
@@ -463,7 +489,7 @@ impl Builder<'_> {
             let field = self.project(
                 place,
                 Projection::ConstantIndex {
-                    offset: index as u64,
+                    offset: u64::from(suffix_len - index as u32),
                     from_end: true,
                 },
             );
