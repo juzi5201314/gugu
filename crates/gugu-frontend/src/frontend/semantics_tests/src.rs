@@ -36,6 +36,18 @@ accept_cases! {
     /* track_caller 函数作实参同样拒。*/
     std_src_track_caller_as_argument_10: false,
         "#[track_caller]\nfn inner() int { std.src.caller().line }\nfn apply(f: fn() int) int { f() }\nfn main() { _ = apply(inner) }";
+    /* 项导入的源位置查询在 const 初始化器中按定义身份早期求值。*/
+    std_src_item_import_early_const_11: true,
+        "use std.src.{line}\nconst L: int = line()\nfn main() { _ = L }";
+    /* 模块别名路径在 const 初始化器中同样折叠。*/
+    std_src_module_alias_early_const_12: true,
+        "use std.src as src\nconst L: int = src.line()\nfn main() { _ = L }";
+    /* 重命名项导入在 const 初始化器中同样折叠。*/
+    std_src_renamed_import_early_const_13: true,
+        "use std.src.{line as source_line}\nconst L: int = source_line()\nfn main() { _ = L }";
+    /* 宏脚本里的本地绑定遮蔽同名导入，不再按 std.src 源位置查询求值。*/
+    std_src_source_expand_local_shadow_14: false,
+        "use std.src.{line}\nfn main() { let v = comptime source {\n let line = 1\n line()\n std.syntax.parse_expr(\"1\")\n}\n _ = v }";
 }
 
 #[cfg(feature = "slow-tests")]

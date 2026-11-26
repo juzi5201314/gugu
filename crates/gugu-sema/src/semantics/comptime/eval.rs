@@ -1274,7 +1274,9 @@ impl Model<'_> {
             });
         }
         self.check_capability(module, &segments, &span, state)?;
-        if let Some(value) = self.src_builtin(module, expression, &segments, args, &span)? {
+        if state.slot(segments[0]).is_none()
+            && let Some(value) = self.src_builtin(module, expression, &segments, args, &span)?
+        {
             return Ok(value);
         }
         let definition = self.resolve(module, &segments);
@@ -1321,7 +1323,7 @@ impl Model<'_> {
         args: AstRange<ExprId>,
         span: &crate::Span,
     ) -> EvalResult<Option<ConstantValue>> {
-        let Some(canonical) = self.external_path(module, segments) else {
+        let Some(canonical) = self.canonical_item_path(module, segments) else {
             return Ok(None);
         };
         let kind = match canonical.as_str() {
