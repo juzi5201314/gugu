@@ -373,8 +373,12 @@ impl Checker<'_, '_> {
                 );
             }
             Ty::Unit
-        } else {
+        } else if value_used {
             self.join(&left, &right, &self.arena().exprs[cond.0 as usize].span)
+        } else if self.resolve(&left) == Ty::Never && self.resolve(&right) == Ty::Never {
+            Ty::Never
+        } else {
+            Ty::Unit
         }
     }
     pub(super) fn matching(

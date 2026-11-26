@@ -342,9 +342,10 @@ impl Builder<'_> {
         then_value: ExprId,
         else_value: Option<ExprId>,
     ) -> Result<Option<LocalId>, Diagnostic> {
+        let unit_result = matches!(self.module.types[self.expr_ty(id).index()], hir::Type::Unit);
         self.switch_to(blocks.then_block);
         if let Some(value) = self.emit_expr(then_value)? {
-            if else_value.is_none() {
+            if else_value.is_none() || unit_result {
                 self.assign_unit(dest);
             } else {
                 self.assign_copy(Place::local(dest), value);
@@ -354,7 +355,11 @@ impl Builder<'_> {
         self.switch_to(blocks.else_block);
         if let Some(else_value) = else_value {
             if let Some(value) = self.emit_expr(else_value)? {
-                self.assign_copy(Place::local(dest), value);
+                if unit_result {
+                    self.assign_unit(dest);
+                } else {
+                    self.assign_copy(Place::local(dest), value);
+                }
                 self.goto(blocks.join);
             }
         } else {
