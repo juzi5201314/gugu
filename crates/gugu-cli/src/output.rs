@@ -120,6 +120,13 @@ fn machine_stats_label(target: TargetName) -> &'static str {
     }
 }
 
+fn image_len(plan: &gugu_compiler::ImagePlan) -> usize {
+    plan.linux_image()
+        .len()
+        .max(plan.windows_image().len())
+        .max(plan.macos_image().len())
+}
+
 pub(crate) fn print_compilation_text(
     compilation: &Compilation,
     check_only: bool,
@@ -177,7 +184,7 @@ pub(crate) fn print_compilation_text(
                 "build succeeded: target={}, entry={}, image {} bytes",
                 plan.target(),
                 plan.entry(),
-                plan.linux_image().len().max(plan.windows_image().len())
+                image_len(plan)
             );
         }
         println!(
@@ -751,5 +758,25 @@ mod tests {
         assert_eq!(machine_stats_label(TargetName::X86_64Macos), "x64");
         assert_eq!(machine_stats_label(TargetName::Aarch64Linux), "a64");
         assert_eq!(machine_stats_label(TargetName::Aarch64Macos), "a64");
+    }
+
+    #[test]
+    fn image_len_includes_macho_bytes() {
+        let compilation = gugu_compiler::Compiler::with_artifacts(
+            &gugu_compiler::EMBEDDED_ARTIFACTS,
+        )
+        .compile(gugu_compiler::CompileRequest::single_file(
+            "main.gg",
+            "fn main() {}",
+            TargetName::Aarch64Macos,
+        ));
+        assert!(
+            compilation.is_success(),
+            "{:?}",
+            compilation.diagnostics().items()
+        );
+        let plan = compilation.image_plan().expect("镜像计划");
+        assert!(!plan.macos_image().is_empty());
+        assert_eq!(image_len(plan), plan.macos_image().len());
     }
 }
