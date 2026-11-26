@@ -294,6 +294,19 @@ impl Checker<'_, '_> {
         }
         Some(Ty::Named(id, types))
     }
+
+    pub(super) fn explicit_constructor_type(&mut self, path: PathId, span: &Span) -> Option<Ty> {
+        let arena = self.arena();
+        let segments = arena.paths[path.0 as usize]
+            .segments
+            .as_slice(&arena.segments);
+        let last = segments.last()?;
+        if segments.len() < 2 || !last.colon || segments[segments.len() - 2].args.len == 0 {
+            return None;
+        }
+        self.type_head(path, span)
+    }
+
     #[expect(
         clippy::too_many_arguments,
         reason = "方法调用检查需要接收者、trait 接口、类型实参与期望类型"

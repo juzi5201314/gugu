@@ -152,6 +152,16 @@ accept_cases! {
 
 #[cfg(feature = "slow-tests")]
 accept_cases! {
+    explicit_generic_variant_constructors_use_type_arguments_00: true,
+        "enum Either[L, R] { Left(L), Right(R) }\nenum E[T] { Unit, Tuple(T), Rec { x: T } }\nfn main() { let e = Either[int, string]::Left(42)\n match e { Either::Left(v) => { _ = v }, Either::Right(s) => { _ = s } }\n let a = E[int]::Unit\n let b = E[int]::Tuple(1)\n let c = E[int]::Rec { x: 2 }\n _ = a\n _ = b\n _ = c }";
+    explicit_generic_variant_constructors_use_type_arguments_01: false,
+        "enum Either[L, R] { Left(L), Right(R) }\nfn main() { _ = Either[int, string]::Left(\"wrong\") }";
+    explicit_generic_variant_constructors_use_type_arguments_02: false,
+        "enum Either[L, R] { Left(L), Right(R) }\nfn main() { _ = Either[int]::Left(42) }";
+}
+
+#[cfg(feature = "slow-tests")]
+accept_cases! {
     try_failures_join_initialization_before_the_expression_00: true,
         "fn f(o: Option[int]) Option[int] { let x = o?\n Some(x) }\nfn main() {}";
     try_failures_join_initialization_before_the_expression_01: false,
