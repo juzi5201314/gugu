@@ -142,6 +142,28 @@ fn len_is_available_in_source_macro_scripts() {
     assert!(accepts(
         "fn main() { let v = comptime source {\n    let xs = [1, 2, 3]\n    if xs.len() == 3 {\n        std.syntax.parse_expr(\"1\")\n    } else {\n        std.syntax.parse_expr(\"2\")\n    }\n}\n _ = v }"
     ));
+    assert!(accepts(
+        "const S: string = \"abc\"\nfn main() { let v = comptime source {\n    if S.len() == 3 {\n        std.syntax.parse_expr(\"1\")\n    } else {\n        std.syntax.parse_expr(\"2\")\n    }\n}\n _ = v }"
+    ));
+    assert!(accepts(
+        "const N = \"abc\".len()\nconst A = [1, 2].len()\nfn main() { _ = N\n _ = A }"
+    ));
+}
+
+#[test]
+fn constant_paths_are_len_receivers_in_source_macro_scripts() {
+    let queries = crate::QueryEngine::new();
+    super::frontend(
+        &[
+            (
+                "main.gg",
+                "use constants\nuse constants.{S as T}\nfn main() {\n let a = comptime source {\n    if T.len() == 3 { std.syntax.parse_expr(\"1\") } else { std.syntax.parse_expr(\"2\") }\n}\n let b = comptime source {\n    if constants.S.len() == 3 { std.syntax.parse_expr(\"1\") } else { std.syntax.parse_expr(\"2\") }\n}\n _ = a\n _ = b }",
+            ),
+            ("constants.gg", "pub const S: string = \"abc\""),
+        ],
+        &queries,
+    )
+    .unwrap();
 }
 
 #[test]

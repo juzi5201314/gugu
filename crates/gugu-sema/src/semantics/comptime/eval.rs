@@ -10,7 +10,7 @@ use super::super::super::ast::{
     AssignOp, AstRange, BinOp, ExprId, ExprKind, FStringPart, FnBody, IndexKind, ItemKind, LitKind,
     PatId, PatKind, StmtId, StmtKind, UnOp,
 };
-use super::super::model::{DefRef, Model, Ty};
+use super::super::model::{ArrayLength, DefRef, Model, Ty};
 use super::super::traits::MemberKind;
 use super::registry::{self, Domain};
 use crate::query::{QueryEngine, QueryKey, QueryKind};
@@ -356,6 +356,45 @@ impl Model<'_> {
         self.constant_type_inner(module, expr, &mut Vec::new())
     }
 
+    fn constant_path_type(
+        &self,
+        module: usize,
+        segments: &[&str],
+        stack: &mut Vec<DefRef>,
+    ) -> Result<Option<Ty>, Diagnostic> {
+        for end in (1..=segments.len()).rev() {
+            let Ok(def) = self.resolve(module, &segments[..end]) else {
+                continue;
+            };
+            if stack.contains(&def) {
+                return Err(self.error(module, "常量类型推断形成循环"));
+            }
+            let item = &self.modules[def.module].arena.items[def.item.0 as usize].kind;
+            let mut ty = match item {
+                ItemKind::Const { ty: Some(ty), .. } | ItemKind::Static { ty, .. } => {
+                    self.form(def.module, *ty)?
+                }
+                ItemKind::Const {
+                    value: Some(value), ..
+                } => {
+                    stack.push(def);
+                    let ty = self.constant_type_inner(def.module, *value, stack);
+                    stack.pop();
+                    ty?
+                }
+                _ => continue,
+            };
+            for field in &segments[end..] {
+                let Some((_, next, _)) = self.find_field(&ty, field) else {
+                    return Err(self.error(module, "常量接收者缺少字段"));
+                };
+                ty = next;
+            }
+            return Ok(Some(ty));
+        }
+        Ok(None)
+    }
+
     fn constant_type_inner(
         &self,
         module: usize,
@@ -428,11 +467,37 @@ impl Model<'_> {
             } => Ok(Ty::TypeId),
             ExprKind::Intrinsic { .. } => Ok(Ty::int()),
             ExprKind::Comptime(inner) => self.constant_type_inner(module, inner, stack),
+            ExprKind::Array(elements) => {
+                let elements = elements.as_slice(&self.modules[module].arena.expr_ids);
+                let Some((&first, rest)) = elements.split_first() else {
+                    return Err(self.error(module, "无法推断空数组常量元素类型"));
+                };
+                let element = self.constant_type_inner(module, first, stack)?;
+                for &item in rest {
+                    if self.constant_type_inner(module, item, stack)? != element {
+                        return Err(self.error(module, "常量数组元素类型不一致"));
+                    }
+                }
+                Ok(Ty::Array(
+                    Box::new(element),
+                    ArrayLength::Known(u64::try_from(elements.len()).expect("数组长度可编码")),
+                ))
+            }
             ExprKind::Call { callee, .. } => {
                 match self.modules[module].arena.exprs[callee.0 as usize].kind {
-                    ExprKind::Field { base, name }
-                        if self.constant_type_inner(module, base, stack)? == Ty::TypeId =>
-                    {
+                    ExprKind::Field { base, name } => {
+                        let receiver = self.constant_type_inner(module, base, stack)?;
+                        if self.name(module, name) == "len"
+                            && matches!(
+                                receiver.strip_refs(),
+                                Ty::String | Ty::Array(_, _) | Ty::Slice(_)
+                            )
+                        {
+                            return Ok(Ty::int());
+                        }
+                        if receiver != Ty::TypeId {
+                            return Err(self.error(module, "无法形成常量调用类型"));
+                        }
                         match self.name(module, name) {
                             "name" => Ok(Ty::String),
                             "as_int" => Ok(Ty::int()),
@@ -440,7 +505,24 @@ impl Model<'_> {
                         }
                     }
                     ExprKind::Path(path) => {
-                        let def = self.resolve(module, &self.path(module, path))?;
+                        let segments = self.path(module, path);
+                        if segments.len() >= 2
+                            && segments[segments.len() - 1] == "len"
+                            && let Some(receiver) = self.constant_path_type(
+                                module,
+                                &segments[..segments.len() - 1],
+                                stack,
+                            )?
+                        {
+                            if matches!(
+                                receiver.strip_refs(),
+                                Ty::String | Ty::Array(_, _) | Ty::Slice(_)
+                            ) {
+                                return Ok(Ty::int());
+                            }
+                            return Err(self.error(module, "无法形成常量调用类型"));
+                        }
+                        let def = self.resolve(module, &segments)?;
                         let signature = self.value_type(def)?;
                         Ok(signature
                             .signature()
@@ -1224,6 +1306,37 @@ impl Model<'_> {
         Ok(())
     }
 
+    fn constant_receiver(
+        &self,
+        module: usize,
+        expression: ExprId,
+        segments: &[&str],
+        state: &mut EvalState,
+    ) -> EvalResult<Option<ConstantValue>> {
+        for end in (1..=segments.len()).rev() {
+            let Ok(def) = self.resolve(module, &segments[..end]) else {
+                continue;
+            };
+            if !matches!(
+                self.modules[def.module].arena.items[def.item.0 as usize].kind,
+                ItemKind::Const { .. }
+            ) {
+                continue;
+            }
+            let mut receiver = self.item_const_value(def, state)?;
+            for field in &segments[end..] {
+                let ConstantValue::Struct(mut fields) = receiver else {
+                    return Err(self.fail(module, expression, "comptime 方法接收者缺少字段"));
+                };
+                receiver = fields
+                    .remove(*field)
+                    .ok_or_else(|| self.fail(module, expression, "comptime 方法接收者缺少字段"))?;
+            }
+            return Ok(Some(receiver));
+        }
+        Ok(None)
+    }
+
     fn builtin_method_value(
         &self,
         module: usize,
@@ -1290,25 +1403,30 @@ impl Model<'_> {
             return Err(self.fail(module, expression, "comptime 只支持直接路径调用"));
         };
         let segments = self.path(module, path);
-        if segments.len() >= 2
-            && let Some(mut receiver) = state.lookup(segments[0], &span)?
-        {
-            for field in &segments[1..segments.len() - 1] {
-                let ConstantValue::Struct(mut fields) = receiver else {
-                    return Err(self.fail(module, expression, "comptime 方法接收者缺少字段"));
-                };
-                receiver = fields
-                    .remove(*field)
-                    .ok_or_else(|| self.fail(module, expression, "comptime 方法接收者缺少字段"))?;
+        if segments.len() >= 2 {
+            let receiver = if let Some(mut receiver) = state.lookup(segments[0], &span)? {
+                for field in &segments[1..segments.len() - 1] {
+                    let ConstantValue::Struct(mut fields) = receiver else {
+                        return Err(self.fail(module, expression, "comptime 方法接收者缺少字段"));
+                    };
+                    receiver = fields.remove(*field).ok_or_else(|| {
+                        self.fail(module, expression, "comptime 方法接收者缺少字段")
+                    })?;
+                }
+                Some(receiver)
+            } else {
+                self.constant_receiver(module, expression, &segments[..segments.len() - 1], state)?
+            };
+            if let Some(receiver) = receiver {
+                let method = segments[segments.len() - 1];
+                let arguments = self.value_list(module, args, state)?;
+                if let Some(value) =
+                    self.builtin_method_value(module, expression, &receiver, method, &arguments)?
+                {
+                    return Ok(value);
+                }
+                return Err(self.fail(module, expression, "无法在编译期解析被调函数"));
             }
-            let method = segments[segments.len() - 1];
-            let arguments = self.value_list(module, args, state)?;
-            if let Some(value) =
-                self.builtin_method_value(module, expression, &receiver, method, &arguments)?
-            {
-                return Ok(value);
-            }
-            return Err(self.fail(module, expression, "无法在编译期解析被调函数"));
         }
         if segments == ["panic"] {
             return self.comptime_panic(module, args, &span, state);
