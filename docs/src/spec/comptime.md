@@ -353,7 +353,8 @@ vtable、`type_id` 和 C 回调等全部根判断，不能靠文本搜索。
 和 `OnceLock::new` 只允许生成可物化的初始位状态，不执行同步动作、不取得 lease、
 不建立运行时 happens-before；相应的 load/store/lock/wait/notify 操作仍禁止。
 读取未初始化值、越界、除零、无效转换、显式 panic 或违反 unsafe 前置条件都转成带
-源范围的编译错误；comptime 不产生可被目标程序捕获的 Panic 值。
+源范围的编译错误；comptime 不产生可被目标程序捕获的 Panic 值。字符串、数组与切片的
+`len()` 是确定性长度查询，字符串长度按 byte 计，数组与切片长度按元素数计。
 
 允许的状态只存在于本次 comptime 求值：局部槽、comptime 堆、常量依赖和显式
 `embed_file` 输入。禁止读取宿主时间、随机数、环境变量、网络、目标进程 I/O、操作系统

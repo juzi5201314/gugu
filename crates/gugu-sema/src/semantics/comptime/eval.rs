@@ -1224,6 +1224,30 @@ impl Model<'_> {
         Ok(())
     }
 
+    fn builtin_method_value(
+        &self,
+        module: usize,
+        expression: ExprId,
+        receiver: &ConstantValue,
+        name: &str,
+        arguments: &[ConstantValue],
+    ) -> EvalResult<Option<ConstantValue>> {
+        if name != "len" {
+            return Ok(None);
+        }
+        if !arguments.is_empty() {
+            return Err(self.fail(module, expression, "len 方法不接收参数"));
+        }
+        let len = match receiver {
+            ConstantValue::String(text) => text.len(),
+            ConstantValue::Array(values) => values.len(),
+            _ => return Ok(None),
+        };
+        Ok(Some(ConstantValue::Int(i128::try_from(len).map_err(
+            |_| self.fail(module, expression, "comptime 长度超出 int 可表示范围"),
+        )?)))
+    }
+
     fn call_value(
         &self,
         module: usize,
@@ -1235,13 +1259,23 @@ impl Model<'_> {
         let arena = &self.modules[module].arena;
         let span = arena.exprs[expression.0 as usize].span.clone();
         if let ExprKind::Field { base, name } = arena.exprs[callee.0 as usize].kind {
+            let method = self.name(module, name);
+            let receiver = self.value(module, base, state)?;
+            if method == "len" {
+                let arguments = self.value_list(module, args, state)?;
+                if let Some(value) =
+                    self.builtin_method_value(module, expression, &receiver, method, &arguments)?
+                {
+                    return Ok(value);
+                }
+            }
             if args.len != 0 {
                 return Err(self.fail(module, expression, "TypeId 方法不接收参数"));
             }
-            let ConstantValue::Type(ty) = self.value(module, base, state)? else {
+            let ConstantValue::Type(ty) = receiver else {
                 return Err(self.fail(module, expression, "comptime 方法要求 TypeId"));
             };
-            return match self.name(module, name) {
+            return match method {
                 "name" => Ok(ConstantValue::String(self.describe(&ty))),
                 "as_int" => Err(Diagnostic::error(
                     DiagnosticCode::LateComptime,
@@ -1256,6 +1290,26 @@ impl Model<'_> {
             return Err(self.fail(module, expression, "comptime 只支持直接路径调用"));
         };
         let segments = self.path(module, path);
+        if segments.len() >= 2
+            && let Some(mut receiver) = state.lookup(segments[0], &span)?
+        {
+            for field in &segments[1..segments.len() - 1] {
+                let ConstantValue::Struct(mut fields) = receiver else {
+                    return Err(self.fail(module, expression, "comptime 方法接收者缺少字段"));
+                };
+                receiver = fields
+                    .remove(*field)
+                    .ok_or_else(|| self.fail(module, expression, "comptime 方法接收者缺少字段"))?;
+            }
+            let method = segments[segments.len() - 1];
+            let arguments = self.value_list(module, args, state)?;
+            if let Some(value) =
+                self.builtin_method_value(module, expression, &receiver, method, &arguments)?
+            {
+                return Ok(value);
+            }
+            return Err(self.fail(module, expression, "无法在编译期解析被调函数"));
+        }
         if segments == ["panic"] {
             return self.comptime_panic(module, args, &span, state);
         }

@@ -135,6 +135,16 @@ fn generated_items_respect_cfg_pruning() {
 }
 
 #[test]
+fn len_is_available_in_source_macro_scripts() {
+    assert!(accepts(
+        "fn main() { let v = comptime source {\n    let s = \"abc\"\n    if s.len() == 3 {\n        std.syntax.parse_expr(\"1\")\n    } else {\n        std.syntax.parse_expr(\"2\")\n    }\n}\n _ = v }"
+    ));
+    assert!(accepts(
+        "fn main() { let v = comptime source {\n    let xs = [1, 2, 3]\n    if xs.len() == 3 {\n        std.syntax.parse_expr(\"1\")\n    } else {\n        std.syntax.parse_expr(\"2\")\n    }\n}\n _ = v }"
+    ));
+}
+
+#[test]
 fn type_error_in_generated_code_anchors_at_macro_call() {
     // 生成代码类型错误：主诊断 span 锚定在宏调用点（原始源码），附注携带展开链。
     let compilation = compile(
