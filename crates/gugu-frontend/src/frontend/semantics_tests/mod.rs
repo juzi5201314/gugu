@@ -152,6 +152,14 @@ accept_cases! {
 
 #[cfg(feature = "slow-tests")]
 accept_cases! {
+    qualified_user_variants_do_not_use_prelude_constructors_00: true,
+        "enum Mine { Ok(int), Err(string) }\nenum Other { Some(int), None }\nfn main() { let x = Mine::Ok(42)\n let y = Other::Some(1)\n let z = Other::None\n match x { Mine::Ok(v) => { _ = v }, Mine::Err(e) => { _ = e } }\n _ = y\n _ = z\n let r: Result[int, string] = Result::Ok(1)\n let o: Option[int] = Option::Some(1)\n _ = r\n _ = o }";
+    qualified_user_variants_do_not_use_prelude_constructors_01: false,
+        "enum Mine { Ok(int), Err(string) }\nfn main() { _ = Mine::Ok(\"wrong\") }";
+}
+
+#[cfg(feature = "slow-tests")]
+accept_cases! {
     try_failures_join_initialization_before_the_expression_00: true,
         "fn f(o: Option[int]) Option[int] { let x = o?\n Some(x) }\nfn main() {}";
     try_failures_join_initialization_before_the_expression_01: false,
