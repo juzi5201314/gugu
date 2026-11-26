@@ -290,6 +290,10 @@ impl Checker<'_, '_> {
                     "类型实参数量不符",
                     span.clone(),
                 );
+            } else if !arguments.is_empty()
+                && let Err(error) = self.model.check_generic_kinds(def, &types)
+            {
+                self.errors.push(error);
             }
         }
         Some(Ty::Named(id, types))

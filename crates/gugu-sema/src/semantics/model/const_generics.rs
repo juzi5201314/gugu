@@ -182,7 +182,7 @@ impl Model<'_> {
         }
         Ok(())
     }
-    pub(super) fn check_generic_kinds(
+    pub(in super::super) fn check_generic_kinds(
         &self,
         definition: DefRef,
         arguments: &[Ty],
