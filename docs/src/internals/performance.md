@@ -15,6 +15,29 @@ artifact 中的生产 LIR，并为每个场景创建独立内存与平台钩子�
 栈图与目标 ABI 的集成检查仍单独执行完整编译。教程围栏逐块验证，较重章节按
 围栏拆分，不能通过跳过示例或删减协议断言缩短默认套件。
 
+### CI 执行与缓存
+
+`.github/workflows/ci.yml` 保留 `Rust checks`、`Rust lint`、mdBook 与 Linux
+可执行程序验收。`Rust checks` 直接由 nextest 构建并运行测试，不再先执行一次
+`cargo build --workspace`；普通 CLI 镜像仍由可执行程序验收独立构建。
+格式检查与 `cargo clippy --workspace --all-targets -- -D warnings` 在
+`Rust lint` 中执行，与测试并行，不删减目标或放宽诊断。
+
+变更分流只把 `docs/` 和 `book.toml` 视为纯文档输入。PR 按整个 PR 相对目标分支的
+差异判断，`master` push 按本次 push 前后的差异判断；混合变更、工作流、Cargo
+配置、源码、资源和 fixtures 变更都执行完整 Rust 测试、lint 与可执行程序验收。
+纯文档变更仍执行 mdBook、`docs_links` 和 `filesystem_tests::docs_examples::`
+下的全部检查，包括围栏登记完整性与代码示例编译、输出验证，不能只构建书籍。
+
+Rust job 使用 `Swatinem/rust-cache` 缓存 Cargo 依赖，使用 sccache 的 GitHub Actions
+后端按编译输入复用可缓存的编译结果，`CARGO_INCREMENTAL=0`；不依赖跨 checkout 的
+源码 mtime 复用 workspace target，也不把缓存命中当作跳过当前检查的依据。
+优化不降低 Rust 优化等级、不修改 nextest 的并发权重、超时或测试集合。
+
+耗时比较必须区分冷缓存与热缓存，并分别记录测试编译、测试执行、lint 和 E2E
+的耗时；并行 lint 会增加同时运行的 runner 数量，不能把关键路径缩短等同于
+总计算量等比例下降。缓存失效与未命中仍执行同一套真实构建和检查。
+
 ## 已登记 workload
 
 | bench | 覆盖面 | 指标 |
