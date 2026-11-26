@@ -20,6 +20,8 @@ use crate::{Diagnostic, DiagnosticCode};
 mod arguments;
 mod array_init;
 mod generics;
+#[cfg(test)]
+mod tests;
 
 /// ParseSource query 的 schema 版本。
 pub const PARSE_SOURCE_SCHEMA_VERSION: u32 = 1;
@@ -481,6 +483,15 @@ impl Model<'_> {
                 Ok(Ty::Array(
                     Box::new(element),
                     ArrayLength::Known(u64::try_from(elements.len()).expect("数组长度可编码")),
+                ))
+            }
+            ExprKind::Repeat { elem, count } => {
+                let element = self.constant_type_inner(module, elem, stack)?;
+                // 在独立的长度求值前沿用当前类型推断栈检查依赖，避免循环常量重入。
+                self.constant_type_inner(module, count, stack)?;
+                Ok(Ty::Array(
+                    Box::new(element),
+                    self.array_length(module, count, &BTreeMap::new())?,
                 ))
             }
             ExprKind::Call { callee, .. } => {
