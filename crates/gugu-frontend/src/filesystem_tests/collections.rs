@@ -233,6 +233,7 @@ fn tuple_and_variant_patterns_test_every_field() {
 }
 
 #[test]
+<<<<<<< HEAD
 fn struct_patterns_with_rest_use_declared_field_positions() {
     assert_eq!(
         printed(
@@ -252,6 +253,28 @@ fn struct_patterns_with_rest_use_declared_field_positions() {
 }
 
 #[test]
+||||||| bc0c55bb
+=======
+fn array_rest_patterns_use_tail_positions() {
+    assert_eq!(
+        printed(
+            r#"
+            use std.io.{println}
+            fn main() {
+                let arr = [1, 2, 3, 4]
+                println(match arr { [.., 4] => true, _ => false })
+                println(match arr { [1, .., 3, 4] => true, _ => false })
+                println(match arr { [.., last] => last, _ => 0 })
+                println(match arr { [first, .., before, last] => first * 100 + before * 10 + last, _ => 0 })
+            }
+            "#,
+        ),
+        "true\ntrue\n4\n134\n"
+    );
+}
+
+#[test]
+>>>>>>> origin/master
 fn generic_key_comparisons_dispatch_eq_and_ord() {
     assert_eq!(
         printed(&format!(
