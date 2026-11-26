@@ -233,6 +233,23 @@ fn tuple_and_variant_patterns_test_every_field() {
 }
 
 #[test]
+fn chained_tuple_field_access_is_not_lexed_as_float() {
+    assert_eq!(
+        printed(
+            r#"
+            use std.io.{println}
+            fn main() {
+                let t = ((1, 2), (3, 4))
+                println(t.0.1)
+                println(t.1.0)
+            }
+            "#,
+        ),
+        "2\n3\n"
+    );
+}
+
+#[test]
 fn generic_key_comparisons_dispatch_eq_and_ord() {
     assert_eq!(
         printed(&format!(
