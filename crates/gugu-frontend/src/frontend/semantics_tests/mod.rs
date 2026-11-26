@@ -394,6 +394,10 @@ accept_cases! {
         "fn main() { let x: int\n while { x = 1\n false } {}\n _ = x }";
     condition_bindings_and_loop_initialization_follow_execution_04: false,
         "fn main() { let x: int\n while false { x = 1 }\n _ = x }";
+    condition_bindings_and_loop_initialization_follow_execution_05: true,
+        "fn main() { let v: Result[int, string] = Err(\"e\")\n if let Ok(x) = v { _ = x } else if let Err(e) = v { _ = e } }";
+    condition_bindings_and_loop_initialization_follow_execution_06: false,
+        "fn main() { let v: Result[int, string] = Err(\"e\")\n let n = if let Ok(x) = v { x } else if let Err(_) = v { 0 }\n _ = n }";
 }
 
 #[cfg(feature = "slow-tests")]

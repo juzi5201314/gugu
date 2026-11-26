@@ -91,14 +91,7 @@ impl Checker<'_, '_> {
             }
         }
         let ty = tail.map_or(Ty::Unit, |id| {
-            let statement_if = expected == Some(&Ty::Unit)
-                && matches!(
-                    self.arena().exprs[id.0 as usize].kind,
-                    ExprKind::If {
-                        else_branch: None,
-                        ..
-                    }
-                );
+            let statement_if = expected == Some(&Ty::Unit) && self.incomplete_if_chain(id);
             if discarded || statement_if {
                 self.discarded(id)
             } else {
@@ -334,6 +327,20 @@ impl Checker<'_, '_> {
             }
         }
     }
+
+    fn incomplete_if_chain(&self, id: ExprId) -> bool {
+        match self.arena().exprs[id.0 as usize].kind {
+            ExprKind::If {
+                else_branch: None, ..
+            } => true,
+            ExprKind::If {
+                else_branch: Some(branch),
+                ..
+            } => self.incomplete_if_chain(branch),
+            _ => false,
+        }
+    }
+
     pub(super) fn branch(
         &mut self,
         cond: ExprId,
