@@ -753,9 +753,9 @@ kind 为 0 global、1 OS-thread-local template、2 coroutine-local template、3 
 尚未接线：TLS 局部项的模板块放置与运行期扫描，以及受管静态值的根记录生产者。
 
 根记录的 `location` 是镜像内真实地址，布局后才知道：编译器只产出稳定符号名，写入
-`BlobRelocation { blob, offset, symbol }` 清单（目标 blob、blob 内字节偏移 + 已登记符号），由两个 writer 在
+`BlobRelocation { blob, offset, symbol, kind }` 清单（目标 blob、blob 内字节偏移、已登记符号与链接语义），由两个 writer 在
 `defined_layout`/`assign_rvas` 之后回填 8 字节地址；符号缺失或偏移越界/未对齐一律链接失败，
-不留零值让运行期读到无效地址。action key 只含符号名与偏移，因此不含运行地址。
+不留零值让运行期读到无效地址。`Rva` 写元数据使用的镜像 RVA；`Absolute` 写可被机器间接调用直接解引用的镜像虚拟地址，PE writer 同时把该槽登记进 `.reloc`。action key 包含 blob、符号名、偏移与 `kind`，因此不含运行地址。
 
 `.gugu.meta` 的 vtable data 是定长审计记录：每条 64 byte，前 32 byte 为 `trait_key`、后 32 byte 为具体类型的稳定类型键；`vtable_count + 1` 个 `u64` index 仍按 64 byte 步长定界。相同 `(concrete_type, trait_key)` 只能有一条。该记录表达闭世界组合关系，不保存方法 RVA，也不是动态调用时解引用的表。
 

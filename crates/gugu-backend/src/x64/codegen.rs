@@ -430,10 +430,18 @@ impl X64Fragments {
     }
 }
 
-/// 元数据 blob 内的链接期重定位：把符号的链接地址写进 blob 的指定字节偏移。
+/// blob 内符号引用的链接语义。
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub enum BlobRelocationKind {
+    /// 写符号的镜像 RVA；`.gugu.meta` 元数据使用这种目标无关表示。
+    Rva,
+    /// 写重定位后的镜像虚拟地址；vtable 入口会被机器间接调用直接解引用。
+    Absolute,
+}
+
+/// 只读 blob 内的链接期重定位：把符号的链接地址写进 blob 的指定字节偏移。
 ///
-/// 根记录的 `location` 是镜像内真实地址，只有布局后才知道；编译器产出的是稳定符号名，
-/// 由 writer 在 `defined_layout`/`assign_rvas` 之后回填，action key 因此不含运行地址。
+/// 编译器产出稳定符号名，由 writer 在布局之后回填，action key 因此不含运行地址。
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub struct BlobRelocation {
     /// 目标只读 blob 名；常量、vtable 与 `.gugu.meta` 共用同一回填机制。
@@ -442,6 +450,8 @@ pub struct BlobRelocation {
     pub offset: u64,
     /// 已登记符号名（与代码重定位同一命名空间）。
     pub symbol: String,
+    /// 写入 RVA 还是可执行镜像虚拟地址。
+    pub kind: BlobRelocationKind,
 }
 
 /// C 导出入口没有 managed 栈图，用户代码通过另一个受管适配器执行。
@@ -1030,6 +1040,7 @@ fn vtable_blobs(
                 blob: name.clone(),
                 offset: (slot * 8) as u64,
                 symbol: super::mangle::mangle_instance(&instance),
+                kind: BlobRelocationKind::Absolute,
             });
         }
         blobs.push((name, vec![0; bytes.max(1)]));
@@ -1341,6 +1352,7 @@ fn world_fingerprint(world: &X64World) -> [u8; 32] {
         hasher.update(relocation.blob.as_bytes());
         hasher.update(&relocation.offset.to_le_bytes());
         hasher.update(relocation.symbol.as_bytes());
+        hasher.update(&[relocation.kind as u8]);
     }
     hasher.update(&world.contract.fingerprint());
     for fragment in &world.fragments {
