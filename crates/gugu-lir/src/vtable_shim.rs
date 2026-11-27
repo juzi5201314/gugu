@@ -83,7 +83,7 @@ fn receiver_lanes(
     if size > 16 {
         return Err(invalid("按值 dyn receiver 暂不支持间接 ABI 载荷"));
     }
-    Ok(usize::try_from(size.div_ceil(8)).map_err(|_| invalid("dyn receiver 车道数溢出"))?)
+    usize::try_from(size.div_ceil(8)).map_err(|_| invalid("dyn receiver 车道数溢出"))
 }
 
 fn signature(
@@ -242,7 +242,7 @@ fn build(
                 derived
             };
             let kind = target.signature.parameters[receiver_index + lane];
-            let align = u32::try_from(receiver_align.min(8).max(1))
+            let align = u32::try_from(receiver_align.clamp(1, 8))
                 .map_err(|_| invalid("receiver 对齐溢出"))?;
             let (value, memory) = emit_load(&mut body, address, kind, memory_input, align, &source);
             receiver_values.push(value);
