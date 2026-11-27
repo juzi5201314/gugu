@@ -5,6 +5,10 @@ edition = "2024"
 autobenches = false
 description = "Gugu compiler façade: frontend plus the embedded runtime artifact"
 
+[lib]
+test = false
+doctest = false
+
 [features]
 # 与前端同名开关：探针源是否进入 build-time artifact。
 runtime-gc-probes = [

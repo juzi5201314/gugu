@@ -7,7 +7,7 @@ use super::body::{
 };
 use super::liveness::{Liveness, TurnBoundaryKind, turn_boundaries};
 use super::passing::{PassingClass, PassingTable};
-use super::{GirBody, GirWorldV1, WORLD_SCHEMA, world_fingerprint};
+use super::{GirBody, GirWorldV1, WORLD_SCHEMA, world_fingerprint_cached};
 use crate::analysis::{AnalysisWorldV1, ProofStatus};
 use crate::hir::{self, TypeId};
 use crate::query::{QueryEngine, QueryKey, QueryKind};
@@ -161,18 +161,16 @@ fn fingerprint(
     allocs: &[AllocPlacement],
     regions: &[RegionPlan],
 ) -> [u8; 32] {
-    let bytes = crate::canonical::to_vec(&(records, allocs, regions)).expect("placement 编码");
-    *blake3::Hasher::new_derive_key("gugu-placement-v1")
-        .update(&bytes)
-        .finalize()
-        .as_bytes()
+    crate::canonical::hash_derive_key("gugu-placement-v1", &(records, allocs, regions))
+        .expect("placement 编码")
 }
 
 pub fn attach(mut world: GirWorldV1, placement: PlacementWorldV1) -> GirWorldV1 {
     world.placement = placement;
     world.schema = WORLD_SCHEMA;
-    world.fingerprint = world_fingerprint(
+    world.fingerprint = world_fingerprint_cached(
         &world.bodies,
+        &world.body_fingerprints,
         &world.fragments,
         world.hir_fingerprint,
         &world.placement,
@@ -1008,6 +1006,16 @@ fn region_decisions(
     body_unknown: bool,
     allocs: &mut Vec<AllocPlacement>,
 ) -> RegionDecisions {
+    // 无任何受管分配点的 body 不会产生 AllocPlacement 或 RegionPlan，跳过 RegionFacts 支配树与边界分析。
+    let has_alloc = body.statements.iter().any(|statement| {
+        matches!(
+            &statement.kind,
+            StatementKind::Assign(_, rvalue) if is_alloc(module, rvalue)
+        )
+    });
+    if !has_alloc {
+        return RegionDecisions { plans: Vec::new() };
+    }
     let mut site_region = vec![None; body.statements.len()];
     let mut plans = Vec::new();
     let facts = RegionFacts::analyze(body);

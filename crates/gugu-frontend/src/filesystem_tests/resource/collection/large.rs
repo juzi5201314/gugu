@@ -1,9 +1,7 @@
 use super::*;
 
-#[test]
-fn large_field_barrier_uses_registered_range_without_arena_probe() {
-    let (hir, bodies) = runtime_bodies();
-    let mut harness = ResourceHarness::from_bodies(&hir, &bodies);
+pub(super) fn large_field_barrier_uses_registered_range_without_arena_probe() {
+    let mut harness = runtime_harness();
     harness.gc_config = CONFIG;
     harness.block_budget = 32768;
     let (mut memory, meta) = graph_memory();
@@ -31,15 +29,8 @@ fn large_field_barrier_uses_registered_range_without_arena_probe() {
     );
 }
 
-#[test]
-fn large_mapping_is_traced_then_released_once() {
-    let output = Compiler::shared().compile_to_lir(CompileRequest::single_file(
-        "main.gg",
-        include_str!("../../../../../gugu-compiler/tests/fixtures/pin.gg"),
-        TargetName::X86_64Linux,
-    ));
-    assert!(output.is_success(), "{:?}", output.diagnostics().items());
-    let mut harness = ResourceHarness::new(&output);
+pub(super) fn large_mapping_is_traced_then_released_once(output: &Compilation) {
+    let mut harness = ResourceHarness::new(output);
     harness.gc_config = CONFIG;
     harness.block_budget = 32768;
     let (mut memory, meta) = graph_memory();

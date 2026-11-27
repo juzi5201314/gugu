@@ -7,10 +7,14 @@ const NODE: u64 = 1536;
 const REGISTRY: u64 = 6000;
 const ROOT_TABLE: u64 = 8192;
 
-#[test]
+pub(super) fn run_runtime_contracts() {
+    callback_storage_reuses_retired_records_and_pressure_releases_mapping();
+    callback_waiter_executes_fifo_without_releasing_outer_credit();
+    callback_completion_follows_root_and_stack_retirement();
+}
+
 fn callback_storage_reuses_retired_records_and_pressure_releases_mapping() {
-    let (hir, bodies) = runtime_bodies();
-    let mut harness = ResourceHarness::from_bodies(&hir, &bodies);
+    let mut harness = runtime_harness();
     harness.block_budget = 2048;
     let mut memory = vec![0; 131072];
     let storage = 16384;
@@ -170,10 +174,8 @@ fn verify_adapters(target: TargetName) {
     }
 }
 
-#[test]
 fn callback_waiter_executes_fifo_without_releasing_outer_credit() {
-    let (hir, bodies) = runtime_bodies();
-    let mut harness = ResourceHarness::from_bodies(&hir, &bodies);
+    let mut harness = runtime_harness();
     harness.block_budget = 32768;
     let mut memory = request_memory();
     put(&mut memory, CANCEL, 0);
@@ -239,15 +241,8 @@ fn callback_waiter_executes_fifo_without_releasing_outer_credit() {
     assert!(harness.released.is_empty());
 }
 
-#[test]
 fn callback_completion_follows_root_and_stack_retirement() {
-    let output = Compiler::shared().compile_to_lir(CompileRequest::single_file(
-        "main.gg",
-        include_str!("../../../../gugu-compiler/tests/fixtures/fs_join_error.gg"),
-        TargetName::X86_64Linux,
-    ));
-    assert!(output.is_success(), "{:?}", output.diagnostics().items());
-    let mut harness = ResourceHarness::new(&output);
+    let mut harness = runtime_harness();
     let mut memory = request_memory();
     put(&mut memory, CHILD + 16, PROCESSOR);
     put(&mut memory, CHILD + 48, COLD);

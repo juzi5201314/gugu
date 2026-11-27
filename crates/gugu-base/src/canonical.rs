@@ -52,6 +52,50 @@ pub fn to_vec<T: Serialize + ?Sized>(value: &T) -> Result<Vec<u8>, Error> {
     Ok(output)
 }
 
+/// 复用线程局部编码缓冲将对象编码后交由哈希闭包消费，避免频繁分配/释放大型临时缓冲。
+fn with_encoded<T: Serialize + ?Sized, R>(
+    value: &T,
+    consume: impl FnOnce(&[u8]) -> R,
+) -> Result<R, Error> {
+    const MAX_RETAINED_CAPACITY: usize = 4 * 1024 * 1024;
+    thread_local! {
+        static SCRATCH: std::cell::RefCell<Vec<u8>> = const { std::cell::RefCell::new(Vec::new()) };
+    }
+    SCRATCH.with(|cell| {
+        if let Ok(mut buffer) = cell.try_borrow_mut() {
+            buffer.clear();
+            let encoded = value.serialize(Encoder {
+                output: &mut buffer,
+            });
+            let result = encoded.map(|()| consume(&buffer));
+            if buffer.capacity() > MAX_RETAINED_CAPACITY {
+                buffer.clear();
+                buffer.shrink_to(MAX_RETAINED_CAPACITY);
+            }
+            result
+        } else {
+            let mut local = Vec::new();
+            value.serialize(Encoder { output: &mut local })?;
+            Ok(consume(&local))
+        }
+    })
+}
+
+/// 以域隔离摘要 `blake3(domain || 0 || canonical(value))` 对对象求指纹，结果与 `hash_domain(domain, &to_vec(value)?)` 逐字节一致。
+pub fn hash_domain<T: Serialize + ?Sized>(domain: &str, value: &T) -> Result<[u8; 32], Error> {
+    with_encoded(value, |bytes| crate::hash::hash_domain(domain, bytes))
+}
+
+/// 以 `blake3::Hasher::new_derive_key(context)` 对规范编码字节求指纹，结果与对 `to_vec(value)?` 派生完全一致。
+pub fn hash_derive_key<T: Serialize + ?Sized>(context: &str, value: &T) -> Result<[u8; 32], Error> {
+    with_encoded(value, |bytes| {
+        *blake3::Hasher::new_derive_key(context)
+            .update(bytes)
+            .finalize()
+            .as_bytes()
+    })
+}
+
 /// 解码一个完整稳定二进制对象；尾随字节会被拒绝。
 pub fn from_slice<T: DeserializeOwned>(bytes: &[u8]) -> Result<T, Error> {
     let mut decoder = Decoder { bytes, offset: 0 };
@@ -909,5 +953,24 @@ mod tests {
             pair
         );
         assert!(from_slice::<Sample>(br#"{"number":7}"#).is_err());
+    }
+
+    #[test]
+    fn reusable_buffer_hashes_match_to_vec_hashes() {
+        let sample = Choice::Named {
+            key: "喵".to_owned(),
+        };
+        let bytes = to_vec(&sample).expect("编码");
+        assert_eq!(
+            super::hash_domain("gugu-test-domain-v1", &sample).expect("域摘要"),
+            crate::hash::hash_domain("gugu-test-domain-v1", &bytes)
+        );
+        assert_eq!(
+            super::hash_derive_key("gugu-test-derive-v1", &sample).expect("派生摘要"),
+            *blake3::Hasher::new_derive_key("gugu-test-derive-v1")
+                .update(&bytes)
+                .finalize()
+                .as_bytes()
+        );
     }
 }

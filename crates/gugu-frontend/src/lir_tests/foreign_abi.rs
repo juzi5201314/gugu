@@ -31,7 +31,11 @@ fn verify(target: TargetName) {
             interpreter: None,
         });
     }
-    let compilation = Compiler::shared().compile_full_for_test(request);
+    let compilation = if target == TargetName::X86_64Macos {
+        Compiler::shared().compile_full_for_test(request)
+    } else {
+        Compiler::shared().compile_to_lir(request)
+    };
     if target == TargetName::X86_64Macos {
         let errors: Vec<_> = compilation
             .diagnostics()

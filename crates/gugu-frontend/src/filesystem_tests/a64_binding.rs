@@ -9,7 +9,7 @@ use crate::runtime::{
 use std::mem::offset_of;
 use std::sync::LazyLock;
 
-const MODULE: &str = "std/a64_binding_probe.gg";
+const MODULE: &str = "std/runtime/fixtures/a64_binding_probe.gg";
 const MAPS: u64 = 4096;
 const CFA: u64 = 8192;
 const OUT: u64 = 12288;
@@ -28,10 +28,10 @@ impl runtime::RuntimeArtifactProvider for A64Fixtures {
         &self,
         target: TargetName,
     ) -> Result<&'static runtime::RuntimeArtifactV1, runtime::RuntimeArtifactError> {
-        assert_eq!(target, TargetName::X86_64Linux);
+        assert_eq!(target, TargetName::Aarch64Linux);
         static ARTIFACT: LazyLock<runtime::RuntimeArtifactV1> = LazyLock::new(|| {
             let base = crate::testing::provider()
-                .artifact(TargetName::X86_64Linux)
+                .artifact(TargetName::Aarch64Linux)
                 .unwrap();
             let a64 = base
                 .payload
@@ -40,34 +40,13 @@ impl runtime::RuntimeArtifactProvider for A64Fixtures {
                 .find(|blob| blob.logical_path == "std/runtime/a64.gg")
                 .unwrap();
             assert!(a64.source.starts_with(A64_GUARD));
-            let host_arch = TargetName::X86_64Linux.descriptor().arch.name();
-            let host_guard = format!("#![cfg(arch = \"{host_arch}\")]");
-            let interpreted = a64.source.replacen(A64_GUARD, &host_guard, 1);
-            let roots = base
-                .payload
-                .sources
-                .iter()
-                .find(|blob| blob.logical_path == "std/runtime/roots.gg")
-                .unwrap();
-            let item_guard = host_guard.replace("#![", "#[");
-            let not_item_guard = format!("#[cfg(not(arch = \"{}\"))]", host_arch);
-            let interpreted_roots = roots
-                .source
-                .replace("#[cfg(arch = \"aarch64\")]", &item_guard)
-                .replace("#[cfg(not(arch = \"aarch64\"))]", &not_item_guard);
             let mut sources: Vec<_> = base
                 .payload
                 .sources
                 .iter()
                 .map(|blob| gugu_compiler_core::RuntimeSourceInput {
                     logical_path: &blob.logical_path,
-                    source: if blob.logical_path == a64.logical_path {
-                        &interpreted
-                    } else if blob.logical_path == roots.logical_path {
-                        &interpreted_roots
-                    } else {
-                        &blob.source
-                    },
+                    source: &blob.source,
                     role: blob.role,
                 })
                 .collect();
@@ -76,13 +55,15 @@ impl runtime::RuntimeArtifactProvider for A64Fixtures {
                 source: include_str!("fixtures/a64_binding.gg"),
                 role: gugu_compiler_core::RuntimeSourceRole::StandardLibrary,
             });
-            let artifact = gugu_compiler_core::RuntimeArtifactBuilder::build(
-                gugu_compiler_core::TargetName::X86_64Linux,
+            // 直接基于 aarch64-linux 已物化 artifact 追加 `std/runtime/fixtures/` 探针，
+            // 复用原 prebuilt 表而不必为了单份探针从头重编整套标准库。
+            let mut artifact = gugu_compiler_core::RuntimeArtifactBuilder::build(
+                gugu_compiler_core::TargetName::Aarch64Linux,
                 &sources,
             )
             .unwrap();
-            crate::frontend::prebuild::materialize_tables(TargetName::X86_64Linux, artifact)
-                .unwrap()
+            artifact.payload.prebuilt = base.payload.prebuilt.clone();
+            artifact
         });
         Ok(&ARTIFACT)
     }
@@ -146,22 +127,21 @@ fn a64_production_gugu_binding_contracts() {
     a64_production_entry_cfa_does_not_require_the_unallocated_callee_frame(&runtime);
     a64_production_gugu_empty_wrong_architecture_and_exact_pc(&runtime);
     a64_source_layouts_and_nonmoving_mailbox_binding_match_rust(&runtime);
+    a64_gated_root_beyond_fixed_bitmap_scans_by_frame_bounds(&runtime);
+    a64_scan_disallowed_safepoints_reject_both_scan_entries_without_emitting(&runtime);
 }
 
 fn runtime_layouts() -> RuntimeLayouts {
-    let target = TargetName::X86_64Linux;
+    let target = TargetName::Aarch64Linux;
     let artifact = runtime::RuntimeArtifactProvider::artifact(&A64Fixtures, target).unwrap();
     let resources = runtime::RuntimeResources::new(artifact);
     let queries = crate::QueryEngine::new();
-    let mut source_map = crate::SourceMap::new(vec![
-        crate::SourceSnapshot::from_str("main.gg", "").unwrap(),
-    ])
-    .unwrap();
+    let mut source_map = crate::SourceMap::new(Vec::new()).unwrap();
     let cfg = crate::frontend::cfg::CfgContext::target_only(target);
     let output = crate::frontend::bootstrap_with(
         crate::frontend::SourceInput::Sources {
             source_map: &mut source_map,
-            entry: "main.gg",
+            entry: MODULE,
             source_root: "",
             package_identity: "single-file",
             require_main: false,
@@ -180,7 +160,7 @@ fn runtime_layouts() -> RuntimeLayouts {
         &output.mono,
         target,
         crate::lir::installed::RECORDED_COMPRESSION,
-        &crate::backend::x64::oracle::X64Oracle::new(target.descriptor().cpu_baseline),
+        &crate::backend::a64::oracle::A64Oracle::new(target.name()),
         &queries,
         &source_map,
         (&output.installed, resources.prebuilt()),
@@ -254,10 +234,9 @@ fn review_image(slot_count: u32, scan_allowed: bool) -> Sections {
     Sections::decode(&maps, directory.unwind()).unwrap()
 }
 
-#[test]
-fn a64_gated_root_beyond_fixed_bitmap_scans_by_frame_bounds() {
-    let (hir, bodies, _) = runtime_layouts();
-    let mut h = Harness::from_bodies(&hir, &bodies);
+fn a64_gated_root_beyond_fixed_bitmap_scans_by_frame_bounds(runtime: &RuntimeLayouts) {
+    let (hir, bodies, _) = runtime;
+    let mut h = Harness::from_bodies(hir, bodies);
     for slots in [0, 4] {
         let image = review_image(slots, true);
         assert_eq!(image.frames(BASE).unwrap().len(), 1);
@@ -308,10 +287,11 @@ fn a64_gated_root_beyond_fixed_bitmap_scans_by_frame_bounds() {
     }
 }
 
-#[test]
-fn a64_scan_disallowed_safepoints_reject_both_scan_entries_without_emitting() {
-    let (hir, bodies, _) = runtime_layouts();
-    let mut h = Harness::from_bodies(&hir, &bodies);
+fn a64_scan_disallowed_safepoints_reject_both_scan_entries_without_emitting(
+    runtime: &RuntimeLayouts,
+) {
+    let (hir, bodies, _) = runtime;
+    let mut h = Harness::from_bodies(hir, bodies);
     for allowed in [false, true] {
         let image = review_image(12, allowed);
         for initialized in [0, 1] {
@@ -705,7 +685,7 @@ fn a64_production_gugu_empty_wrong_architecture_and_exact_pc(runtime: &RuntimeLa
 
 fn a64_source_layouts_and_nonmoving_mailbox_binding_match_rust(runtime: &RuntimeLayouts) {
     let artifact = crate::testing::provider()
-        .artifact(super::TargetName::X86_64Linux)
+        .artifact(super::TargetName::Aarch64Linux)
         .unwrap();
     let resources = runtime::RuntimeResources::new(artifact);
     let (hir, bodies, records) = runtime;

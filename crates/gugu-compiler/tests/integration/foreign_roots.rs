@@ -19,11 +19,15 @@ fn verify(target: TargetName) {
         );
     }
     let output = Compiler::with_artifacts(&EMBEDDED_ARTIFACTS).compile_full_for_test(
-        CompileRequest::single_file("main.gg", include_str!("fixtures/foreign_roots.gg"), target)
-            .with_native_link(NativeLink {
-                imports,
-                interpreter: (target == TargetName::X86_64Linux).then(|| "/toolchain/ld.so".into()),
-            }),
+        CompileRequest::single_file(
+            "main.gg",
+            include_str!("../fixtures/foreign_roots.gg"),
+            target,
+        )
+        .with_native_link(NativeLink {
+            imports,
+            interpreter: (target == TargetName::X86_64Linux).then(|| "/toolchain/ld.so".into()),
+        }),
     );
     assert!(output.is_success(), "{:?}", output.diagnostics().items());
     let section =

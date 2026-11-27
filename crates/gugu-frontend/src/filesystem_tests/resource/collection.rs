@@ -85,9 +85,20 @@ fn graph_memory() -> (Vec<u8>, u64) {
 }
 
 #[test]
+fn gc_runtime_bodies_contracts() {
+    edge_staging_counts_batches_and_major_consumes_overflow();
+    large::large_field_barrier_uses_registered_range_without_arena_probe();
+    pin::pinned_old_field_survives_minor_after_young_store();
+    region::region_field_barrier_and_minor_preserve_young_reference();
+    trim::run_all();
+    compression::run_runtime_contracts();
+    poll::run_all();
+    shared::run_runtime_contracts();
+    stack::run_all();
+}
+
 fn edge_staging_counts_batches_and_major_consumes_overflow() {
-    let (hir, bodies) = runtime_bodies();
-    let mut harness = ResourceHarness::from_bodies(&hir, &bodies);
+    let mut harness = runtime_harness();
     harness.gc_config = CONFIG;
     harness.block_budget = 32768;
     let (mut memory, _) = graph_memory();

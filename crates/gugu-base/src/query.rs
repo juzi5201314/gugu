@@ -282,23 +282,23 @@ impl QueryResult {
         dependencies.sort_by(|left, right| left.key.cmp(&right.key));
         dependencies.dedup_by(|left, right| left.key == right.key);
         let payload = payload.into();
-        let mut canonical = Vec::with_capacity(
-            2 + 4
-                + 8
-                + key.canonical_key.len()
-                + 8
-                + payload.len()
-                + 8
-                + diagnostics.as_ref().len(),
-        );
-        canonical.extend_from_slice(&(key.kind as u16).to_le_bytes());
-        canonical.extend_from_slice(&key.schema_version.to_le_bytes());
-        encode_bytes(&mut canonical, &key.canonical_key);
-        encode_bytes(&mut canonical, &payload);
-        encode_bytes(&mut canonical, diagnostics.as_ref());
+        let diagnostics = diagnostics.as_ref();
+        // 与 `hash_domain("gugu-query-result-v1", ...)` 逐字节同构的流式摘要，
+        // 避免为大型 query payload 额外分配并拷贝整块中间缓冲。
+        let mut hasher = blake3::Hasher::new();
+        hasher.update(b"gugu-query-result-v1");
+        hasher.update(&[0]);
+        hasher.update(&(key.kind as u16).to_le_bytes());
+        hasher.update(&key.schema_version.to_le_bytes());
+        hasher.update(&(key.canonical_key.len() as u64).to_le_bytes());
+        hasher.update(&key.canonical_key);
+        hasher.update(&(payload.len() as u64).to_le_bytes());
+        hasher.update(&payload);
+        hasher.update(&(diagnostics.len() as u64).to_le_bytes());
+        hasher.update(diagnostics);
         Self {
             payload,
-            result_fingerprint: hash_domain("gugu-query-result-v1", &canonical),
+            result_fingerprint: *hasher.finalize().as_bytes(),
             dependencies: Arc::from(dependencies),
         }
     }

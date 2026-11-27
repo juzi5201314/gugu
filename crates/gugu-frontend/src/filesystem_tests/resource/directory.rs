@@ -48,10 +48,13 @@ fn release_aliases(harness: &mut ResourceHarness<'_>, memory: &mut Vec<u8>) {
     harness.run("native_memory", "verify_drained", &[PROCESSOR], memory);
 }
 
-#[test]
-fn directory_waiter_observes_shared_eof_then_closed_state() {
-    let output = compile();
-    let (mut harness, mut memory) = setup(&output);
+pub(super) fn run_all(output: &Compilation) {
+    directory_waiter_observes_shared_eof_then_closed_state(output);
+    closing_directory_waits_for_active_read_and_rejects_queued_reader(output);
+}
+
+fn directory_waiter_observes_shared_eof_then_closed_state(output: &Compilation) {
+    let (mut harness, mut memory) = setup(output);
     harness.on_park = Some(publish_eof);
     assert_eq!(
         harness.run("resource", "begin_directory", &[ALIAS], &mut memory),
@@ -76,10 +79,8 @@ fn directory_waiter_observes_shared_eof_then_closed_state() {
     release_aliases(&mut harness, &mut memory);
 }
 
-#[test]
-fn closing_directory_waits_for_active_read_and_rejects_queued_reader() {
-    let output = compile();
-    let (mut harness, mut memory) = setup(&output);
+fn closing_directory_waits_for_active_read_and_rejects_queued_reader(output: &Compilation) {
+    let (mut harness, mut memory) = setup(output);
     harness.on_park = Some(request_close);
     assert_eq!(
         harness.run("resource", "begin_directory", &[ALIAS], &mut memory),

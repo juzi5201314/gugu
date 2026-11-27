@@ -991,31 +991,39 @@ fn overflow_block(
 ) -> Option<BlockId> {
     let bounded = bounded_back_edges(editor, info);
     let order = editor.reverse_postorder();
-    let mut in_cost: BTreeMap<BlockId, u32> = BTreeMap::new();
-    let mut out_cost: BTreeMap<BlockId, u32> = BTreeMap::new();
-    in_cost.insert(editor.entry(), 0);
+    // BlockId 是稠密连续下标，按 Vec 索引避免在成本不动点循环里重复查 BTreeMap。
+    let slots = order
+        .iter()
+        .map(|block| block.index() + 1)
+        .max()
+        .unwrap_or(0)
+        .max(editor.entry().index() + 1);
+    let mut in_cost = vec![0u32; slots];
+    let mut out_cost = vec![0u32; slots];
+    let mut advancing = Vec::new();
     let mut rounds = 0;
     loop {
         let mut changed = false;
-        let mut advancing = BTreeSet::new();
-        for block in &order {
+        advancing.clear();
+        for &block in &order {
             let current = block_flow(
-                (0..editor.instruction_count(*block))
-                    .filter(|index| !editor.instruction((*block, *index)).removed)
-                    .map(|index| &editor.instruction((*block, index)).op),
+                (0..editor.instruction_count(block))
+                    .filter(|index| !editor.instruction((block, *index)).removed)
+                    .map(|index| &editor.instruction((block, index)).op),
                 &editor.assembly,
                 info,
-                in_cost.get(block).copied().unwrap_or(0),
+                in_cost[block.index()],
             );
-            out_cost.insert(*block, current);
-            for successor in editor.successors(*block) {
-                if bounded.contains(&(*block, successor)) {
+            out_cost[block.index()] = current;
+            for successor in editor.successors(block) {
+                if bounded.contains(&(block, successor)) {
                     continue;
                 }
-                if in_cost.get(&successor).copied().unwrap_or(0) < current {
-                    in_cost.insert(successor, current);
+                let idx = successor.index();
+                if idx < in_cost.len() && in_cost[idx] < current {
+                    in_cost[idx] = current;
                     changed = true;
-                    advancing.insert(successor);
+                    advancing.push(successor);
                 }
             }
         }
@@ -1023,8 +1031,8 @@ fn overflow_block(
         // 无回边的最长路径至多经过每个块一次。超过该轮数仍增加说明存在
         // 正成本环，其 poll-free 成本无界，直接提升到预算溢出态。
         if rounds > order.len() {
-            for block in advancing {
-                in_cost.insert(block, POLL_BUDGET + 1);
+            for &block in &advancing {
+                in_cost[block.index()] = POLL_BUDGET + 1;
             }
         }
         if !changed {
@@ -1033,7 +1041,7 @@ fn overflow_block(
     }
     order.into_iter().find(|block| {
         !exempt.contains(block)
-            && out_cost.get(block).copied().unwrap_or(0) > POLL_BUDGET
+            && out_cost[block.index()] > POLL_BUDGET
             && !(0..editor.instruction_count(*block)).any(|index| {
                 matches!(
                     editor.instruction((*block, index)).op,

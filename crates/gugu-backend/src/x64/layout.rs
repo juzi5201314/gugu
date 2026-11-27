@@ -1,8 +1,10 @@
 //! 热/冷块布局与分支收缩：先 rel32，只许长变短，按 code offset 迭代到不动点。
 
+use std::sync::OnceLock;
+
 use crate::lir::body::{Block, BlockId, Body, EdgeId, Op, Terminator};
 
-use super::encode::assemble;
+use super::encode::encoded_len;
 use super::inst::{Inst, Operand, Sequence};
 use super::lower::LoweringError;
 use super::table::{self, FormId, OperandKind};
@@ -93,29 +95,82 @@ pub fn jump_falls_through(body: &Body, layout: &BlockLayout, from: BlockId, edge
 /// 前移会让 `target - end` 变大，按旧终点收下的边界分支会在下一轮编码时越界。收缩只会让
 /// 其它分支的位移向合法区间移动，因此按 code offset 迭代到不动点后必然收敛。
 pub fn relax(sequence: &mut Sequence) -> Result<u32, LoweringError> {
+    let mut label_at: Vec<Option<usize>> = Vec::new();
+    for definition in &sequence.labels {
+        let index =
+            usize::try_from(definition.label.0).map_err(|_| LoweringError::InvalidOperands)?;
+        let at = usize::try_from(definition.at).map_err(|_| LoweringError::InvalidOperands)?;
+        if label_at.len() <= index {
+            label_at.resize(index + 1, None);
+        }
+        if label_at[index].replace(at).is_some() {
+            return Err(LoweringError::InvalidOperands);
+        }
+    }
+    let mut labels = Vec::with_capacity(label_at.len());
+    for at in label_at {
+        labels.push(at.ok_or(LoweringError::InvalidOperands)?);
+    }
+
+    let inst_count = sequence.instructions.len();
+    let mut lengths = Vec::with_capacity(inst_count);
+    let mut total = 0_u32;
+    let mut candidates = Vec::new();
+    for (index, inst) in sequence.instructions.iter().enumerate() {
+        let len = encoded_len(inst).map_err(|_| LoweringError::InvalidOperands)?;
+        total = total
+            .checked_add(len)
+            .ok_or(LoweringError::InvalidOperands)?;
+        lengths.push(len);
+        if let Some(rel32) = rel32_local_label(inst)
+            && let Some(rel8) = matching_rel8(inst.form)
+        {
+            let target_label =
+                usize::try_from(rel32.label.0).map_err(|_| LoweringError::InvalidOperands)?;
+            if target_label >= labels.len() {
+                return Err(LoweringError::InvalidOperands);
+            }
+            let rel8_len = encoded_len(&Inst {
+                form: rel8,
+                lock: false,
+                operands: vec![Operand::Label(rel32.label)],
+            })
+            .map_err(|_| LoweringError::InvalidOperands)?;
+            candidates.push((index, target_label, rel8, rel8_len, false));
+        }
+    }
+    if candidates.is_empty() {
+        return Ok(count_rel8(sequence));
+    }
+
+    let mut offsets = vec![0_u32; inst_count + 1];
     loop {
-        let assembled = assemble(sequence).map_err(|_| LoweringError::InvalidOperands)?;
+        let mut cursor = 0_u32;
+        for (index, &len) in lengths.iter().enumerate() {
+            offsets[index] = cursor;
+            cursor += len;
+        }
+        offsets[inst_count] = cursor;
+
         let mut changed = false;
-        for (inst_index, start) in &assembled.instruction_offsets {
-            let index = usize::try_from(*inst_index).expect("指令下标适配 usize");
-            let inst = &mut sequence.instructions[index];
-            let Some(rel32) = rel32_local_label(inst) else {
+        for candidate in &mut candidates {
+            if candidate.4 {
                 continue;
-            };
-            let form = table::form(inst.form);
-            let Some(rel8) = matching_rel8(form) else {
-                continue;
-            };
-            let shrunk_len = assembled_len(&assembled, index)
+            }
+            let (index, target_label, rel8, rel8_len, _) = *candidate;
+            let start = offsets[index];
+            let shrunk_len = lengths[index]
                 .saturating_sub(REL32_FIELD_BYTES)
                 .saturating_add(REL8_FIELD_BYTES);
-            let target =
-                assembled.labels[usize::try_from(rel32.label.0).expect("标签编号适配 usize")];
-            let dist = i64::from(target) - (i64::from(*start) + i64::from(shrunk_len));
+            let target_inst = labels[target_label].min(inst_count);
+            let target = offsets[target_inst];
+            let dist = i64::from(target) - (i64::from(start) + i64::from(shrunk_len));
             if i8::try_from(dist).is_err() {
                 continue;
             }
-            inst.form = rel8;
+            sequence.instructions[index].form = rel8;
+            lengths[index] = rel8_len;
+            candidate.4 = true;
             changed = true;
         }
         if !changed {
@@ -156,24 +211,27 @@ fn rel32_local_label(inst: &Inst) -> Option<LocalRel32> {
     }
 }
 
-fn matching_rel8(form: &table::Form) -> Option<FormId> {
-    table::FORMS
-        .iter()
-        .enumerate()
-        .find_map(|(index, candidate)| {
-            (candidate.mnemonic == form.mnemonic && candidate.operands == [OperandKind::Rel8])
-                .then(|| FormId(u16::try_from(index).expect("form 数量适配 u16")))
-        })
-}
-
-fn assembled_len(assembled: &super::inst::Assembled, index: usize) -> u32 {
-    let start = assembled.instruction_offsets[index].1;
-    let end = assembled
-        .instruction_offsets
-        .get(index + 1)
-        .map(|(_, offset)| *offset)
-        .unwrap_or_else(|| u32::try_from(assembled.bytes.len()).expect("片段字节适配 u32"));
-    end.saturating_sub(start)
+fn matching_rel8(form_id: FormId) -> Option<FormId> {
+    // 稠密 FormId 查表（表单数量编译期固定且 < 512），避免每次分支松弛线性扫描整张 FORMS 表。
+    static REL8_BY_FORM: OnceLock<Vec<Option<FormId>>> = OnceLock::new();
+    let table = REL8_BY_FORM.get_or_init(|| {
+        table::FORMS
+            .iter()
+            .map(|form| {
+                (form.operands == [OperandKind::Rel32]).then(|| {
+                    table::FORMS
+                        .iter()
+                        .enumerate()
+                        .find_map(|(index, candidate)| {
+                            (candidate.mnemonic == form.mnemonic
+                                && candidate.operands == [OperandKind::Rel8])
+                            .then(|| FormId(u16::try_from(index).expect("form 数量适配 u16")))
+                        })
+                })?
+            })
+            .collect()
+    });
+    table.get(usize::from(form_id.0)).copied().flatten()
 }
 
 fn classify_cold(body: &Body) -> Vec<bool> {

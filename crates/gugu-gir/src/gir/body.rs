@@ -762,11 +762,7 @@ impl GirBody {
         &self.predecessors[range.start as usize..range.end as usize]
     }
     pub fn fingerprint(&self) -> [u8; 32] {
-        let bytes = crate::canonical::to_vec(self).expect("GIR schema 编码");
-        *blake3::Hasher::new_derive_key("gugu-generic-gir-v1")
-            .update(&bytes)
-            .finalize()
-            .as_bytes()
+        crate::canonical::hash_derive_key("gugu-generic-gir-v1", self).expect("GIR schema 编码")
     }
 }
 

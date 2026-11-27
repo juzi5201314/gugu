@@ -27,7 +27,7 @@ pub mod verify;
 use gugu_base::{
     canonical,
     diagnostics::{Diagnostic, DiagnosticCode},
-    hash, query,
+    query,
     source::{SourceFileId, SourceMap},
     target::{BackendCostProfile, TargetName},
 };
@@ -49,6 +49,9 @@ struct World {
     exports: Vec<exports::Export>,
     /// 与 `bodies` 同序：该 body 是否由内建函数表安装。安装来源不是 body 内容，不进指纹。
     installed: Vec<bool>,
+    /// 与 `bodies` 同序的缓存内容指纹，供下游 codegen 复用，避免重复序列化整表 LIR body。
+    #[serde(skip)]
+    body_fingerprints: Vec<[u8; 32]>,
     fingerprint: [u8; 32],
 }
 
@@ -75,11 +78,17 @@ impl Validated {
     pub fn installed(&self) -> &[bool] {
         &self.world.installed
     }
+    /// 返回第 `index` 个 body 已缓存的内容指纹，与 `self.bodies()[index].fingerprint()` 一致。
+    pub fn body_fingerprint(&self, index: usize) -> [u8; 32] {
+        debug_assert_eq!(self.world.body_fingerprints.len(), self.world.bodies.len());
+        self.world.body_fingerprints[index]
+    }
     /// 测试用：沿用本 world 的 schema、目标与指纹，只替换 body 列表（视为全部现算）；不重算指纹。
     #[cfg(any(test, feature = "test-support"))]
     pub fn with_bodies(&self, bodies: Vec<body::Body>) -> Self {
         let mut world = (*self.world).clone();
         world.installed = vec![false; bodies.len()];
+        world.body_fingerprints = bodies.iter().map(body::Body::fingerprint).collect();
         world.bodies = bodies;
         Self {
             world: Arc::new(world),
@@ -782,6 +791,7 @@ pub fn build(
     for body in &bodies {
         verify::verify(body, hir.module(), oracle).map_err(|error| vec![error])?;
     }
+    let body_fingerprints: Vec<[u8; 32]> = bodies.iter().map(body::Body::fingerprint).collect();
     let mut world = World {
         schema: SCHEMA,
         target,
@@ -789,6 +799,7 @@ pub fn build(
         bodies,
         exports,
         installed,
+        body_fingerprints,
         fingerprint: [0; 32],
     };
     world.fingerprint = world_fingerprint(&world);
@@ -804,14 +815,15 @@ fn world_fingerprint(world: &World) -> [u8; 32] {
     hash.update(world.target.as_bytes());
     hash.update(&world.input_fingerprint);
     hash.update(&canonical::to_vec(&world.exports).expect("C 导出清单编码"));
-    for body in &world.bodies {
-        hash.update(&body.fingerprint());
+    for fingerprint in &world.body_fingerprints {
+        hash.update(fingerprint);
     }
     *hash.finalize().as_bytes()
 }
 
 fn verify_world(world: &World, mono: &mono::MonoWorldV1) -> Result<(), Diagnostic> {
     if world.schema != SCHEMA
+        || world.body_fingerprints.len() != world.bodies.len()
         || world.fingerprint != world_fingerprint(world)
         || !world
             .bodies

@@ -21,7 +21,7 @@ fn borrowed_array_slice_preserves_referent() {
     let output =
         Compiler::with_artifacts(&EMBEDDED_ARTIFACTS).compile_to_lir(CompileRequest::single_file(
             "main.gg",
-            include_str!("fixtures/array_slice.gg"),
+            include_str!("../fixtures/array_slice.gg"),
             TargetName::X86_64Linux,
         ));
     assert!(output.is_success(), "{:?}", output.diagnostics().items());
@@ -58,7 +58,7 @@ fn borrowed_array_slice_preserves_referent() {
 }
 
 fn check(target: TargetName) {
-    let source = include_str!("fixtures/fs_api.gg");
+    let source = include_str!("../fixtures/fs_api.gg");
     let output = Compiler::with_artifacts(&EMBEDDED_ARTIFACTS)
         .compile_full_for_test(CompileRequest::single_file("main.gg", source, target));
     assert!(output.is_success(), "{:?}", output.diagnostics().items());

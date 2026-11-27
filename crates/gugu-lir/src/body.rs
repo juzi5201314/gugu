@@ -888,10 +888,7 @@ impl Body {
             .map(move |edge| self.edges[edge.index()].to)
     }
     pub fn fingerprint(&self) -> [u8; 32] {
-        crate::hash::hash_domain(
-            "gugu-lir-body-v1",
-            &crate::canonical::to_vec(self).expect("LIR 编码"),
-        )
+        crate::canonical::hash_domain("gugu-lir-body-v1", self).expect("LIR 编码")
     }
 }
 

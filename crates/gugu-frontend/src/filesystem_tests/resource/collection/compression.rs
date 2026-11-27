@@ -64,10 +64,13 @@ fn large_capture_uses_full_pointer_cells_with_cage_enabled() {
     }));
 }
 
-#[test]
+pub(super) fn run_runtime_contracts() {
+    cage_boot_slices_reservation_and_rejects_invalid_words();
+    compressed_fields_and_roots_survive_minor_and_major();
+}
+
 fn cage_boot_slices_reservation_and_rejects_invalid_words() {
-    let (hir, bodies) = runtime_bodies();
-    let mut harness = ResourceHarness::from_bodies(&hir, &bodies);
+    let mut harness = runtime_harness();
     let mut memory = vec![0; 16384];
     put(&mut memory, HOT + 16, PROCESSOR);
     harness.run("compression", "cage_boot", &[], &mut memory);
@@ -122,13 +125,11 @@ fn cage_boot_slices_reservation_and_rejects_invalid_words() {
     assert_eq!(word(&memory, CAGE + 40), 3);
 }
 
-#[test]
 fn compressed_fields_and_roots_survive_minor_and_major() {
     const OLD: u64 = 2097152;
     const YOUNG: u64 = 6291456;
     const BARRIER: u64 = 98304;
-    let (hir, bodies) = runtime_bodies();
-    let mut harness = ResourceHarness::from_bodies(&hir, &bodies);
+    let mut harness = runtime_harness();
     harness.gc_config = CONFIG;
     harness.block_budget = 32768;
     let (mut memory, _) = graph_memory();

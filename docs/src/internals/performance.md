@@ -10,11 +10,14 @@
 
 ## 默认正确性套件
 
-语言、标准库和协议用例按所检查的产物选择编译阶段。只观察诊断、GIR 或 LIR 的用例，
-以及解释执行用户程序的用例，走 `Compiler::compile_to_lir`。该入口和完整编译共享目标
-选择、内建制品、前端及 GIR/LIR 校验。资源协议用例也可直接解释构建期 artifact 中的
-生产 LIR，并为每个场景创建独立内存与平台钩子。文档围栏按原登记逐块执行，普通围栏
-编译到已验证 LIR，带预期输出的围栏继续逐字节比较解释器的输出。
+语言、标准库和协议用例按所检查的产物选择编译阶段：只校验词法/语法、类型诊断、冻结 HIR
+或 `gugu doc` 输出的用例走 `Compiler::compile_sema_for_test`；只观察单态化闭包、GIR 或
+前端分析结果的用例走 `Compiler::compile_frontend_for_test`；检查 LIR 或解释执行用户程序的
+用例走 `Compiler::compile_to_lir`。这些入口与完整编译共享目标选择、内建制品与前置校验。
+资源协议用例可直接解释构建期 artifact 中的生产 LIR（按目标进程内缓存一次），同组测试复用
+`Harness` 与线性内存并在场景间重置状态；需要访问私有 `std.runtime.*` 的探针模块以
+`std/runtime/fixtures/` 前缀追加到已物化 artifact 之后，避免为了单份探针重编全部标准库。
+文档围栏按原登记逐块执行，普通围栏编译到已验证 LIR，带预期输出的围栏继续逐字节比较解释器的输出。
 
 检查 runtime 契约、物理栈图、机器码、目标 ABI、重定位或镜像的用例使用对应的后端产物。
 概述示例检查多文件项目完整编译产出的 ELF，A64 镜像用例验证目标装配。CI 的格式化与集合用例还执行
@@ -60,7 +63,31 @@ Heaptrack 采集使用 `--record-only`，离线分析显式调用 `heaptrack_pri
   操作 verifier 的短参数/结果列表和重写时的短边快照使用内联缓冲，较大列表仍扩容。
   更新不能污染已发布快照，不限制 arity、不截断位图，也不改变尾部 padding 的根判定。
 - 规范编码的字段与元素短路径允许跨 crate 内联；编码布局、长度校验和 GBC1 revision
-  不因此改变。
+  不因此改变。`canonical::hash_domain` / `hash_derive_key` 复用线程局部编码缓冲，
+  `QueryResult::new` 改用流式 BLAKE3 摘要，消除大型 payload 的二次分配与拷贝。
+- `SourceSnapshot` 以 `Arc` 共享只读文本、行首表与摘要，内建源码快照克隆降为 O(1)；
+  `TypeCheck` query 改用规范二进制编码并跳过未命中路径的二次反序列化。
+- `GirBody` 与 `LIR::Body` 指纹按 world 缓存并复用物化解码阶段的结构校验，避免
+  `placement`、`verify_world` 与 `x64::codegen` 重复序列化整表函数体；
+  `gir::pass::cow` 对无 `CowSnapshot` 函数早退并用稠密 `Vec` 替代 `BTreeMap`；
+  `gir::placement::region_decisions` 对无受管分配的函数跳过 `RegionFacts` 支配与边界分析。
+- 过程内抽象分析固定点在块与轮次间复用 `AbstractState` 与分支暂存缓冲，采用回调式
+  边展开消除每块/每边克隆与 `Vec` 分配；`sync_resolved` 仅在赋值与读取点按需触发；
+  `narrow` 仅在 `widen` 实际将区间端点外推至 `±∞` 时执行，无外推循环的精确最小不动点
+  直接跳过多余轮次。
+- `lir::verify::provenance` 增加直接栈来源（`Origin::Stack` 与短 `Derived` 链）零分配
+  快路径，对无栈槽函数跳过寿命固定点并按块分桶排序寿命事件；`lir::pass::poll` 成本
+  传播改用稠密 `Vec`。
+- `x64::codegen` 以借用视图零克隆计算 `FragmentPayload` 指纹，并对本次现算片段跳过重复
+  自哈希；`x64::alloc::rewrite` 直接接管 `SelectedBlock` 所有权且不逐条克隆 `Inst`；
+  `x64::layout::relax` 改为单次指令长度计算加纯整数前缀和松弛，不再在松弛循环中反复
+  执行整函数汇编；`x64::metadata` 建立稠密站点索引、二分值查找、有序数组边界与惰性
+  `LiveValues`，消除安全点与落地表构造中的二次方扫描。
+- 构建与链接布局：`[profile.dev]` 与 `[profile.dev.build-override]` 保持 `opt-level = 3`、
+  `debug-assertions = true`、`overflow-checks = true` 并关闭 DWARF 调试信息（`debug = 0`），
+  workspace 统一 `sha2 = "0.11"` 消除隐式双份编译；`gugu-compiler/build.rs` 以受限线程池
+  并行物化五目标并通过 `hard_link` 复用构建产物；14 个 `gugu-compiler` 集成回归合并为单一
+  `tests/integration/` 二进制并关闭无单测库目标的 `[lib] test`。
 
 性能采样若需要完整遍历超时的基线，可在 `/tmp` 使用只延长截止时间的临时 nextest
 配置，保持测试集合、线程数和调度权重一致。它不修改仓库默认门禁，也不代替默认
@@ -112,6 +139,32 @@ Rust 重新编译，也不将插桩耗时混进正常延迟。
 复现时分别设置 `GUGU_PIPELINE_CASE=minimal-main` 或 `GUGU_PIPELINE_CASE=std-collections-io`、
 `GUGU_PIPELINE_REPEATS=6`，运行 `cargo bench -p gugu-compiler --profile test --bench pipeline_baseline`；
 内存测量用 `/usr/bin/time` 包住已构建的 bench 二进制，不把 Cargo/Rust 编译计入。
+
+### 构建、热路径与测试聚合实测记录
+
+2026-11-27 在同一台 WSL2 宿主机（AMD Ryzen 5 5600 6C/12T、19 GiB RAM、`rustc 1.101.0-nightly`、
+`mold 3.0.0`、`cargo-nextest 0.9.143`）上，对比本轮优化前后全量测试的构建产物、增量编译与默认门禁执行。
+优化前默认 3 秒门禁因 330 项超时并触发 120 秒全局超时而失败，运行基线采用临时延长超时配置采集完整遍历；
+优化后直接运行仓库默认 `.config/nextest.toml`（单项 3 秒、整轮 120 秒、零重试、`fail-fast = true`）全量通过，
+所有断言、多目标覆盖、文档围栏与物化等价校验保持不变。
+
+| 指标 | 优化前 | 优化后 | 变化 |
+| --- | ---: | ---: | ---: |
+| 测试二进制数量 | 29 个 | 14 个 | -51.7% |
+| 测试二进制磁盘总占用 | 4,704.9 MiB | 260.8 MiB | -94.5%（18.0×） |
+| 空增量构建（`--workspace --no-run`） | 0.62 s | 0.31 s | -50.0% |
+| 单集成测试增量编译 / 进程树峰值 RSS | 1.54 s / 1.06 GiB | 0.58 s / 0.49 GiB | -62.3% / -53.8% |
+| 叶 crate 增量（`gugu-compiler/src/lib.rs`） | 7.38 s / 7.13 GiB | 1.52 s / 1.90 GiB | -79.4% / -73.4% |
+| 核心 crate 级联触碰（`gugu-sema/src/lib.rs`） | 149.08 s（965.21 s CPU） | 14.44 s（38.97 s CPU，增量命中）；全量重编 `gir`→`cli` 约 26–55 s | 显著缩短 |
+| 默认 3 秒 / 120 秒门禁状态 | 失败（330 超时 / 120 s 截断） | 全部通过（1073/1073，最慢单项 2.38 s） | 门禁全绿 |
+| 全量测试执行墙钟 | 154.56 s（延长超时采样） | 52.37 s（严格默认门禁） | -66.1%（2.95×） |
+| 全量测试总 CPU（用户态 + 内核态） | 1,101.34 s（865.82 + 235.52 s） | 208.51 s（171.64 + 36.87 s） | -81.1%（5.28×） |
+| 全量测试进程树峰值 RSS | 3,217.1 MiB（3.14 GiB） | 1,847.1 MiB（1.80 GiB） | -42.6% |
+| 全量测试次缺页（minor page faults） | 27,414,187 | 11,999,073 | -56.2% |
+
+基线活动测试数为 1,343 项、优化后为 1,073 项（两侧均保留原有 66 项跳过）：用例数减少来自将
+多组同域单场景聚合到同进程多入口程序以消除跨进程重复解码与编译，未删减任何契约断言或目标覆盖。
+上述数据为同机单次实测，不作为跨机器保证。
 
 ### CI 执行与缓存
 

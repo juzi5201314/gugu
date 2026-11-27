@@ -1,232 +1,403 @@
-use super::{CompileRequest, Compiler, TargetName, printing::output};
+use super::{CompileRequest, Compiler, TargetName, printing::invoke_compiled};
 
-#[test]
-fn dependent_value_parameters_forward_parenthesized_constants() {
-    let bytes: Vec<_> = output(
-        r#"
-use std.io.{println}
-fn g(comptime n: int) [int; n] { [9; n] }
-fn f(comptime n: int) [int; n] { g(((n))) }
-const EARLY: [int; 2] = f(2)
-fn main() {
-    let a = f(3)
-    let empty: [int; 0] = f(0)
-    _ = empty
-    println(EARLY[1])
-    println(a[2])
-}
-"#,
-        &[],
-    )
-    .into_iter()
-    .flat_map(|(_, bytes)| bytes)
-    .collect();
-    assert_eq!(bytes, b"9\n9\n");
+fn run_stdout(compiled: &super::Compilation, entry: &str) -> Vec<u8> {
+    invoke_compiled(compiled, entry, &[], 262144)
+        .into_iter()
+        .flat_map(|(fd, bytes)| {
+            assert_eq!(fd, 1);
+            bytes
+        })
+        .collect()
 }
 
-#[test]
-fn early_dependent_array_arguments_check_parenthesized_lengths() {
-    let compiled = Compiler::shared().compile_to_lir(CompileRequest::single_file(
+fn check_frontend_error(source: &str, needle: &str) {
+    let compiled = Compiler::shared().compile_sema_for_test(CompileRequest::single_file(
         "main.gg",
-        r#"
-fn take(comptime n: int, a: [int; ((n))]) int { a[0] }
-const VALUE: int = comptime source {
-    let value = take(2, [1, 2, 3])
-    std.syntax.parse_source(f"{value}")
-}
-fn main() { _ = VALUE }
-"#,
+        source,
         TargetName::X86_64Linux,
     ));
-    assert!(!compiled.is_success());
+    assert!(!compiled.is_success(), "意外通过编译：{source}");
     assert!(
         compiled
             .diagnostics()
             .items()
             .iter()
-            .any(|diagnostic| diagnostic
-                .message()
-                .contains("数组实参长度与参数长度不一致")),
-        "{:?}",
+            .any(|diagnostic| diagnostic.message().contains(needle)),
+        "期望包含 `{needle}`，实际：{:?}",
         compiled.diagnostics().items()
     );
 }
 
 #[test]
-fn dependent_value_parameter_method_dispatch_uses_bound_signature() {
-    let bytes: Vec<_> = output(
-        r#"
+fn const_generics_runtime_dependent_and_early_contracts() {
+    let source = r#"
 use std.io.{println}
-struct S {}
-impl S { fn f(self: &Self, comptime n: int) [int; n] { [7; n] } }
-fn main() { let s = S {}
+use std.test as Mod
+
+fn dep_g(comptime n: int) [int; n] { [9; n] }
+fn dep_f(comptime n: int) [int; n] { dep_g(((n))) }
+const EARLY_DEP: [int; 2] = dep_f(2)
+fn case_dep_paren() {
+    let a = dep_f(3)
+    let empty: [int; 0] = dep_f(0)
+    _ = empty
+    println(EARLY_DEP[1])
+    println(a[2])
+}
+
+struct DepMethod {}
+impl DepMethod { fn f(self: &Self, comptime n: int) [int; n] { [7; n] } }
+fn case_dep_method() {
+    let s = DepMethod {}
     let a = s.f(2)
     let b = s.f(3)
     let empty: [int; 0] = s.f(0)
     _ = empty
     println(a[1])
-    println(b[2]) }
-"#,
-        &[],
-    )
-    .into_iter()
-    .flat_map(|(_, bytes)| bytes)
-    .collect();
-    assert_eq!(bytes, b"7\n7\n");
+    println(b[2])
 }
 
-#[test]
-fn dependent_value_parameters_reject_implicit_receiver_borrows() {
-    let compiled = Compiler::shared().compile_to_lir(CompileRequest::single_file(
-        "main.gg",
-        r#"
-trait Change { fn change(self: &Self) }
-impl Change for int { fn change(self: &Self) { *self = 1 } }
-fn f(comptime n: int) [int; n] { n.change()
-    [0; n] }
-fn main() { _ = f(2) }
-"#,
-        TargetName::X86_64Linux,
-    ));
-    assert!(!compiled.is_success());
-    assert!(
-        compiled
-            .diagnostics()
-            .items()
-            .iter()
-            .any(|diagnostic| diagnostic.message().contains("不能赋值或借用")),
-        "{:?}",
-        compiled.diagnostics().items()
-    );
-}
-
-#[test]
-fn dependent_value_parameter_instances_use_values_and_survive_cache_hits() {
-    let compile = |n| {
-        let source = format!(
-            "fn f(comptime n: int) [int; n] {{ [0; n] }}\nfn main() {{ _ = f(2)\n _ = f({n}) }}"
-        );
-        let compiled = Compiler::shared().compile_full_for_test(CompileRequest::single_file(
-            "main.gg",
-            source,
-            TargetName::X86_64Linux,
-        ));
-        assert!(
-            compiled.is_success(),
-            "{:?}",
-            compiled.diagnostics().items()
-        );
-        compiled
-    };
-    let same = compile(2);
-    let distinct = compile(3);
-    let warm = compile(3);
-    assert_eq!(
-        same.image_plan().unwrap().mono_instance_count() + 1,
-        distinct.image_plan().unwrap().mono_instance_count()
-    );
-    assert_eq!(
-        distinct.image_plan().unwrap().mono_graph_fingerprint(),
-        warm.image_plan().unwrap().mono_graph_fingerprint()
-    );
-}
-
-#[test]
-fn dependent_value_parameter_cannot_be_mutated_or_borrowed() {
-    for statement in ["n = 1", "_ = &n", "_ = std.ptr.addr_of((n))"] {
-        let source = format!(
-            "fn f(comptime n: int) [int; n] {{ {statement}\n [0; n] }}\nfn main() {{ _ = f(2) }}"
-        );
-        let compiled = Compiler::shared().compile_to_lir(CompileRequest::single_file(
-            "main.gg",
-            source,
-            TargetName::X86_64Linux,
-        ));
-        assert!(!compiled.is_success());
-        assert!(
-            compiled
-                .diagnostics()
-                .items()
-                .iter()
-                .any(|diagnostic| diagnostic.message().contains("不能赋值或借用")),
-            "{:?}",
-            compiled.diagnostics().items()
-        );
-    }
-}
-
-#[test]
-fn dependent_value_parameters_execute_runtime_and_early_arrays() {
-    let bytes: Vec<_> = output(
-        r#"
-use std.io.{println}
-fn repeat[T](comptime n: int, x: T) [T; n] {
+fn dep_repeat[T](comptime n: int, x: T) [T; n] {
     let a: [T; n]
     for i in 0..n { a[i] = x }
     a
 }
-const A: [int; 2] = repeat(2, 7)
-const B: [int; 3] = repeat::[int](3, 8)
-fn main() {
-    let a = repeat(2, 5)
-    let b = repeat::[int](3, 6)
-    let empty: [int; 0] = repeat(0, 9)
+const REP_A: [int; 2] = dep_repeat(2, 7)
+const REP_B: [int; 3] = dep_repeat::[int](3, 8)
+fn case_dep_repeat() {
+    let a = dep_repeat(2, 5)
+    let b = dep_repeat::[int](3, 6)
+    let empty: [int; 0] = dep_repeat(0, 9)
     _ = empty
     println(a[1])
     println(b[2])
-    println(A[1])
-    println(B[2])
+    println(REP_A[1])
+    println(REP_B[2])
 }
-"#,
-        &[],
+
+fn combine_order[comptime N: int](value: int) int { N * 10 + value }
+const ORDER_ANSWER: int = comptime source {
+    let n = 0
+    let value = combine_order::[{ n = 1
+        n
+    }]({ n = 2
+        n
+    })
+    std.syntax.parse_source(f"{value} * 10 + {n}")
+}
+fn case_early_const_order() { println(ORDER_ANSWER) }
+
+fn num_assign[comptime N: int]() int { N }
+fn inc_assign(value: int) int { value + 1 }
+fn nested_assign() int { num_assign::[inc_assign(num_assign::[2]())]() }
+const TOP_LEVEL_ASSIGN: int = num_assign::[inc_assign(2)]()
+const NESTED_ASSIGN: int = nested_assign()
+const ASSIGN_ANSWER: int = comptime source {
+    let n = 1
+    let value = num_assign::[{ n += 1
+        n
+    }]()
+    std.syntax.parse_source(f"{value} * 10 + {n}")
+}
+fn case_const_assign() {
+    println(ASSIGN_ANSWER)
+    println(TOP_LEVEL_ASSIGN)
+    println(NESTED_ASSIGN)
+}
+
+const SHADOW_M: int = 1
+fn forward_macro(comptime SHADOW_M: int) int { num_assign::[SHADOW_M]() }
+const MACRO_SHADOW_ANSWER: int = comptime source {
+    let SHADOW_M = 3
+    let local = num_assign::[SHADOW_M]()
+    let parameter = forward_macro(4)
+    std.syntax.parse_source(f"{local} * 10 + {parameter}")
+}
+fn case_macro_locals() { println(MACRO_SHADOW_ANSWER) }
+
+fn qualified_length[comptime Mod: int](x: int) int {
+    let values = [x; Mod.FLAG_IGNORE]
+    values.len()
+}
+fn case_qualified_repeat() { println(qualified_length::[4](7)) }
+
+fn main() {
+    case_dep_paren()
+    case_dep_method()
+    case_dep_repeat()
+    case_early_const_order()
+    case_const_assign()
+    case_macro_locals()
+    case_qualified_repeat()
+}
+"#;
+    let compiled = Compiler::shared().compile_to_lir(CompileRequest::single_file(
+        "main.gg",
+        source,
+        TargetName::X86_64Linux,
+    ));
+    assert!(
+        compiled.is_success(),
+        "{:?}",
+        compiled.diagnostics().items()
+    );
+    assert_eq!(run_stdout(&compiled, "case_dep_paren"), b"9\n9\n");
+    assert_eq!(run_stdout(&compiled, "case_dep_method"), b"7\n7\n");
+    assert_eq!(run_stdout(&compiled, "case_dep_repeat"), b"5\n6\n7\n8\n");
+    assert_eq!(run_stdout(&compiled, "case_early_const_order"), b"122\n");
+    assert_eq!(run_stdout(&compiled, "case_const_assign"), b"22\n3\n3\n");
+    assert_eq!(run_stdout(&compiled, "case_macro_locals"), b"34\n");
+    assert_eq!(run_stdout(&compiled, "case_qualified_repeat"), b"1\n");
+}
+
+#[test]
+fn const_generics_runtime_shadowing_packs_and_instances() {
+    let source = r#"
+use std.io.{println}
+
+const N: int = 9
+fn number[comptime N: int]() int { N }
+fn forward_num[comptime N: int]() int { number::[N]() }
+const EARLY_FORWARD: int = forward_num::[3]()
+fn case_forwarded_shadow() {
+    println(forward_num::[3]())
+    println(EARLY_FORWARD)
+}
+
+const M_CALLER: int = 3
+fn caller_ignore(M_CALLER: int) int { number::[M_CALLER]() }
+fn expr_ignore(M_CALLER: int) int { number::[M_CALLER + 1]() }
+const CALLER_ANS: int = caller_ignore(7)
+const EXPR_ANS: int = expr_ignore(7)
+fn case_ignore_caller_params() {
+    println(CALLER_ANS)
+    println(EXPR_ANS)
+}
+
+enum Choice { A { data: [int; 2] }, B { data: [int; 3] } }
+fn choice_num[comptime N: int](choice: Choice) int { N }
+const CHOICE_ANS: int = choice_num::[4](Choice::A { data: [1, 2] })
+fn case_inactive_enum() { println(CHOICE_ANS) }
+
+fn inner_empty[comptime N: int](a: [[int; N]; 0]) int { N }
+const INNER_ANS: int = inner_empty::[3]([[1; 3]; 0])
+fn case_empty_outer() { println(INNER_ANS) }
+
+fn pack_num[comptime N: int, Ts...]() int { N }
+fn pack_typed[T, comptime N: int, Ts...]() int { N }
+const PACK_EMPTY: int = pack_num::[2]()
+const PACK_MULTI: int = pack_num::[3, int, bool]()
+const PACK_TYPED: int = pack_typed::[bool, 4, int]()
+fn case_type_packs() {
+    println(PACK_EMPTY)
+    println(PACK_MULTI)
+    println(PACK_TYPED)
+}
+
+fn filled_late[comptime N: int](x: int) [int; N] { [x; N] }
+const LATE_THREE: [int; 3] = filled_late::[3](type_id_count())
+const LATE_EMPTY: [int; 0] = filled_late::[0](type_id_count())
+fn case_late_repeats() {
+    let three = LATE_THREE
+    let empty = LATE_EMPTY
+    println(three.len())
+    println(empty.len())
+    println(three[0] > 0)
+}
+
+struct Counter {}
+impl Counter { fn count[comptime N: int](self: &Self) int { N } }
+fn forward_counter[comptime K: int](c: &Counter) int { c.count::[K]() }
+fn case_const_method() {
+    let c = Counter {}
+    println(c.count::[3]())
+    println(c.count::[0]())
+    println(forward_counter::[4](&c))
+}
+
+fn arr_length[comptime K: int](a: [int; K]) int { K }
+fn arr_ignore[comptime K: int](a: [int; K]) int { 5 }
+const BIND_EXPLICIT: int = number::[3]()
+const BIND_ARRAY: int = arr_length::[2]([1, 2])
+const BIND_EMPTY: int = arr_length::[0]([1; 0])
+const BIND_FORWARD: int = forward_num::[4]()
+const BIND_IGNORED: int = arr_ignore([1, 2, 3])
+fn case_early_bind_only_explicit() {
+    println(BIND_EXPLICIT)
+    println(BIND_ARRAY)
+    println(BIND_EMPTY)
+    println(BIND_FORWARD)
+    println(BIND_IGNORED)
+}
+
+fn repeat_shadow[comptime N: int](x: int) int {
+    let a = [x; N]
+    a.len()
+}
+fn case_repeat_shadow() { println(repeat_shadow::[3](7)) }
+
+struct Block[T, comptime N: int] { data: [T; N] }
+impl[T, comptime N: int] Block[T, N] { fn len(self: &Self) int { N } }
+fn first_elem[T, comptime N: int](a: [T; N]) T { a[0] }
+fn filled_arr[comptime N: int](x: int) [int; N] {
+    let a: [int; N] = [x; N]
+    a
+}
+fn dimension[T, comptime N: int](a: [T; N]) int { _ = a
+    N }
+fn forwarded_arr[comptime K: int](x: int) [int; K] { filled_arr::[K](x) }
+fn select_size[comptime A: int, comptime B: int](a: [int; A], b: [int; B]) int { _ = a
+    _ = b
+    A }
+fn reversed[comptime A: int, comptime B: int](a: [int; A], b: [int; B]) int {
+    select_size::[B, A](b, a)
+}
+const M_BLOCK: int = 4
+fn case_distinct_instances() {
+    let small = Block[int, 2] { data: [7; 2] }
+    let large = Block[int, M_BLOCK] { data: filled_arr::[4](9) }
+    println(small.len())
+    println(large.len())
+    println(first_elem([1, 2, 3]))
+    println(dimension([1, 2, 3]))
+    println(filled_arr::[0](5).len())
+    println(first_elem::[int, 3]([8, 9, 10]))
+    println(forwarded_arr::[M_BLOCK](6).len())
+    println(reversed([1; 2], [1; 4]))
+}
+
+enum SizedChoice[T, comptime N: int] { Data([T; N]), Empty }
+union Packed[comptime N: int] { data: [int; N] }
+fn take_sized(a: SizedChoice[int, 2], b: Packed[4]) { _ = a
+    _ = b }
+
+fn main() {
+    case_forwarded_shadow()
+    case_ignore_caller_params()
+    case_inactive_enum()
+    case_empty_outer()
+    case_type_packs()
+    case_late_repeats()
+    case_const_method()
+    case_early_bind_only_explicit()
+    case_repeat_shadow()
+    case_distinct_instances()
+}
+"#;
+    let compiled = Compiler::shared().compile_to_lir(CompileRequest::single_file(
+        "main.gg",
+        source,
+        TargetName::X86_64Linux,
+    ));
+    assert!(
+        compiled.is_success(),
+        "{:?}",
+        compiled.diagnostics().items()
+    );
+    assert_eq!(run_stdout(&compiled, "case_forwarded_shadow"), b"3\n3\n");
+    assert_eq!(
+        run_stdout(&compiled, "case_ignore_caller_params"),
+        b"3\n4\n"
+    );
+    assert_eq!(run_stdout(&compiled, "case_inactive_enum"), b"4\n");
+    assert_eq!(run_stdout(&compiled, "case_empty_outer"), b"3\n");
+    assert_eq!(run_stdout(&compiled, "case_type_packs"), b"2\n3\n4\n");
+    assert_eq!(run_stdout(&compiled, "case_late_repeats"), b"3\n0\ntrue\n");
+    assert_eq!(run_stdout(&compiled, "case_const_method"), b"3\n0\n4\n");
+    assert_eq!(
+        run_stdout(&compiled, "case_early_bind_only_explicit"),
+        b"3\n2\n0\n4\n5\n"
+    );
+    assert_eq!(run_stdout(&compiled, "case_repeat_shadow"), b"3\n");
+    assert_eq!(
+        run_stdout(&compiled, "case_distinct_instances"),
+        b"2\n4\n1\n3\n0\n8\n4\n4\n"
+    );
+}
+
+#[test]
+fn const_generics_mono_instances_deduplicate() {
+    let compile =
+        |n| {
+            let source = format!(
+                "fn f(comptime n: int) [int; n] {{ [0; n] }}\nfn main() {{ _ = f(2)\n _ = f({n}) }}"
+            );
+            let compiled = Compiler::shared().compile_frontend_for_test(
+                CompileRequest::single_file("main.gg", source, TargetName::X86_64Linux),
+            );
+            assert!(
+                compiled.is_success(),
+                "{:?}",
+                compiled.diagnostics().items()
+            );
+            compiled
+        };
+    let same = compile(2);
+    let distinct = compile(3);
+    let warm = compile(3);
+    assert_eq!(
+        same.mono_instance_count().unwrap() + 1,
+        distinct.mono_instance_count().unwrap()
+    );
+    assert_eq!(
+        distinct.mono_graph_fingerprint().unwrap(),
+        warm.mono_graph_fingerprint().unwrap()
+    );
+}
+
+#[test]
+fn const_generics_cold_warm_mono_cache_matches() {
+    let compiler = Compiler::new();
+    let source = "fn length[comptime N: int](a: [int; N]) int { _ = a\n N }\nfn main() { _ = length([1, 2, 3]) }";
+    let cold = compiler.compile_frontend_for_test(CompileRequest::single_file(
+        "main.gg",
+        source,
+        TargetName::X86_64Linux,
+    ));
+    assert!(cold.is_success(), "{:?}", cold.diagnostics().items());
+    let warm = compiler.compile_frontend_for_test(CompileRequest::single_file(
+        "main.gg",
+        source,
+        TargetName::X86_64Linux,
+    ));
+    assert!(warm.is_success(), "{:?}", warm.diagnostics().items());
+    assert_eq!(
+        cold.mono_graph_fingerprint().unwrap(),
+        warm.mono_graph_fingerprint().unwrap()
+    );
+}
+
+fn compile_imported_result_constructors(source: &str) -> crate::Compilation {
+    let root = tempfile::tempdir().unwrap();
+    let src = root.path().join("src");
+    std::fs::create_dir(&src).unwrap();
+    std::fs::write(
+        root.path().join("gugu.toml"),
+        "[package]\nname = \"constructors\"\nversion = \"0.0.0\"\n",
     )
-    .into_iter()
-    .flat_map(|(_, bytes)| bytes)
-    .collect();
-    assert_eq!(bytes, b"5\n6\n7\n8\n");
-}
-
-#[test]
-fn dependent_value_parameters_reject_nonconstant_arguments() {
-    let compiled = Compiler::shared().compile_to_lir(CompileRequest::single_file(
-        "main.gg",
-        "fn repeat(comptime n: int) [int; n] { [0; n] }\nfn f(n: int) { _ = repeat(n) }\nfn main() {}",
+    .unwrap();
+    std::fs::write(src.join("main.gg"), source).unwrap();
+    std::fs::write(src.join("helpers.gg"), "pub fn shadow[comptime N: int](value: int) int { panic(\"imported function must not run\") }\npub fn genuine[comptime N: int](value: int) int { N + value }\n").unwrap();
+    let project = crate::Project::discover(root.path()).unwrap();
+    let package = project.current_package().unwrap();
+    let target = package
+        .targets()
+        .iter()
+        .find(|target| target.kind() == crate::TargetKind::Bin)
+        .unwrap();
+    Compiler::shared().compile_sema_for_test(CompileRequest::project_target(
+        package,
+        target,
+        "constructors@0.0.0 (path+.)",
         TargetName::X86_64Linux,
-    ));
-    assert!(!compiled.is_success());
-    assert!(
-        compiled
-            .diagnostics()
-            .items()
-            .iter()
-            .any(|diagnostic| diagnostic.message().contains("需要编译期已知值")),
-        "{:?}",
-        compiled.diagnostics().items()
-    );
+        vec!["default".to_owned()],
+        Default::default(),
+    ))
 }
 
 #[test]
-fn dependent_value_parameters_reject_type_arithmetic() {
-    let compiled = Compiler::shared().compile_to_lir(CompileRequest::single_file(
-        "main.gg",
-        "fn f(comptime n: int) [int; n + 1] { [0; n + 1] }\nfn main() { _ = f(2) }",
-        TargetName::X86_64Linux,
-    ));
-    assert!(!compiled.is_success());
-    assert!(
-        compiled
-            .diagnostics()
-            .items()
-            .iter()
-            .any(|diagnostic| diagnostic.message().contains("算术")),
-        "{:?}",
-        compiled.diagnostics().items()
-    );
-}
-
-#[test]
-fn imported_result_constructor_names_do_not_evaluate_function_const_arguments() {
-    let compiled = compile_imported_result_constructors(
+fn imported_result_constructor_const_argument_contracts() {
+    let ok = compile_imported_result_constructors(
         r#"
 use helpers.{shadow as Ok, shadow as Err, genuine as User}
 const ANSWER: int = comptime source {
@@ -252,15 +423,8 @@ fn main() { _ = ANSWER
 }
 "#,
     );
-    assert!(
-        compiled.is_success(),
-        "{:?}",
-        compiled.diagnostics().items()
-    );
-}
+    assert!(ok.is_success(), "{:?}", ok.diagnostics().items());
 
-#[test]
-fn imported_result_constructor_names_validate_constructor_arity_first() {
     for constructor in ["Ok", "Err"] {
         for arguments in ["", "1, 2"] {
             let source = format!(
@@ -288,61 +452,43 @@ fn main() {{ _ = ANSWER }}
     }
 }
 
-fn compile_imported_result_constructors(source: &str) -> crate::Compilation {
-    let root = tempfile::tempdir().unwrap();
-    let src = root.path().join("src");
-    std::fs::create_dir(&src).unwrap();
-    std::fs::write(
-        root.path().join("gugu.toml"),
-        "[package]\nname = \"constructors\"\nversion = \"0.0.0\"\n",
-    )
-    .unwrap();
-    std::fs::write(src.join("main.gg"), source).unwrap();
-    std::fs::write(src.join("helpers.gg"), "pub fn shadow[comptime N: int](value: int) int { panic(\"imported function must not run\") }\npub fn genuine[comptime N: int](value: int) int { N + value }\n").unwrap();
-    let project = crate::Project::discover(root.path()).unwrap();
-    let package = project.current_package().unwrap();
-    let target = package
-        .targets()
-        .iter()
-        .find(|target| target.kind() == crate::TargetKind::Bin)
-        .unwrap();
-    Compiler::shared().compile_to_lir(CompileRequest::project_target(
-        package,
-        target,
-        "constructors@0.0.0 (path+.)",
-        TargetName::X86_64Linux,
-        vec!["default".to_owned()],
-        Default::default(),
-    ))
-}
-
 #[test]
-fn early_const_arguments_run_before_value_arguments() {
-    let actual: Vec<_> = output(
+fn const_generics_negative_diagnostics_dependent_and_early() {
+    check_frontend_error(
         r#"
-use std.io.{println}
-fn combine[comptime N: int](value: int) int { N * 10 + value }
-const ANSWER: int = comptime source {
-    let n = 0
-    let value = combine::[{ n = 1
-        n
-    }]({ n = 2
-        n
-    })
-    std.syntax.parse_source(f"{value} * 10 + {n}")
+fn take(comptime n: int, a: [int; ((n))]) int { a[0] }
+const VALUE: int = comptime source {
+    let value = take(2, [1, 2, 3])
+    std.syntax.parse_source(f"{value}")
 }
-fn main() { println(ANSWER) }
+fn main() { _ = VALUE }
 "#,
-        &[],
-    )
-    .into_iter()
-    .flat_map(|(_, bytes)| bytes)
-    .collect();
-    assert_eq!(actual, b"122\n");
-}
-
-#[test]
-fn invalid_early_const_arguments_fail_before_value_arguments() {
+        "数组实参长度与参数长度不一致",
+    );
+    check_frontend_error(
+        r#"
+trait Change { fn change(self: &Self) }
+impl Change for int { fn change(self: &Self) { *self = 1 } }
+fn f(comptime n: int) [int; n] { n.change()
+    [0; n] }
+fn main() { _ = f(2) }
+"#,
+        "不能赋值或借用",
+    );
+    for statement in ["n = 1", "_ = &n", "_ = std.ptr.addr_of((n))"] {
+        let source = format!(
+            "fn f(comptime n: int) [int; n] {{ {statement}\n [0; n] }}\nfn main() {{ _ = f(2) }}"
+        );
+        check_frontend_error(&source, "不能赋值或借用");
+    }
+    check_frontend_error(
+        "fn repeat(comptime n: int) [int; n] { [0; n] }\nfn f(n: int) { _ = repeat(n) }\nfn main() {}",
+        "需要编译期已知值",
+    );
+    check_frontend_error(
+        "fn f(comptime n: int) [int; n + 1] { [0; n + 1] }\nfn main() { _ = f(2) }",
+        "算术",
+    );
     for argument in ["-1", "true"] {
         let source = format!(
             r#"
@@ -354,79 +500,8 @@ const ANSWER: int = comptime source {{
 fn main() {{ _ = ANSWER }}
 "#
         );
-        let compiled = Compiler::shared().compile_to_lir(CompileRequest::single_file(
-            "main.gg",
-            source,
-            TargetName::X86_64Linux,
-        ));
-        assert!(!compiled.is_success());
-        assert!(
-            compiled
-                .diagnostics()
-                .items()
-                .iter()
-                .any(|diagnostic| diagnostic
-                    .message()
-                    .contains("comptime 泛型实参需要非负 int 常量")),
-            "{:?}",
-            compiled.diagnostics().items()
-        );
+        check_frontend_error(&source, "comptime 泛型实参需要非负 int 常量");
     }
-}
-
-#[test]
-fn explicit_const_argument_assignments_update_live_caller_locals() {
-    let actual: Vec<_> = output(
-        r#"
-use std.io.{println}
-fn number[comptime N: int]() int { N }
-fn increment(value: int) int { value + 1 }
-fn nested() int { number::[increment(number::[2]())]() }
-const TOP_LEVEL: int = number::[increment(2)]()
-const NESTED: int = nested()
-const ANSWER: int = comptime source {
-    let n = 1
-    let value = number::[{ n += 1
-        n
-    }]()
-    std.syntax.parse_source(f"{value} * 10 + {n}")
-}
-fn main() { println(ANSWER)
-    println(TOP_LEVEL)
-    println(NESTED)
-}
-"#,
-        &[],
-    )
-    .into_iter()
-    .flat_map(|(_, bytes)| bytes)
-    .collect();
-    assert_eq!(actual, b"22\n3\n3\n");
-}
-
-#[test]
-fn forwarded_const_parameters_shadow_module_constants_in_all_phases() {
-    let actual: Vec<_> = output(
-        r#"
-use std.io.{println}
-const N: int = 9
-fn number[comptime N: int]() int { N }
-fn forward[comptime N: int]() int { number::[N]() }
-const EARLY: int = forward::[3]()
-fn main() { println(forward::[3]())
-    println(EARLY)
-}
-"#,
-        &[],
-    )
-    .into_iter()
-    .flat_map(|(_, bytes)| bytes)
-    .collect();
-    assert_eq!(actual, b"3\n3\n");
-}
-
-#[test]
-fn source_macros_reject_surplus_explicit_generic_arguments() {
     for call in [
         "number::[2, 3]()",
         "typed::[int, 2, bool]()",
@@ -445,29 +520,12 @@ const ANSWER: int = comptime source {{
 fn main() {{ _ = ANSWER }}
 "#
         );
-        let compiled = Compiler::shared().compile_to_lir(CompileRequest::single_file(
-            "main.gg",
-            source,
-            TargetName::X86_64Linux,
-        ));
-        assert!(
-            !compiled.is_success(),
-            "surplus generic arguments were accepted: {call}"
-        );
-        assert!(
-            compiled
-                .diagnostics()
-                .items()
-                .iter()
-                .any(|diagnostic| diagnostic.message().contains("comptime 泛型实参数量不符")),
-            "{:?}",
-            compiled.diagnostics().items()
-        );
+        check_frontend_error(&source, "comptime 泛型实参数量不符");
     }
 }
 
 #[test]
-fn early_array_arguments_match_explicit_lengths_during_type_formation() {
+fn const_generics_negative_diagnostics_arrays_and_patterns() {
     for (parameter, argument, count) in [
         ("[T; N]", "[1, 2]", 3),
         ("[T; N]", "[0; 0]", 1),
@@ -478,408 +536,38 @@ fn early_array_arguments_match_explicit_lengths_during_type_formation() {
         let source = format!(
             "fn length[T, comptime N: int](a: {parameter}) int {{ N }}\nstruct Storage {{ data: [int; length::[int, {count}]({argument})] }}\nfn main() {{}}"
         );
-        let compiled = Compiler::shared().compile_to_lir(CompileRequest::single_file(
-            "main.gg",
-            &source,
-            TargetName::X86_64Linux,
-        ));
-        assert!(
-            !compiled.is_success(),
-            "ill-typed array-length call was accepted"
-        );
-        assert!(
-            compiled
-                .diagnostics()
-                .items()
-                .iter()
-                .any(|diagnostic| diagnostic
-                    .message()
-                    .contains("comptime 数组实参长度与参数长度不一致")),
-            "{:?}",
-            compiled.diagnostics().items()
-        );
+        check_frontend_error(&source, "comptime 数组实参长度与参数长度不一致");
     }
-}
 
-#[test]
-fn source_macro_const_arguments_preserve_script_locals_and_comptime_parameters() {
-    let actual: Vec<_> = output(
-        r#"
-use std.io.{println}
-const M: int = 1
-fn number[comptime N: int]() int { N }
-fn forward(comptime M: int) int { number::[M]() }
-const ANSWER: int = comptime source {
-    let M = 3
-    let local = number::[M]()
-    let parameter = forward(4)
-    std.syntax.parse_source(f"{local} * 10 + {parameter}")
-}
-fn main() { println(ANSWER) }
-"#,
-        &[],
-    )
-    .into_iter()
-    .flat_map(|(_, bytes)| bytes)
-    .collect();
-    assert_eq!(actual, b"34\n");
-}
-
-#[test]
-fn qualified_repeat_lengths_are_not_bare_const_parameters() {
-    let actual: Vec<_> = output(
-        r#"
-use std.io.{println}
-use std.test as Mod
-fn length[comptime Mod: int](x: int) int {
-    let values = [x; Mod.FLAG_IGNORE]
-    values.len()
-}
-fn main() { println(length::[4](7)) }
-"#,
-        &[],
-    )
-    .into_iter()
-    .flat_map(|(_, bytes)| bytes)
-    .collect();
-    assert_eq!(actual, b"1\n");
-}
-
-fn requires_explicit_early_const_arguments(source: &str) {
-    let compiled = Compiler::shared().compile_to_lir(CompileRequest::single_file(
+    let reform = "const SIZE: int = length([0])\nfn length[comptime N: int](a: [int; SIZE]) int { N }\nfn main() { _ = SIZE }";
+    check_frontend_error(reform, "早期求值 const 泛型调用需要显式 ::[...] const 实参");
+    let explicit = Compiler::shared().compile_sema_for_test(CompileRequest::single_file(
         "main.gg",
-        source,
+        reform.replace("length([0])", "length::[1]([0])"),
         TargetName::X86_64Linux,
     ));
     assert!(
-        compiled
-            .diagnostics()
-            .items()
-            .iter()
-            .any(|diagnostic| diagnostic
-                .message()
-                .contains("早期求值 const 泛型调用需要显式 ::[...] const 实参")),
+        explicit.is_success(),
         "{:?}",
-        compiled.diagnostics().items()
+        explicit.diagnostics().items()
     );
-}
 
-#[test]
-fn early_const_calls_do_not_reform_parameter_lengths() {
-    let source = "const SIZE: int = length([0])\nfn length[comptime N: int](a: [int; SIZE]) int { N }\nfn main() { _ = SIZE }";
-    requires_explicit_early_const_arguments(source);
-    let explicit = source.replace("length([0])", "length::[1]([0])");
-    let compiled = Compiler::shared().compile_to_lir(CompileRequest::single_file(
-        "main.gg",
-        &explicit,
-        TargetName::X86_64Linux,
-    ));
-    assert!(
-        compiled.is_success(),
-        "{:?}",
-        compiled.diagnostics().items()
-    );
-}
-
-#[test]
-fn early_explicit_const_arguments_ignore_ordinary_caller_parameters() {
-    let actual: Vec<_> = output(
-        r#"
-use std.io.{println}
-const M: int = 3
-fn number[comptime N: int]() int { N }
-fn caller(M: int) int { number::[M]() }
-fn expression(M: int) int { number::[M + 1]() }
-const ANSWER: int = caller(7)
-const EXPRESSION: int = expression(7)
-fn main() { println(ANSWER)
-    println(EXPRESSION)
-}
-"#,
-        &[],
-    )
-    .into_iter()
-    .flat_map(|(_, bytes)| bytes)
-    .collect();
-    assert_eq!(actual, b"3\n4\n");
-}
-
-#[test]
-fn early_const_calls_do_not_inspect_inactive_enum_fields() {
-    let source = r#"
-use std.io.{println}
-enum Choice { A { data: [int; 2] }, B { data: [int; 3] } }
-fn number[comptime N: int](choice: Choice) int { N }
-const ANSWER: int = number::[4](Choice::A { data: [1, 2] })
-fn main() { println(ANSWER) }
-"#;
-    let actual: Vec<_> = output(source, &[])
-        .into_iter()
-        .flat_map(|(_, bytes)| bytes)
-        .collect();
-    assert_eq!(actual, b"4\n");
-    requires_explicit_early_const_arguments(&source.replace("number::[4]", "number"));
-}
-
-#[test]
-fn early_empty_outer_arrays_require_explicit_inner_lengths() {
-    let source = r#"
-use std.io.{println}
-fn inner[comptime N: int](a: [[int; N]; 0]) int { N }
-const ANSWER: int = inner::[3]([[1; 3]; 0])
-fn main() { println(ANSWER) }
-"#;
-    let actual: Vec<_> = output(source, &[])
-        .into_iter()
-        .flat_map(|(_, bytes)| bytes)
-        .collect();
-    assert_eq!(actual, b"3\n");
-    requires_explicit_early_const_arguments(&source.replace("inner::[3]", "inner"));
-    requires_explicit_early_const_arguments(
+    for source in [
+        "enum Choice { A { data: [int; 2] }, B { data: [int; 3] } }\nfn number[comptime N: int](choice: Choice) int { N }\nconst ANSWER: int = number(Choice::A { data: [1, 2] })\nfn main() { _ = ANSWER }",
+        "fn inner[comptime N: int](a: [[int; N]; 0]) int { N }\nconst ANSWER: int = inner([[1; 3]; 0])\nfn main() { _ = ANSWER }",
         "const N: int = 9\nfn length[comptime N: int](a: [int; N]) int { N }\nconst ANSWER: int = length([1, 2])\nfn main() { _ = ANSWER }",
-    );
-}
-
-#[test]
-fn early_explicit_const_arguments_allow_empty_and_multiple_type_pack_elements() {
-    let actual: Vec<_> = output(
-        r#"
-use std.io.{println}
-fn number[comptime N: int, Ts...]() int { N }
-fn typed[T, comptime N: int, Ts...]() int { N }
-const EMPTY: int = number::[2]()
-const MULTIPLE: int = number::[3, int, bool]()
-const TYPED: int = typed::[bool, 4, int]()
-fn main() { println(EMPTY)
-    println(MULTIPLE)
-    println(TYPED)
-}
-"#,
-        &[],
-    )
-    .into_iter()
-    .flat_map(|(_, bytes)| bytes)
-    .collect();
-    assert_eq!(actual, b"2\n3\n4\n");
-    requires_explicit_early_const_arguments(
         "fn ambiguous[Ts..., comptime N: int]() int { N }\nconst ANSWER: int = ambiguous::[2, int]()\nfn main() { _ = ANSWER }",
-    );
-}
+    ] {
+        check_frontend_error(source, "早期求值 const 泛型调用需要显式 ::[...] const 实参");
+    }
 
-#[test]
-fn late_repeats_use_concrete_instance_lengths() {
-    let actual: Vec<_> = output(
-        r#"
-use std.io.{println}
-fn filled[comptime N: int](x: int) [int; N] { [x; N] }
-const THREE: [int; 3] = filled::[3](type_id_count())
-const EMPTY: [int; 0] = filled::[0](type_id_count())
-fn main() {
-    let three = THREE
-    let empty = EMPTY
-    println(three.len())
-    println(empty.len())
-    println(three[0] > 0)
-}
-"#,
-        &[],
-    )
-    .into_iter()
-    .flat_map(|(_, bytes)| bytes)
-    .collect();
-    assert_eq!(actual, b"3\n0\ntrue\n");
-}
-
-#[test]
-fn explicit_const_method_arguments_survive_dispatch() {
-    let actual: Vec<_> = output(
-        r#"
-use std.io.{println}
-struct Counter {}
-impl Counter {
-    fn count[comptime N: int](self: &Self) int { N }
-}
-fn forward[comptime K: int](c: &Counter) int { c.count::[K]() }
-fn main() {
-    let c = Counter {}
-    println(c.count::[3]())
-    println(c.count::[0]())
-    println(forward::[4](&c))
-}
-"#,
-        &[],
-    )
-    .into_iter()
-    .flat_map(|(_, bytes)| bytes)
-    .collect();
-    assert_eq!(actual, b"3\n0\n4\n");
-}
-
-#[test]
-fn early_calls_bind_only_explicit_const_generics() {
-    let actual: Vec<_> = output(
-        r#"
-use std.io.{println}
-const N: int = 9
-fn number[comptime N: int]() int { N }
-fn forward[comptime N: int]() int { number::[N]() }
-fn length[comptime K: int](a: [int; K]) int { K }
-fn ignore[comptime K: int](a: [int; K]) int { 5 }
-const EXPLICIT: int = number::[3]()
-const ARRAY: int = length::[2]([1, 2])
-const EMPTY: int = length::[0]([1; 0])
-const FORWARDED: int = forward::[4]()
-const IGNORED: int = ignore([1, 2, 3])
-fn main() { println(EXPLICIT)
-    println(ARRAY)
-    println(EMPTY)
-    println(FORWARDED)
-    println(IGNORED)
-}
-"#,
-        &[],
-    )
-    .into_iter()
-    .flat_map(|(_, bytes)| bytes)
-    .collect();
-    assert_eq!(actual, b"3\n2\n0\n4\n5\n");
-}
-
-#[test]
-fn const_generic_cached_callee_preserves_instance_identity() {
-    let compiler = Compiler::new();
-    let source = "fn length[comptime N: int](a: [int; N]) int { _ = a\n N }\nfn main() { _ = length([1, 2, 3]) }";
-    let cold = compiler.compile_full_for_test(CompileRequest::single_file(
-        "main.gg",
-        source,
-        TargetName::X86_64Linux,
-    ));
-    assert!(cold.is_success(), "{:?}", cold.diagnostics().items());
-    let warm = compiler.compile_full_for_test(CompileRequest::single_file(
-        "main.gg",
-        source,
-        TargetName::X86_64Linux,
-    ));
-    assert!(warm.is_success(), "{:?}", warm.diagnostics().items());
-    assert_eq!(
-        cold.image_plan().unwrap().mono_graph_fingerprint(),
-        warm.image_plan().unwrap().mono_graph_fingerprint()
-    );
-}
-
-#[test]
-fn symbolic_array_patterns_require_unconditional_rest() {
     for pattern in ["[]", "[x]", "[x, ..]", "[.., x]"] {
         let source = format!(
             "fn empty[comptime N: int](a: [int; N]) bool {{ match a {{ {pattern} => true, _ => false }} }}\nfn main() {{ _ = empty([1, 2]) }}"
         );
-        let compiled = Compiler::shared().compile_to_lir(CompileRequest::single_file(
-            "main.gg",
-            &source,
-            TargetName::X86_64Linux,
-        ));
-        assert!(
-            compiled.diagnostics().items().iter().any(|d| d
-                .message()
-                .contains("符号长度数组模式只支持无前后缀的 rest")),
-            "{pattern}: {:?}",
-            compiled.diagnostics().items()
-        );
+        check_frontend_error(&source, "符号长度数组模式只支持无前后缀的 rest");
     }
-}
 
-#[test]
-fn generic_repeat_length_shadows_module_constant() {
-    let actual: Vec<_> = output(
-        r#"
-use std.io.{println}
-const N: int = 1
-fn size[comptime N: int](x: int) int {
-    let a = [x; N]
-    a.len()
-}
-fn main() { println(size::[3](7)) }
-"#,
-        &[],
-    )
-    .into_iter()
-    .flat_map(|(_, bytes)| bytes)
-    .collect();
-    assert_eq!(actual, b"3\n");
-}
-
-#[test]
-fn const_generic_arrays_execute_distinct_instances() {
-    let source = r#"
-use std.io.{println}
-struct Block[T, comptime N: int] { data: [T; N] }
-impl[T, comptime N: int] Block[T, N] {
-    fn len(self: &Self) int { N }
-}
-fn first[T, comptime N: int](a: [T; N]) T { a[0] }
-fn filled[comptime N: int](x: int) [int; N] {
-    let a: [int; N] = [x; N]
-    a
-}
-fn dimension[T, comptime N: int](a: [T; N]) int { _ = a
-    N
-}
-fn forwarded[comptime K: int](x: int) [int; K] { filled::[K](x) }
-fn select_size[comptime A: int, comptime B: int](a: [int; A], b: [int; B]) int {
-    _ = a
-    _ = b
-    A
-}
-fn reversed[comptime A: int, comptime B: int](a: [int; A], b: [int; B]) int {
-    select_size::[B, A](b, a)
-}
-const M: int = 4
-fn main() {
-    let small = Block[int, 2] { data: [7; 2] }
-    let large = Block[int, M] { data: filled::[4](9) }
-    println(small.len())
-    println(large.len())
-    println(first([1, 2, 3]))
-    println(dimension([1, 2, 3]))
-    println(filled::[0](5).len())
-    println(first::[int, 3]([8, 9, 10]))
-    println(forwarded::[M](6).len())
-    println(reversed([1; 2], [1; 4]))
-}
-"#;
-    let actual: Vec<_> = output(source, &[])
-        .into_iter()
-        .flat_map(|(fd, bytes)| {
-            assert_eq!(fd, 1);
-            bytes
-        })
-        .collect();
-    assert_eq!(actual, b"2\n4\n1\n3\n0\n8\n4\n4\n");
-}
-
-#[test]
-fn const_generic_enum_and_union_fields_accept_concrete_lengths() {
-    let compiled = Compiler::shared().compile_to_lir(CompileRequest::single_file(
-        "main.gg",
-        r#"
-enum SizedChoice[T, comptime N: int] { Data([T; N]), Empty }
-union Packed[comptime N: int] { data: [int; N] }
-fn take(a: SizedChoice[int, 2], b: Packed[4]) { _ = a
-    _ = b
-}
-fn main() {}
-"#,
-        TargetName::X86_64Linux,
-    ));
-    assert!(
-        compiled.is_success(),
-        "{:?}",
-        compiled.diagnostics().items()
-    );
-}
-
-#[test]
-fn const_generic_arrays_reject_invalid_lengths_and_kinds() {
     for source in [
         "struct A[comptime N: int] { a: [int; N] }\nfn main() { _ = A[-1] { a: [0; 1] } }",
         "struct A[comptime N: int] { a: [int; N] }\nfn main() { let n = 2\n _ = A[n] { a: [0; 2] } }",
@@ -890,7 +578,7 @@ fn const_generic_arrays_reject_invalid_lengths_and_kinds() {
         "struct A[comptime N: int] { a: N }\nfn main() {}",
         "struct A[comptime N: string] { a: [int; N] }\nfn main() {}",
     ] {
-        let compiled = Compiler::shared().compile_to_lir(CompileRequest::single_file(
+        let compiled = Compiler::shared().compile_sema_for_test(CompileRequest::single_file(
             "main.gg",
             source,
             TargetName::X86_64Linux,
@@ -898,22 +586,9 @@ fn const_generic_arrays_reject_invalid_lengths_and_kinds() {
         assert!(!compiled.is_success(), "{source}");
         assert!(!compiled.diagnostics().items().is_empty());
     }
-}
 
-#[test]
-fn const_generic_array_arithmetic_has_explicit_diagnostic() {
-    let compiled = Compiler::shared().compile_to_lir(CompileRequest::single_file(
-        "main.gg",
+    check_frontend_error(
         "struct A[comptime N: int] { a: [int; N + 1] }\nfn main() {}",
-        TargetName::X86_64Linux,
-    ));
-    assert!(
-        compiled
-            .diagnostics()
-            .items()
-            .iter()
-            .any(|d| d.message().contains("不支持参数算术")),
-        "{:?}",
-        compiled.diagnostics().items()
+        "不支持参数算术",
     );
 }

@@ -7,7 +7,7 @@ fn buffered_channel_resume_retries_payload_operation() {
     let output =
         Compiler::with_artifacts(&EMBEDDED_ARTIFACTS).compile_to_lir(CompileRequest::single_file(
             "main.gg",
-            include_str!("fixtures/channel_resume.gg"),
+            include_str!("../fixtures/channel_resume.gg"),
             TargetName::X86_64Linux,
         ));
     assert!(output.is_success(), "{:?}", output.diagnostics().items());

@@ -124,12 +124,17 @@ fn readiness(h: &mut Harness<'_>, op: u64, request: u64, memory: &mut Vec<u8>) {
 }
 
 #[test]
-fn listener_fifo_cancel_and_close_execute_linux_state_machine() {
+fn linux_listener_and_bind_option_contracts() {
     let output = compile(
         include_str!("../../../../gugu-compiler/tests/fixtures/net_bind.gg"),
         TargetName::X86_64Linux,
     );
-    let mut h = Harness::new(&output);
+    listener_fifo_cancel_and_close_execute_linux_state_machine(&output);
+    bind_options_configure_ipv6_and_reject_invalid_backlog_before_native(&output);
+}
+
+fn listener_fifo_cancel_and_close_execute_linux_state_machine(output: &Compilation) {
+    let mut h = Harness::new(output);
     let mut memory = vec![0; 262144];
     let (state, control) = setup(&mut h, &mut memory);
     put(&mut memory, 96, 1);
@@ -196,13 +201,8 @@ fn windows_accept_cancellation_retains_native_lease_until_completion() {
     assert!(h.script.is_empty());
 }
 
-#[test]
-fn bind_options_configure_ipv6_and_reject_invalid_backlog_before_native() {
-    let output = compile(
-        include_str!("../../../../gugu-compiler/tests/fixtures/net_bind.gg"),
-        TargetName::X86_64Linux,
-    );
-    let mut h = Harness::new(&output);
+fn bind_options_configure_ipv6_and_reject_invalid_backlog_before_native(output: &Compilation) {
+    let mut h = Harness::new(output);
     let mut memory = vec![0; 262144];
     let words = h.invoke("main.gg", "numeric_v6", &[], &mut memory);
     let addr = 512;

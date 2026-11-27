@@ -13,7 +13,7 @@ fn compile(source: &str, target: TargetName) -> gugu_compiler::Compilation {
 #[test]
 fn tcp_stream_apis_link_linux_without_resolver_dependencies() {
     let output = compile(
-        include_str!("fixtures/net_stream.gg"),
+        include_str!("../fixtures/net_stream.gg"),
         TargetName::X86_64Linux,
     );
     assert!(output.image_plan().unwrap().linux_interpreter().is_empty());
@@ -22,7 +22,7 @@ fn tcp_stream_apis_link_linux_without_resolver_dependencies() {
 #[test]
 fn tcp_stream_apis_link_windows_overlapped_operations() {
     let output = compile(
-        include_str!("fixtures/net_stream.gg"),
+        include_str!("../fixtures/net_stream.gg"),
         TargetName::X86_64Windows,
     );
     let image = output.image_plan().unwrap().windows_image();
@@ -39,7 +39,7 @@ fn tcp_stream_apis_link_windows_overlapped_operations() {
 #[test]
 fn datagram_and_unix_apis_link_linux_without_resolver_dependencies() {
     let output = compile(
-        include_str!("fixtures/net_datagram_unix.gg"),
+        include_str!("../fixtures/net_datagram_unix.gg"),
         TargetName::X86_64Linux,
     );
     assert!(output.image_plan().unwrap().linux_interpreter().is_empty());
@@ -48,7 +48,7 @@ fn datagram_and_unix_apis_link_linux_without_resolver_dependencies() {
 #[test]
 fn datagram_and_unix_apis_link_windows_overlapped_operations() {
     let output = compile(
-        include_str!("fixtures/net_datagram_unix.gg"),
+        include_str!("../fixtures/net_datagram_unix.gg"),
         TargetName::X86_64Windows,
     );
     let image = output.image_plan().unwrap().windows_image();
@@ -65,7 +65,7 @@ fn datagram_and_unix_apis_link_windows_overlapped_operations() {
 #[test]
 fn numeric_listener_and_datagram_bind_link_static_linux() {
     let output = compile(
-        include_str!("fixtures/net_bind.gg"),
+        include_str!("../fixtures/net_bind.gg"),
         TargetName::X86_64Linux,
     );
     let plan = output.image_plan().unwrap();
@@ -78,7 +78,7 @@ fn numeric_listener_and_datagram_bind_link_static_linux() {
 #[test]
 fn listener_and_datagram_bind_link_macos_libsystem() {
     let output = compile(
-        include_str!("fixtures/net_bind.gg"),
+        include_str!("../fixtures/net_bind.gg"),
         TargetName::X86_64Macos,
     );
     let image = output.image_plan().unwrap().macos_image();
@@ -96,7 +96,7 @@ fn listener_and_datagram_bind_link_macos_libsystem() {
 #[test]
 fn listener_and_datagram_bind_link_windows_winsock() {
     let output = compile(
-        include_str!("fixtures/net_bind.gg"),
+        include_str!("../fixtures/net_bind.gg"),
         TargetName::X86_64Windows,
     );
     let image = output.image_plan().unwrap().windows_image();
@@ -120,7 +120,7 @@ fn listener_and_datagram_bind_link_windows_winsock() {
 #[test]
 fn connect_targets_link_target_libc_and_threads_on_linux() {
     let output = compile(
-        include_str!("fixtures/net_connect.gg"),
+        include_str!("../fixtures/net_connect.gg"),
         TargetName::X86_64Linux,
     );
     let plan = output.image_plan().unwrap();
@@ -138,7 +138,7 @@ fn connect_targets_link_target_libc_and_threads_on_linux() {
 #[test]
 fn connect_targets_link_winsock_and_resolver_on_windows() {
     let output = compile(
-        include_str!("fixtures/net_connect.gg"),
+        include_str!("../fixtures/net_connect.gg"),
         TargetName::X86_64Windows,
     );
     for symbol in ["ws2_32.dll", "getaddrinfo"] {
@@ -157,7 +157,7 @@ fn connect_targets_link_winsock_and_resolver_on_windows() {
 #[test]
 fn system_resolver_links_target_libc_and_threads_on_linux() {
     let output = compile(
-        include_str!("fixtures/net_resolve.gg"),
+        include_str!("../fixtures/net_resolve.gg"),
         TargetName::X86_64Linux,
     );
     let plan = output.image_plan().unwrap();
@@ -181,7 +181,7 @@ fn system_resolver_links_target_libc_and_threads_on_linux() {
 #[test]
 fn system_resolver_links_winsock_on_windows() {
     let output = compile(
-        include_str!("fixtures/net_resolve.gg"),
+        include_str!("../fixtures/net_resolve.gg"),
         TargetName::X86_64Windows,
     );
     for symbol in ["ws2_32.dll", "getaddrinfo", "freeaddrinfo"] {

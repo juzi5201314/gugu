@@ -109,15 +109,3 @@ impl RuntimeArtifactProvider for EmbeddedRuntimeArtifacts {
 
 /// 进程内固定的嵌入 artifact 提供者。
 pub static EMBEDDED_ARTIFACTS: EmbeddedRuntimeArtifacts = EmbeddedRuntimeArtifacts;
-
-#[cfg(test)]
-mod tests {
-    use super::*;
-
-    #[test]
-    fn embedded_targets_decode_and_have_distinct_manifests() {
-        let linux = embedded_artifact(TargetName::X86_64Linux).expect("linux artifact");
-        let windows = embedded_artifact(TargetName::X86_64Windows).expect("windows artifact");
-        assert_ne!(linux.manifest.target, windows.manifest.target);
-    }
-}

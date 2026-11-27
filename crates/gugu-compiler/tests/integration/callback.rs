@@ -102,7 +102,7 @@ fn source_calls_to_c_exports_use_the_native_entry() {
         let output = Compiler::with_artifacts(&EMBEDDED_ARTIFACTS).compile_to_lir(
             CompileRequest::single_file(
                 "main.gg",
-                include_str!("fixtures/callback_local.gg"),
+                include_str!("../fixtures/callback_local.gg"),
                 target,
             ),
         );
@@ -115,35 +115,42 @@ fn source_calls_to_c_exports_use_the_native_entry() {
     }
 }
 
-#[test]
-fn c_exports_materialize_managed_callback_adapters() {
-    for target in [TargetName::X86_64Linux, TargetName::X86_64Windows] {
-        let output = Compiler::with_artifacts(&EMBEDDED_ARTIFACTS).compile_full_for_test(
-            CompileRequest::single_file("main.gg", include_str!("fixtures/callback.gg"), target),
-        );
-        assert!(
-            output.is_success(),
-            "{target:?}: {:?}",
-            output.diagnostics().items()
-        );
-        assert!(
-            output.diagnostics().items().is_empty(),
-            "{:?}",
-            output.diagnostics().items()
-        );
-        let plan = output.image_plan().unwrap();
-        match target {
-            TargetName::X86_64Linux => verify_elf_exports(plan.linux_image()),
-            TargetName::X86_64Windows => verify_pe_exports(plan.windows_image()),
-            TargetName::X86_64Macos => unreachable!(),
-            TargetName::Aarch64Linux | TargetName::Aarch64Macos => unreachable!(),
-        }
-        let lir = output.dump_lir().unwrap();
-        for name in ["callback_add", "callback_mixed", "callback_large"] {
-            assert!(
-                lir.contains(&format!("{name}$callback")),
-                "缺少 {name} 受管适配器"
-            );
-        }
+fn assert_c_exports_materialize_managed_callback_adapters(target: TargetName) {
+    let output = Compiler::with_artifacts(&EMBEDDED_ARTIFACTS).compile_full_for_test(
+        CompileRequest::single_file("main.gg", include_str!("../fixtures/callback.gg"), target),
+    );
+    assert!(
+        output.is_success(),
+        "{target:?}: {:?}",
+        output.diagnostics().items()
+    );
+    assert!(
+        output.diagnostics().items().is_empty(),
+        "{:?}",
+        output.diagnostics().items()
+    );
+    let plan = output.image_plan().unwrap();
+    match target {
+        TargetName::X86_64Linux => verify_elf_exports(plan.linux_image()),
+        TargetName::X86_64Windows => verify_pe_exports(plan.windows_image()),
+        TargetName::X86_64Macos => unreachable!(),
+        TargetName::Aarch64Linux | TargetName::Aarch64Macos => unreachable!(),
     }
+    let lir = output.dump_lir().unwrap();
+    for name in ["callback_add", "callback_mixed", "callback_large"] {
+        assert!(
+            lir.contains(&format!("{name}$callback")),
+            "缺少 {name} 受管适配器"
+        );
+    }
+}
+
+#[test]
+fn linux_c_exports_materialize_managed_callback_adapters() {
+    assert_c_exports_materialize_managed_callback_adapters(TargetName::X86_64Linux);
+}
+
+#[test]
+fn windows_c_exports_materialize_managed_callback_adapters() {
+    assert_c_exports_materialize_managed_callback_adapters(TargetName::X86_64Windows);
 }

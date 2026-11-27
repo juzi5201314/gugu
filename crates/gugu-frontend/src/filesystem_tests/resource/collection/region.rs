@@ -1,10 +1,8 @@
 //! 退役 TurnRegion 的根、pin 和字段图必须保持可达，最后解除后整段归还。
 use super::*;
 
-#[test]
-fn region_field_barrier_and_minor_preserve_young_reference() {
-    let (hir, bodies) = runtime_bodies();
-    let mut harness = ResourceHarness::from_bodies(&hir, &bodies);
+pub(super) fn region_field_barrier_and_minor_preserve_young_reference() {
+    let mut harness = runtime_harness();
     harness.gc_config = CONFIG;
     harness.block_budget = 32768;
     let (mut memory, _) = graph_memory();
@@ -52,15 +50,10 @@ fn region_field_barrier_and_minor_preserve_young_reference() {
     assert_eq!(word(&memory, 98304), 0, "区域不产生普通 arena 卡片");
 }
 
-#[test]
-fn retired_region_keeps_fields_and_pin_until_last_root_then_releases_once() {
-    let output = Compiler::shared().compile_to_lir(CompileRequest::single_file(
-        "main.gg",
-        include_str!("../../../../../gugu-compiler/tests/fixtures/pin.gg"),
-        TargetName::X86_64Linux,
-    ));
-    assert!(output.is_success(), "{:?}", output.diagnostics().items());
-    let mut harness = ResourceHarness::new(&output);
+pub(super) fn retired_region_keeps_fields_and_pin_until_last_root_then_releases_once(
+    output: &Compilation,
+) {
+    let mut harness = ResourceHarness::new(output);
     harness.gc_config = CONFIG;
     harness.block_budget = 32768;
     let (mut memory, meta) = graph_memory();

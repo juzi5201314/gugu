@@ -415,6 +415,8 @@ pub struct Compilation {
     a64: Option<A64Codegen>,
     action_key: Option<project::ActionKey>,
     docs: Option<gugu_gir::docs::DocWorld>,
+    #[cfg(any(test, feature = "test-support"))]
+    mono_summary: Option<(u32, [u8; 32])>,
 }
 
 impl Compilation {
@@ -443,9 +445,28 @@ impl Compilation {
         self.image_plan.as_ref()
     }
 
+    /// 返回单态化实例数量；前端成功后即可读取，无需执行 LIR 或后端镜像。
+    #[cfg(any(test, feature = "test-support"))]
+    pub fn mono_instance_count(&self) -> Option<u32> {
+        self.mono_summary.map(|(count, _)| count)
+    }
+
+    /// 返回单态化调用图指纹；前端成功后即可读取，无需执行 LIR 或后端镜像。
+    #[cfg(any(test, feature = "test-support"))]
+    pub fn mono_graph_fingerprint(&self) -> Option<[u8; 32]> {
+        self.mono_summary.map(|(_, fingerprint)| fingerprint)
+    }
+
     /// 判断本次 action 是否成功且没有错误诊断。
     pub fn is_success(&self) -> bool {
-        self.lir.is_some() && !self.diagnostics.has_errors()
+        let frontend_only_ok = self.lir.is_none()
+            && self.hir.is_some()
+            && self
+                .graph
+                .nodes()
+                .iter()
+                .all(|node| node.status() != ActionStatus::Failed);
+        (self.lir.is_some() || frontend_only_ok) && !self.diagnostics.has_errors()
     }
 
     /// 返回完整编译 action 的内容寻址 key。
@@ -589,6 +610,17 @@ pub struct Compiler {
     derive_builtins: bool,
 }
 
+#[derive(Clone, Copy, Eq, PartialEq)]
+enum CompileStage {
+    #[cfg(any(test, feature = "test-support"))]
+    Sema,
+    #[cfg(any(test, feature = "test-support"))]
+    Frontend,
+    #[cfg(any(test, feature = "test-support"))]
+    Lir,
+    Full,
+}
+
 impl Compiler {
     /// 创建 bootstrap compiler；runtime artifact provider 由调用方按目标注入。
     ///
@@ -653,7 +685,7 @@ impl Compiler {
 
     /// 执行一次确定性的 bootstrap action graph。
     pub fn compile(&self, request: CompileRequest) -> Compilation {
-        self.compile_inner(request, false)
+        self.compile_inner(request, CompileStage::Full)
     }
 
     /// 完成 runtime 契约、机器码与镜像编译，供后端回归测试使用。
@@ -669,10 +701,23 @@ impl Compiler {
     /// 沿生产流水线编译至已验证 LIR，供回归测试读取 IR、诊断或解释执行。
     #[cfg(any(test, feature = "test-support"))]
     pub fn compile_to_lir(&self, request: CompileRequest) -> Compilation {
-        self.compile_inner(request, true)
+        self.compile_inner(request, CompileStage::Lir)
     }
 
-    fn compile_inner(&self, request: CompileRequest, stop_after_lir: bool) -> Compilation {
+    /// 沿生产流水线编译至语义检查与 HIR（含 docs、must_use 与 missing_docs 诊断），
+    /// 跳过 GIR/单态化/全程序分析、LIR 与后端。
+    #[cfg(any(test, feature = "test-support"))]
+    pub fn compile_sema_for_test(&self, request: CompileRequest) -> Compilation {
+        self.compile_inner(request, CompileStage::Sema)
+    }
+
+    /// 沿生产流水线编译至前端（含 HIR/mono/GIR、docs 与 lint 诊断），跳过 LIR 与后端。
+    #[cfg(any(test, feature = "test-support"))]
+    pub fn compile_frontend_for_test(&self, request: CompileRequest) -> Compilation {
+        self.compile_inner(request, CompileStage::Frontend)
+    }
+
+    fn compile_inner(&self, request: CompileRequest, stage: CompileStage) -> Compilation {
         let CompileRequest {
             target,
             input,
@@ -711,6 +756,8 @@ impl Compiler {
                     a64: None,
                     action_key: None,
                     docs: None,
+                    #[cfg(any(test, feature = "test-support"))]
+                    mono_summary: None,
                 };
             }
         };
@@ -736,11 +783,30 @@ impl Compiler {
                     a64: None,
                     action_key: None,
                     docs: None,
+                    #[cfg(any(test, feature = "test-support"))]
+                    mono_summary: None,
                 };
             }
         };
         graph.complete(ActionKind::LoadSources, loaded.detail());
 
+        #[cfg(any(test, feature = "test-support"))]
+        let frontend_result = if stage == CompileStage::Sema {
+            gugu_gir::bootstrap_sema_with(
+                loaded.as_source_input(),
+                &self.queries,
+                resources,
+                self.prefix_mode(),
+            )
+        } else {
+            frontend::bootstrap_with(
+                loaded.as_source_input(),
+                &self.queries,
+                resources,
+                self.prefix_mode(),
+            )
+        };
+        #[cfg(not(any(test, feature = "test-support")))]
         let frontend_result = frontend::bootstrap_with(
             loaded.as_source_input(),
             &self.queries,
@@ -771,6 +837,8 @@ impl Compiler {
                     a64: None,
                     action_key: None,
                     docs: None,
+                    #[cfg(any(test, feature = "test-support"))]
+                    mono_summary: None,
                 };
             }
         };
@@ -779,6 +847,11 @@ impl Compiler {
             diagnostics.push(diagnostic);
         }
         // lint 中的错误（如 deny 级别）必须阻断后续产物，不能照常生成镜像计划。
+        #[cfg(any(test, feature = "test-support"))]
+        let mono_summary = Some((
+            frontend.mono.instances.len() as u32,
+            frontend.mono.graph_fingerprint,
+        ));
         if diagnostics.has_errors() {
             graph.fail(ActionKind::BuildIr, "lint 诊断包含错误");
             graph.skip_after(ActionKind::BuildIr, "lint 诊断无效");
@@ -797,6 +870,29 @@ impl Compiler {
                 a64: None,
                 action_key: None,
                 docs: Some(frontend.docs),
+                #[cfg(any(test, feature = "test-support"))]
+                mono_summary,
+            };
+        }
+        #[cfg(any(test, feature = "test-support"))]
+        if matches!(stage, CompileStage::Sema | CompileStage::Frontend) {
+            graph.skip_after(ActionKind::Frontend, "测试请求只编译到前端");
+            diagnostics.sort();
+            return Compilation {
+                graph,
+                diagnostics,
+                source_map,
+                image_plan: None,
+                hir: Some(frontend.hir),
+                gir: Some(frontend.gir),
+                gir_stats: frontend.gir_stats,
+                lir: None,
+                raw_contract: None,
+                x64: None,
+                a64: None,
+                action_key: None,
+                docs: Some(frontend.docs),
+                mono_summary,
             };
         }
         let oracle = target_oracle(target);
@@ -833,10 +929,13 @@ impl Compiler {
                     a64: None,
                     action_key: None,
                     docs: Some(frontend.docs),
+                    #[cfg(any(test, feature = "test-support"))]
+                    mono_summary,
                 };
             }
         };
-        if stop_after_lir {
+        #[cfg(any(test, feature = "test-support"))]
+        if stage == CompileStage::Lir {
             graph.complete(
                 ActionKind::BuildIr,
                 format!(
@@ -862,8 +961,10 @@ impl Compiler {
                 a64: None,
                 action_key: None,
                 docs: Some(frontend.docs),
+                mono_summary,
             };
         }
+        let _ = stage;
         // runtime glue 绑定：被 LIR 引用的 glue 在此解析为镜像内定义；失败在写出前闭环。
         let glues =
             match backend::x64::glue::RuntimeGlueBindings::resolve(&resources, &frontend.hir, &lir)
@@ -888,6 +989,8 @@ impl Compiler {
                         a64: None,
                         action_key: None,
                         docs: Some(frontend.docs),
+                        #[cfg(any(test, feature = "test-support"))]
+                        mono_summary,
                     };
                 }
             };
@@ -916,6 +1019,8 @@ impl Compiler {
                     a64: None,
                     action_key: None,
                     docs: Some(frontend.docs),
+                    #[cfg(any(test, feature = "test-support"))]
+                    mono_summary,
                 };
             }
         };
@@ -959,6 +1064,8 @@ impl Compiler {
                     a64: None,
                     action_key: None,
                     docs: Some(frontend.docs),
+                    #[cfg(any(test, feature = "test-support"))]
+                    mono_summary,
                 };
             }
         };
@@ -1068,6 +1175,8 @@ impl Compiler {
                         a64: None,
                         action_key: None,
                         docs: Some(frontend.docs),
+                        #[cfg(any(test, feature = "test-support"))]
+                        mono_summary,
                     };
                 }
             }
@@ -1158,6 +1267,8 @@ impl Compiler {
                     a64,
                     action_key,
                     docs: Some(frontend.docs),
+                    #[cfg(any(test, feature = "test-support"))]
+                    mono_summary,
                 };
             }
             Err(message) => {
@@ -1183,6 +1294,8 @@ impl Compiler {
                     a64,
                     action_key,
                     docs: Some(frontend.docs),
+                    #[cfg(any(test, feature = "test-support"))]
+                    mono_summary,
                 };
             }
         };
@@ -1219,6 +1332,8 @@ impl Compiler {
             a64,
             action_key,
             docs: Some(frontend.docs),
+            #[cfg(any(test, feature = "test-support"))]
+            mono_summary,
         }
     }
 }

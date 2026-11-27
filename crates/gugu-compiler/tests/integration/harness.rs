@@ -41,7 +41,7 @@ fn test_domain_collects_sorts_and_wires_runner() {
     let output = Compiler::with_artifacts(&EMBEDDED_ARTIFACTS).compile_full_for_test(
         CompileRequest::single_file_test(
             "main.gg",
-            include_str!("fixtures/harness_tests.gg"),
+            include_str!("../fixtures/harness_tests.gg"),
             TargetName::X86_64Linux,
         ),
     );
@@ -91,7 +91,7 @@ fn bench_domain_collects_benches() {
     let output = Compiler::with_artifacts(&EMBEDDED_ARTIFACTS).compile_full_for_test(
         CompileRequest::single_file_bench(
             "bench.gg",
-            include_str!("fixtures/harness_bench.gg"),
+            include_str!("../fixtures/harness_bench.gg"),
             TargetName::X86_64Linux,
         ),
     );
@@ -148,47 +148,40 @@ fn non_test_domain_drops_marked_items() {
 }
 
 #[test]
-fn invalid_test_signature_is_a_compile_error() {
-    let output = compile_to_lir(CompileRequest::single_file_test(
+fn harness_invalid_markers_and_signatures_fail_compile() {
+    let compiler = Compiler::with_artifacts(&EMBEDDED_ARTIFACTS);
+
+    let bad_test = compiler.compile_sema_for_test(CompileRequest::single_file_test(
         "main.gg",
         "#[test]\nfn bad(arg: int) {}\n",
         TargetName::X86_64Linux,
     ));
-    assert!(!output.is_success());
-    let text = format!("{:?}", output.diagnostics().items());
+    assert!(!bad_test.is_success());
+    let text = format!("{:?}", bad_test.diagnostics().items());
     assert!(text.contains("无参数"), "{text}");
-}
 
-#[test]
-fn duplicate_identity_is_a_compile_error() {
-    let output = compile_to_lir(CompileRequest::single_file_test(
+    let dup = compiler.compile_sema_for_test(CompileRequest::single_file_test(
         "main.gg",
         "#[test]\nfn dup() {}\n#[test]\nfn dup() {}\n",
         TargetName::X86_64Linux,
     ));
-    assert!(!output.is_success());
-    let text = format!("{:?}", output.diagnostics().items());
+    assert!(!dup.is_success());
+    let text = format!("{:?}", dup.diagnostics().items());
     assert!(text.contains("重复的测试/benchmark 身份"), "{text}");
-}
 
-#[test]
-fn non_fn_test_marker_is_a_compile_error() {
-    let output = compile_to_lir(CompileRequest::single_file_test(
+    let non_fn = compiler.compile_sema_for_test(CompileRequest::single_file_test(
         "main.gg",
         "#[test]\nstruct Marker { x: int }\n",
         TargetName::X86_64Linux,
     ));
-    assert!(!output.is_success());
-}
+    assert!(!non_fn.is_success());
 
-#[test]
-fn invalid_bench_signature_is_a_compile_error() {
-    let output = compile_to_lir(CompileRequest::single_file_bench(
+    let bad_bench = compiler.compile_sema_for_test(CompileRequest::single_file_bench(
         "bench.gg",
         "#[bench]\nfn bad() {}\n",
         TargetName::X86_64Linux,
     ));
-    assert!(!output.is_success());
-    let text = format!("{:?}", output.diagnostics().items());
+    assert!(!bad_bench.is_success());
+    let text = format!("{:?}", bad_bench.diagnostics().items());
     assert!(text.contains("#[bench] 签名"), "{text}");
 }

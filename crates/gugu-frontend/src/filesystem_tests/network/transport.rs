@@ -200,9 +200,17 @@ fn windows_connection_order_options_and_unix_addresses_follow_contract() {
 }
 
 #[test]
-fn transport_cancel_cursor_continues_past_one_service_budget() {
+fn linux_transport_and_datagram_contracts() {
     let output = compile(TargetName::X86_64Linux);
-    let mut h = Harness::new(&output);
+    transport_cancel_cursor_continues_past_one_service_budget(&output);
+    linux_transport_short_io_eof_shutdown_and_closed_are_distinct(&output);
+    linux_transport_fifo_readiness_and_opposite_direction_progress(&output);
+    transport_deadline_is_captured_and_cancelled_wait_does_not_close(&output);
+    linux_datagram_consumes_once_and_rejects_short_sends_and_wrong_mode(&output);
+}
+
+fn transport_cancel_cursor_continues_past_one_service_budget(output: &Compilation) {
+    let mut h = Harness::new(output);
     let mut memory = vec![0; 262144];
     setup(&mut h, &mut memory);
     // 只建立128项预算边界两侧的固定请求头，缓冲和原生操作均为空。
@@ -229,10 +237,8 @@ fn transport_cancel_cursor_continues_past_one_service_budget() {
     assert_eq!(h.invoke(TRANSPORT, "pending", &[], &mut memory), [0]);
 }
 
-#[test]
-fn linux_transport_short_io_eof_shutdown_and_closed_are_distinct() {
-    let output = compile(TargetName::X86_64Linux);
-    let mut h = Harness::new(&output);
+fn linux_transport_short_io_eof_shutdown_and_closed_are_distinct(output: &Compilation) {
+    let mut h = Harness::new(output);
     let mut memory = vec![0; 262144];
     setup(&mut h, &mut memory);
     for (op, syscall, result) in [(0, 24, 3), (1, 25, 2), (0, 24, 0)] {
@@ -280,10 +286,8 @@ fn linux_transport_short_io_eof_shutdown_and_closed_are_distinct() {
     assert_eq!(h.invoke(TRANSPORT, "pending", &[], &mut memory), [0]);
 }
 
-#[test]
-fn linux_transport_fifo_readiness_and_opposite_direction_progress() {
-    let output = compile(TargetName::X86_64Linux);
-    let mut h = Harness::new(&output);
+fn linux_transport_fifo_readiness_and_opposite_direction_progress(output: &Compilation) {
+    let mut h = Harness::new(output);
     let mut memory = vec![0; 262144];
     setup(&mut h, &mut memory);
     let read = node(&mut h, &mut memory, 0, 8, 0);
@@ -360,10 +364,8 @@ fn linux_transport_fifo_readiness_and_opposite_direction_progress() {
     assert!(h.script.is_empty());
 }
 
-#[test]
-fn transport_deadline_is_captured_and_cancelled_wait_does_not_close() {
-    let output = compile(TargetName::X86_64Linux);
-    let mut h = Harness::new(&output);
+fn transport_deadline_is_captured_and_cancelled_wait_does_not_close(output: &Compilation) {
+    let mut h = Harness::new(output);
     let mut memory = vec![0; 262144];
     setup(&mut h, &mut memory);
     put(&mut memory, CONTROL + 1536, 0);
@@ -557,10 +559,8 @@ fn check_darwin_ip_disconnect(h: &mut Harness<'_>, memory: &mut Vec<u8>) {
     h.native_hook = transport_hook;
 }
 
-#[test]
-fn linux_datagram_consumes_once_and_rejects_short_sends_and_wrong_mode() {
-    let output = compile(TargetName::X86_64Linux);
-    let mut h = Harness::new(&output);
+fn linux_datagram_consumes_once_and_rejects_short_sends_and_wrong_mode(output: &Compilation) {
+    let mut h = Harness::new(output);
     let mut memory = vec![0; 262144];
     setup(&mut h, &mut memory);
     h.native_hook = Some(|_, op, request, memory| {

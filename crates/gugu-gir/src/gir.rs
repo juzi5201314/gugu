@@ -18,14 +18,45 @@ pub use passing::large_copy_lints;
 pub use placement::run as place_world;
 pub use query::{BUILD_SCHEMA, attach_fragments, build_world};
 pub use verify::verify;
+pub(crate) use verify::verify_for_owner;
 
 use crate::hir::{self, TypeId};
 use crate::mono::MonoWorldV1;
 use crate::{Diagnostic, DiagnosticCode};
 use gugu_base::SharedTable;
 use serde::{Deserialize, Serialize};
+use std::sync::Arc;
 
 pub const WORLD_SCHEMA: u32 = 4;
+
+/// 缓存每个 `GirBody` 的规范指纹，避免在 `world_fingerprint` 与 `fragments_of` 中反复重编码内建前缀。
+#[derive(Clone, Debug, Default)]
+pub(crate) struct CachedBodyFingerprints {
+    prefix: Arc<[[u8; 32]]>,
+    suffix: Vec<[u8; 32]>,
+}
+
+impl PartialEq for CachedBodyFingerprints {
+    fn eq(&self, _other: &Self) -> bool {
+        true
+    }
+}
+
+impl Eq for CachedBodyFingerprints {}
+
+impl CachedBodyFingerprints {
+    pub(crate) fn from_parts(prefix: Arc<[[u8; 32]]>, suffix: Vec<[u8; 32]>) -> Self {
+        Self { prefix, suffix }
+    }
+
+    pub(crate) fn get(&self, index: usize) -> Option<[u8; 32]> {
+        if index < self.prefix.len() {
+            Some(self.prefix[index])
+        } else {
+            self.suffix.get(index - self.prefix.len()).copied()
+        }
+    }
+}
 
 #[derive(Clone, Debug, Eq, PartialEq, Serialize, Deserialize)]
 pub struct GirFragment {
@@ -43,6 +74,8 @@ pub struct GirWorldV1 {
     pub placement: placement::PlacementWorldV1,
     pub concrete: Vec<concrete::ConcreteBody>,
     pub fingerprint: [u8; 32],
+    #[serde(skip)]
+    pub(crate) body_fingerprints: CachedBodyFingerprints,
 }
 
 impl GirWorldV1 {
@@ -75,6 +108,7 @@ pub fn empty_world() -> GirWorldV1 {
         fingerprint: world_fingerprint(&SharedTable::default(), &[], [0; 32], &placement, &[]),
         placement,
         concrete: Vec::new(),
+        body_fingerprints: CachedBodyFingerprints::default(),
     }
 }
 
@@ -85,11 +119,30 @@ pub fn world_fingerprint(
     placement: &placement::PlacementWorldV1,
     concrete: &[concrete::ConcreteBody],
 ) -> [u8; 32] {
+    world_fingerprint_cached(
+        bodies,
+        &CachedBodyFingerprints::default(),
+        fragments,
+        hir_fingerprint,
+        placement,
+        concrete,
+    )
+}
+
+pub(crate) fn world_fingerprint_cached(
+    bodies: &SharedTable<GirBody>,
+    cached: &CachedBodyFingerprints,
+    fragments: &[GirFragment],
+    hir_fingerprint: [u8; 32],
+    placement: &placement::PlacementWorldV1,
+    concrete: &[concrete::ConcreteBody],
+) -> [u8; 32] {
     let mut hash = blake3::Hasher::new_derive_key("gugu-gir-world-v3");
     hash.update(&hir_fingerprint);
     hash.update(&(bodies.len() as u64).to_le_bytes());
-    for body in bodies {
-        hash.update(&body.fingerprint());
+    for (index, body) in bodies.iter().enumerate() {
+        let fp = cached.get(index).unwrap_or_else(|| body.fingerprint());
+        hash.update(&fp);
     }
     let fragment_bytes = crate::canonical::to_vec(fragments).expect("GIR fragment 编码");
     hash.update(&fragment_bytes);
@@ -151,6 +204,14 @@ pub fn body_kind(kind: hir::DefinitionKind) -> BodyKind {
 }
 
 pub fn fragments_of(mono: &MonoWorldV1, bodies: &SharedTable<GirBody>) -> Vec<GirFragment> {
+    fragments_of_cached(mono, bodies, &CachedBodyFingerprints::default())
+}
+
+pub(crate) fn fragments_of_cached(
+    mono: &MonoWorldV1,
+    bodies: &SharedTable<GirBody>,
+    cached: &CachedBodyFingerprints,
+) -> Vec<GirFragment> {
     // DefId 是 HIR 稠密 arena 下标；这里只索引具有 body 的前缀范围。
     let extent = bodies
         .iter()
@@ -172,8 +233,11 @@ pub fn fragments_of(mono: &MonoWorldV1, bodies: &SharedTable<GirBody>) -> Vec<Gi
         fragments.push(GirFragment {
             digest: crate::mono::digest_of(&instance.mono_key),
             body: u32::try_from(index).expect("body arena 使用 u32 编号"),
-            body_fingerprint: *fingerprints[index]
-                .get_or_insert_with(|| bodies[index].fingerprint()),
+            body_fingerprint: *fingerprints[index].get_or_insert_with(|| {
+                cached
+                    .get(index)
+                    .unwrap_or_else(|| bodies[index].fingerprint())
+            }),
         });
     }
     fragments

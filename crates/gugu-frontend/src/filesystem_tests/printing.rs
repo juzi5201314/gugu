@@ -51,10 +51,19 @@ pub(super) fn output_with_heap(
         compiled.diagnostics().items()
     );
     assert!(compiled.image_plan().is_none());
-    let mut harness = Harness::new(&compiled);
+    invoke_compiled(&compiled, "main", script, heap_bytes)
+}
+
+pub(super) fn invoke_compiled(
+    compiled: &super::Compilation,
+    entry: &str,
+    script: &[(u64, u64, u64)],
+    heap_bytes: usize,
+) -> Vec<(u64, Vec<u8>)> {
+    let mut harness = Harness::new(compiled);
     harness.machine_hook = Some(capture);
     harness.script.extend(script.iter().copied());
-    harness.invoke("main.gg", "main", &[], &mut vec![0; heap_bytes]);
+    harness.invoke("main.gg", entry, &[], &mut vec![0; heap_bytes]);
     assert!(harness.script.is_empty());
     harness
         .calls
@@ -64,47 +73,109 @@ pub(super) fn output_with_heap(
 }
 
 #[test]
-fn print_generic_type_alias() {
+fn print_and_write_retry_contracts() {
+    let source = r#"
+use std.io.{print, println, eprint, eprintln}
+
+type Table[K] = Vec[K]
+type Numbers = Table[int]
+fn append[T](xs: Table[T], x: T) Vec[T] { xs.push(x)
+    xs }
+fn case_generic_alias() {
+    let xs: Numbers = Vec[int]::new()
+    let ys: Table[int] = append(xs, 42)
+    match ys.get(0) { Some(n) => println(n), None => println(0) }
+}
+
+fn case_hello_world() { println("hello, gugu") }
+
+fn case_runtime_floats() {
+    let single: f32 = 0.1
+    println("float=", 1.5, "/", single, "/", f"{single:.2}")
+}
+
+struct Word {}
+impl Print for Word { fn print(self: &Self, out: &Formatter) { out.write_str("word") } }
+fn case_mixed_values() { println("i + 1 = ", 1, true, Word {}) }
+
+fn case_empty_and_stderr() { print(); eprint(); println(); eprintln("err"); eprint("tail") }
+
+fn case_interpolated() {
+    let i = 3
+    print(f"i = {i}")
+}
+
+fn case_short_writes() { eprintln("éx") }
+
+fn case_print_abc() { print("abc") }
+
+fn main() {
+    case_generic_alias()
+    case_hello_world()
+    case_runtime_floats()
+    case_mixed_values()
+    case_empty_and_stderr()
+    case_interpolated()
+    case_short_writes()
+    case_print_abc()
+}
+"#;
+    let compiled = Compiler::shared().compile_to_lir(CompileRequest::single_file(
+        "main.gg",
+        source,
+        TargetName::X86_64Linux,
+    ));
+    assert!(
+        compiled.is_success(),
+        "{:?}",
+        compiled.diagnostics().items()
+    );
+    assert!(compiled.image_plan().is_none());
+
     assert_eq!(
-        output(
-            "use std.io.{println}\n\
-             type Table[K] = Vec[K]\n\
-             type Numbers = Table[int]\n\
-             fn append[T](xs: Table[T], x: T) Vec[T] { xs.push(x)\n xs }\n\
-             fn main() { let xs: Numbers = Vec[int]::new()\n\
-             let ys: Table[int] = append(xs, 42)\n\
-             match ys.get(0) { Some(n) => println(n), None => println(0) } }",
-            &[]
-        ),
+        invoke_compiled(&compiled, "case_generic_alias", &[], 262144),
         vec![(1, b"42\n".to_vec())]
     );
-}
-
-#[test]
-fn print_hello_world() {
     assert_eq!(
-        output(
-            "use std.io.{println}\nfn main() { println(\"hello, gugu\") }",
-            &[]
-        ),
+        invoke_compiled(&compiled, "case_hello_world", &[], 262144),
         vec![(1, b"hello, gugu\n".to_vec())]
     );
-}
-
-#[test]
-fn print_runtime_floats() {
     assert_eq!(
-        output(
-            r#"
-        use std.io.{println}
-        fn main() {
-            let single: f32 = 0.1
-            println("float=", 1.5, "/", single, "/", f"{single:.2}")
-        }
-    "#,
-            &[]
-        ),
+        invoke_compiled(&compiled, "case_runtime_floats", &[], 262144),
         vec![(1, b"float=1.5/0.1/0.10\n".to_vec())]
+    );
+    assert_eq!(
+        invoke_compiled(&compiled, "case_mixed_values", &[], 262144),
+        vec![(1, b"i + 1 = 1trueword\n".to_vec())]
+    );
+    assert_eq!(
+        invoke_compiled(&compiled, "case_empty_and_stderr", &[], 262144),
+        vec![
+            (1, b"\n".to_vec()),
+            (2, b"err\n".to_vec()),
+            (2, b"tail".to_vec())
+        ]
+    );
+    assert_eq!(
+        invoke_compiled(&compiled, "case_interpolated", &[], 262144),
+        vec![(1, b"i = 3".to_vec())]
+    );
+    assert_eq!(
+        invoke_compiled(
+            &compiled,
+            "case_short_writes",
+            &[(2, 4, 1), (2, 3, 2), (2, 1, 1)],
+            262144
+        ),
+        vec![(2, vec![0xc3]), (2, vec![0xa9, b'x']), (2, vec![b'\n'])]
+    );
+    assert_eq!(
+        invoke_compiled(&compiled, "case_print_abc", &[(1, 3, 1), (1, 2, 0)], 262144),
+        vec![(1, b"a".to_vec()), (1, vec![])]
+    );
+    assert_eq!(
+        invoke_compiled(&compiled, "case_print_abc", &[(1, 3, u64::MAX)], 262144),
+        vec![(1, vec![])]
     );
 }
 
@@ -168,89 +239,6 @@ fn linux_formatting_fixture_matches_oracle_and_interpreter() {
         actual.extend(bytes);
     }
     assert_eq!(actual, expected.as_bytes());
-}
-
-#[test]
-fn print_mixed_values_and_user_impl() {
-    assert_eq!(
-        output(
-            r#"
-        use std.io.{println}
-        struct Word {}
-        impl Print for Word { fn print(self: &Self, out: &Formatter) { out.write_str("word") } }
-        fn main() { println("i + 1 = ", 1, true, Word {}) }
-    "#,
-            &[]
-        ),
-        vec![(1, b"i + 1 = 1trueword\n".to_vec())]
-    );
-}
-
-#[test]
-fn print_empty_and_stderr() {
-    assert_eq!(
-        output(
-            r#"
-        use std.io.{print, println, eprint, eprintln}
-        fn main() { print(); eprint(); println(); eprintln("err"); eprint("tail") }
-    "#,
-            &[]
-        ),
-        vec![
-            (1, b"\n".to_vec()),
-            (2, b"err\n".to_vec()),
-            (2, b"tail".to_vec())
-        ]
-    );
-}
-
-#[test]
-fn print_interpolated_argument() {
-    assert_eq!(
-        output(
-            r#"use std.io.{print}
-        fn main() { let i = 3
-            print(f"i = {i}") }
-    "#,
-            &[]
-        ),
-        vec![(1, b"i = 3".to_vec())]
-    );
-}
-
-#[test]
-fn print_retries_short_writes_in_byte_order() {
-    assert_eq!(
-        output(
-            r#"use std.io.{eprintln}
-        fn main() { eprintln("éx") }
-    "#,
-            &[(2, 4, 1), (2, 3, 2), (2, 1, 1)]
-        ),
-        vec![(2, vec![0xc3]), (2, vec![0xa9, b'x']), (2, vec![b'\n'])]
-    );
-}
-
-#[test]
-fn print_stops_on_write_zero() {
-    assert_eq!(
-        output(
-            "use std.io.{print}\nfn main() { print(\"abc\") }",
-            &[(1, 3, 1), (1, 2, 0)]
-        ),
-        vec![(1, b"a".to_vec()), (1, vec![])]
-    );
-}
-
-#[test]
-fn print_stops_on_write_error() {
-    assert_eq!(
-        output(
-            "use std.io.{print}\nfn main() { print(\"abc\") }",
-            &[(1, 3, u64::MAX)]
-        ),
-        vec![(1, vec![])]
-    );
 }
 
 #[test]

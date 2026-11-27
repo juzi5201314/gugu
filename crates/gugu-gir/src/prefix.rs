@@ -36,6 +36,7 @@ struct DecodedBuiltinPrefix {
     sema: Arc<crate::sema_prefix::DecodedSemaPrefix>,
     record_types: Vec<crate::gir::concrete::RecordTypes>,
     gir_bodies: gugu_base::SharedTable<crate::gir::GirBody>,
+    gir_body_fingerprints: Arc<[[u8; 32]]>,
 }
 
 type PrefixCell = OnceLock<Result<Arc<DecodedBuiltinPrefix>, Vec<Diagnostic>>>;
@@ -192,6 +193,11 @@ impl<'a> BuiltinPrefix<'a> {
         &self.data.gir_bodies
     }
 
+    /// 已缓存的内建 GIR body 指纹前缀（与 `GirBody::fingerprint()` 逐字节一致）。
+    pub fn gir_body_fingerprints(&self) -> &Arc<[[u8; 32]]> {
+        &self.data.gir_body_fingerprints
+    }
+
     /// 内建契约记录的类型目录；安装后仍需过七个 layout verifier。
     pub fn record_types(&self) -> &[crate::gir::concrete::RecordTypes] {
         &self.data.record_types
@@ -217,12 +223,30 @@ fn decode_base(
     if table_fingerprint(GIR_BODIES_TABLE, &slices).1 != declared {
         return Err(invalid("内建块物化表的 gir.bodies 表内容摘要不符"));
     }
+    let hir_module = sema.hir().module();
+    if prebuilt.gir_bodies.len() > hir_module.owners.len() {
+        return Err(invalid("内建块物化表的 gir.bodies 数量超过 HIR owner 表"));
+    }
     let mut gir_bodies = Vec::with_capacity(prebuilt.gir_bodies.len());
-    for encoded in &prebuilt.gir_bodies {
-        gir_bodies.push(
-            crate::canonical::from_slice(encoded)
-                .map_err(|_| invalid("内建块的 gir.bodies 表不能解码"))?,
-        );
+    let mut fingerprints = Vec::with_capacity(prebuilt.gir_bodies.len());
+    for (index, encoded) in prebuilt.gir_bodies.iter().enumerate() {
+        let body: crate::gir::GirBody = crate::canonical::from_slice(encoded)
+            .map_err(|_| invalid("内建块的 gir.bodies 表不能解码"))?;
+        let owner = &hir_module.owners[index];
+        let definition = &hir_module.definitions[owner.definition.index()];
+        if body.owner != owner.definition || body.owner_key != definition.key {
+            return Err(invalid("内建块的 gir.bodies 与 HIR owner 不一致"));
+        }
+        crate::gir::verify_for_owner(hir_module, owner, &body).map_err(|error| vec![error])?;
+        let fp = *blake3::Hasher::new_derive_key("gugu-generic-gir-v1")
+            .update(encoded)
+            .finalize()
+            .as_bytes();
+        if index == 0 {
+            debug_assert_eq!(fp, body.fingerprint());
+        }
+        fingerprints.push(fp);
+        gir_bodies.push(body);
     }
     let mut gir_bodies = gugu_base::SharedTable::from(gir_bodies);
     gir_bodies.share();
@@ -230,6 +254,7 @@ fn decode_base(
         sema,
         record_types,
         gir_bodies,
+        gir_body_fingerprints: Arc::from(fingerprints),
     })
 }
 

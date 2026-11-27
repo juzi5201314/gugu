@@ -153,6 +153,11 @@ impl DecodedSemaPrefix {
             identity,
         }))
     }
+
+    /// 返回内建模块的冻结 HIR 片段，供上层解码期一次性校验 GIR body 前缀。
+    pub fn hir(&self) -> &crate::hir::Validated {
+        &self.hir
+    }
 }
 
 impl SemaPrefix {

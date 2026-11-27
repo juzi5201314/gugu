@@ -183,66 +183,102 @@ fn run(at: &str, block: &Block, output: &Compilation) {
     );
 }
 
-macro_rules! doc_examples {
-    ($($name:ident: $file:literal, $start:literal ..= $end:literal;)*) => {
-        const REGISTERED: &[(&str, usize, usize)] = &[$(($file, $start, $end)),*];
+macro_rules! doc_example_groups {
+    ($(
+        $group:ident {
+            $($file:literal: $start:literal ..= $end:literal;)*
+        }
+    )*) => {
+        const REGISTERED: &[(&str, usize, usize)] = &[
+            $($(($file, $start, $end),)*)*
+        ];
         $(
             #[test]
-            fn $name() {
-                check($file, $start..=$end);
+            fn $group() {
+                $(check($file, $start..=$end);)*
             }
         )*
     };
 }
 
-doc_examples! {
-    guide_comptime_macros_1: "guide/comptime-macros.md", 1..=2;
-    guide_comptime_macros_2: "guide/comptime-macros.md", 3..=3;
-    guide_concurrency_1: "guide/concurrency.md", 1..=2;
-    guide_concurrency_2: "guide/concurrency.md", 3..=4;
-    guide_ffi_unsafe: "guide/ffi-unsafe.md", 1..=2;
-    guide_getting_started_1: "guide/getting-started.md", 1..=2;
-    guide_getting_started_2: "guide/getting-started.md", 3..=3;
-    guide_testing: "guide/testing.md", 1..=1;
-    guide_values_handles_1: "guide/values-handles.md", 1..=2;
-    guide_values_handles_2: "guide/values-handles.md", 3..=4;
-    internals_comptime_analysis: "internals/comptime-analysis.md", 1..=1;
-    reference_syntax_cheatsheet_1: "reference/syntax-cheatsheet.md", 1..=2;
-    reference_syntax_cheatsheet_2: "reference/syntax-cheatsheet.md", 3..=3;
-    reference_types_traits: "reference/types-traits.md", 1..=1;
-    spec_comptime_1: "spec/comptime.md", 1..=2;
-    spec_comptime_2: "spec/comptime.md", 3..=4;
-    spec_comptime_3: "spec/comptime.md", 5..=5;
-    spec_concurrency: "spec/concurrency.md", 1..=1;
-    spec_declarations_1: "spec/declarations.md", 1..=2;
-    spec_declarations_2: "spec/declarations.md", 3..=4;
-    spec_expressions_1: "spec/expressions.md", 1..=2;
-    spec_expressions_2: "spec/expressions.md", 3..=4;
-    spec_expressions_3: "spec/expressions.md", 5..=6;
-    spec_expressions_4: "spec/expressions.md", 7..=8;
-    spec_functions_1: "spec/functions.md", 1..=2;
-    spec_functions_2: "spec/functions.md", 3..=3;
-    spec_lexical_1: "spec/lexical.md", 1..=2;
-    spec_lexical_2: "spec/lexical.md", 3..=3;
-    spec_memory: "spec/memory.md", 1..=1;
-    spec_overview: "spec/overview.md", 1..=2;
-    spec_passing_1: "spec/passing.md", 1..=2;
-    spec_passing_2: "spec/passing.md", 3..=4;
-    spec_passing_3: "spec/passing.md", 5..=5;
-    spec_patterns_1: "spec/patterns.md", 1..=2;
-    spec_patterns_2: "spec/patterns.md", 3..=3;
-    spec_platform_abi: "spec/platform-abi.md", 1..=1;
-    spec_program_model: "spec/program-model.md", 1..=2;
-    spec_standard_library: "spec/standard-library.md", 1..=1;
-    spec_testing: "spec/testing.md", 1..=1;
-    spec_traits_1: "spec/traits.md", 1..=2;
-    spec_traits_2: "spec/traits.md", 3..=4;
-    spec_traits_3: "spec/traits.md", 5..=6;
-    spec_traits_4: "spec/traits.md", 7..=8;
-    spec_types_1: "spec/types.md", 1..=2;
-    spec_types_2: "spec/types.md", 3..=4;
-    spec_types_3: "spec/types.md", 5..=5;
-    spec_unsafe: "spec/unsafe.md", 1..=1;
+// 按组在单进程内复用 `Compiler::shared()` 与已解码内建前缀，避免每 1–2 个文档块起一个独立进程；
+// 同时保持每组编译量在 2–4 个块以内，使每组稳定落在默认 3 秒单测上限内。
+doc_example_groups! {
+    guide_comptime_macros {
+        "guide/comptime-macros.md": 1..=3;
+    }
+    guide_concurrency_1 {
+        "guide/concurrency.md": 1..=2;
+    }
+    guide_concurrency_2 {
+        "guide/concurrency.md": 3..=4;
+    }
+    guide_ffi_and_testing {
+        "guide/ffi-unsafe.md": 1..=2;
+        "guide/testing.md": 1..=1;
+    }
+    guide_getting_started {
+        "guide/getting-started.md": 1..=3;
+    }
+    guide_values_handles {
+        "guide/values-handles.md": 1..=4;
+    }
+    reference_cheatsheet_and_traits {
+        "reference/syntax-cheatsheet.md": 1..=3;
+        "reference/types-traits.md": 1..=1;
+    }
+    spec_comptime_1 {
+        "spec/comptime.md": 1..=3;
+    }
+    spec_comptime_2_and_concurrency {
+        "spec/comptime.md": 4..=5;
+        "spec/concurrency.md": 1..=1;
+    }
+    spec_declarations_and_expressions_1 {
+        "spec/declarations.md": 1..=4;
+        "spec/expressions.md": 1..=4;
+    }
+    spec_expressions_2 {
+        "spec/expressions.md": 5..=8;
+    }
+    spec_functions {
+        "spec/functions.md": 1..=3;
+    }
+    spec_lexical {
+        "spec/lexical.md": 1..=3;
+    }
+    spec_overview {
+        "spec/overview.md": 1..=2;
+    }
+    spec_passing_1 {
+        "spec/passing.md": 1..=3;
+    }
+    spec_passing_2_and_patterns {
+        "spec/passing.md": 4..=5;
+        "spec/patterns.md": 1..=3;
+    }
+    spec_platform_and_program_model {
+        "spec/platform-abi.md": 1..=1;
+        "spec/program-model.md": 1..=2;
+    }
+    spec_stdlib_testing_and_unsafe {
+        "spec/standard-library.md": 1..=1;
+        "spec/testing.md": 1..=1;
+        "spec/unsafe.md": 1..=1;
+    }
+    spec_traits_1 {
+        "spec/traits.md": 1..=4;
+    }
+    spec_traits_2 {
+        "spec/traits.md": 5..=8;
+    }
+    spec_types {
+        "spec/types.md": 1..=5;
+    }
+    parse_only_pages {
+        "internals/comptime-analysis.md": 1..=1;
+        "spec/memory.md": 1..=1;
+    }
 }
 
 fn markdown_files(directory: &std::path::Path, files: &mut Vec<PathBuf>) {

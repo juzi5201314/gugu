@@ -41,21 +41,62 @@ fn init_loop_instruction_count_does_not_scale_with_array_length() {
     let artifact = crate::testing::provider()
         .artifact(TargetName::X86_64Linux)
         .unwrap();
-    for (element, rhs, read, lengths) in [
-        ("int", "i", "a[0]", [4, 1_000_000]),
-        ("&Cell", "p", "a[0].x", [4, 128]),
-    ] {
-        let counts: Vec<_> = lengths.into_iter().map(|n| {
-            let source = format!("struct Cell {{ x: int }}\nfn fill(p: &Cell) int {{ let a: [{element}; {n}]\n for i in 0..{n} {{ a[i] = {rhs} }}\n {read} }}\nfn main() {{ let cell = Cell {{ x: 7 }}\n _ = fill(&cell) }}");
-            let (_, lir) = protocol(&source, false, crate::runtime::RuntimeResources::new(artifact));
-            let body = lir.bodies().iter().find(|body| body.name == "fill").unwrap();
-            (body.blocks.len(), body.instructions.len())
-        }).collect();
-        assert_eq!(
-            counts[0], counts[1],
-            "{element}: init-loop code must not scale with N"
-        );
-    }
+    let source = r#"
+struct Cell { x: int }
+fn fill_int_small(p: &Cell) int {
+    _ = p
+    let a: [int; 4]
+    for i in 0..4 { a[i] = i }
+    a[0]
+}
+fn fill_int_large(p: &Cell) int {
+    _ = p
+    let a: [int; 1000000]
+    for i in 0..1000000 { a[i] = i }
+    a[0]
+}
+fn fill_ref_small(p: &Cell) int {
+    let a: [&Cell; 4]
+    for i in 0..4 { a[i] = p }
+    a[0].x
+}
+fn fill_ref_large(p: &Cell) int {
+    let a: [&Cell; 128]
+    for i in 0..128 { a[i] = p }
+    a[0].x
+}
+fn main() {
+    let cell = Cell { x: 7 }
+    _ = fill_int_small(&cell)
+    _ = fill_int_large(&cell)
+    _ = fill_ref_small(&cell)
+    _ = fill_ref_large(&cell)
+}
+"#;
+    let (_, lir) = protocol(
+        source,
+        false,
+        crate::runtime::RuntimeResources::new(artifact),
+        crate::frontend::PrefixMode::Install,
+    );
+    let shape = |name: &str| {
+        let body = lir
+            .bodies()
+            .iter()
+            .find(|body| body.name == name)
+            .unwrap_or_else(|| panic!("缺少 {name}"));
+        (body.blocks.len(), body.instructions.len())
+    };
+    assert_eq!(
+        shape("fill_int_small"),
+        shape("fill_int_large"),
+        "int: init-loop code must not scale with N"
+    );
+    assert_eq!(
+        shape("fill_ref_small"),
+        shape("fill_ref_large"),
+        "&Cell: init-loop code must not scale with N"
+    );
 }
 
 const MANAGED: &str = r#"
@@ -181,6 +222,7 @@ fn check_managed_array(stack: bool) {
         MANAGED,
         stack,
         crate::runtime::RuntimeResources::new(artifact),
+        crate::frontend::PrefixMode::Install,
     );
     if stack {
         assert!(lir.bodies().iter().any(|body| body.name == "run"
@@ -217,43 +259,83 @@ fn check_managed_array(stack: bool) {
     );
 }
 
-#[test]
-fn init_loop_root_events_reach_generated_images() {
-    for target in [
-        TargetName::X86_64Linux,
-        TargetName::X86_64Windows,
-        TargetName::X86_64Macos,
-    ] {
-        let output = Compiler::shared()
-            .compile_full_for_test(CompileRequest::single_file("main.gg", MANAGED, target));
-        assert!(output.is_success(), "{:?}", output.diagnostics().items());
-        assert!(!output.image_plan().unwrap().gc_type_section().is_empty());
-        assert!(
-            output
-                .lir
-                .as_ref()
-                .unwrap()
-                .bodies()
-                .iter()
-                .any(|body| body.name == "run" && !body.root_inits.is_empty())
-        );
-    }
+fn assert_init_loop_root_events_for(target: TargetName) {
+    let output = Compiler::shared()
+        .compile_full_for_test(CompileRequest::single_file("main.gg", MANAGED, target));
+    assert!(output.is_success(), "{:?}", output.diagnostics().items());
+    assert!(!output.image_plan().unwrap().gc_type_section().is_empty());
+    assert!(
+        output
+            .lir
+            .as_ref()
+            .unwrap()
+            .bodies()
+            .iter()
+            .any(|body| body.name == "run" && !body.root_inits.is_empty())
+    );
 }
 
-fn resource_protocol(source: &str) -> (crate::frontend::FrontendOutput, crate::lir::Validated) {
-    protocol(
-        source,
-        false,
-        crate::runtime::RuntimeResources::new(resource_artifact()),
+#[test]
+fn init_loop_root_events_reach_linux_image() {
+    assert_init_loop_root_events_for(TargetName::X86_64Linux);
+}
+
+#[test]
+fn init_loop_root_events_reach_windows_image() {
+    assert_init_loop_root_events_for(TargetName::X86_64Windows);
+}
+
+#[test]
+fn init_loop_root_events_reach_macos_image() {
+    assert_init_loop_root_events_for(TargetName::X86_64Macos);
+}
+
+const RESOURCE_PROBE_PATH: &str = "std/runtime/fixtures/array_init_probe.gg";
+
+fn resource_protocol() -> (crate::frontend::FrontendOutput, crate::lir::Validated) {
+    use crate::frontend::{self, PrefixMode, SourceInput, cfg::CfgContext};
+    let target = TargetName::X86_64Linux;
+    let queries = crate::QueryEngine::new();
+    let mut sources = crate::SourceMap::new(Vec::new()).unwrap();
+    let resources = crate::runtime::RuntimeResources::new(resource_artifact());
+    let frontend = frontend::bootstrap_with(
+        SourceInput::Sources {
+            source_map: &mut sources,
+            entry: RESOURCE_PROBE_PATH,
+            source_root: "",
+            package_identity: "array-init",
+            require_main: true,
+            cfg: &CfgContext::target_only(target),
+            external_packages: &Default::default(),
+            embed: None,
+        },
+        &queries,
+        resources,
+        PrefixMode::Install,
     )
+    .unwrap();
+    let lir = crate::lir::build(
+        &frontend.hir,
+        &frontend.gir,
+        &frontend.mono,
+        target,
+        crate::CompressionPolicyV1::disabled(),
+        &crate::backend::x64::oracle::X64Oracle::new(target.descriptor().cpu_baseline),
+        &queries,
+        &sources,
+        (&frontend.installed, resources.prebuilt()),
+    )
+    .unwrap();
+    (frontend, lir)
 }
 
 fn protocol(
     source: &str,
     stack_arrays: bool,
     resources: crate::runtime::RuntimeResources<'_>,
+    mode: crate::frontend::PrefixMode,
 ) -> (crate::frontend::FrontendOutput, crate::lir::Validated) {
-    use crate::frontend::{self, PrefixMode, SourceInput, cfg::CfgContext};
+    use crate::frontend::{self, SourceInput, cfg::CfgContext};
     let target = TargetName::X86_64Linux;
     let queries = crate::QueryEngine::new();
     let mut sources = crate::SourceMap::new(vec![
@@ -273,7 +355,7 @@ fn protocol(
         },
         &queries,
         resources,
-        PrefixMode::Install,
+        mode,
     )
     .unwrap();
     if stack_arrays {
@@ -316,42 +398,41 @@ fn resource_artifact() -> &'static crate::runtime::RuntimeArtifactV1 {
                     role: blob.role,
                 })
                 .collect();
+            let probe_source = format!(
+                "{}\nfn main() {{\n    overwrite()\n    partial()\n    empty()\n    repeated_local()\n    repeated_local_panic()\n}}\n",
+                include_str!("fixtures/array_init_resource.gg")
+            );
             sources.push(gugu_compiler_core::RuntimeSourceInput {
-                logical_path: "std/array_init_probe.gg",
-                source: include_str!("fixtures/array_init_resource.gg"),
+                logical_path: RESOURCE_PROBE_PATH,
+                source: &probe_source,
                 role: gugu_compiler_core::RuntimeSourceRole::StandardLibrary,
             });
-            let artifact = gugu_compiler_core::RuntimeArtifactBuilder::build(
+            // 作为 `std/runtime/fixtures/` 探针追加到原物化前缀之后，直接复用既有 prebuilt 表，
+            // 避免为了 36 行探针源码从头重编全部标准库。
+            let mut artifact = gugu_compiler_core::RuntimeArtifactBuilder::build(
                 gugu_compiler_core::TargetName::X86_64Linux,
                 &sources,
             )
             .unwrap();
-            crate::frontend::prebuild::materialize_tables(TargetName::X86_64Linux, artifact)
-                .unwrap()
+            artifact.payload.prebuilt = base.payload.prebuilt.clone();
+            artifact
         });
     &ARTIFACT
 }
 
-fn check_leases(function: &str, panic: bool, expected: &[u64]) {
-    let source = format!("use std.array_init_probe as probe\nfn main() {{ probe.{function}() }}");
-    let (frontend, lir) = resource_protocol(&source);
-    let mut harness = Harness::from_bodies(frontend.hir.module(), lir.bodies());
-    harness.set_sizes(&frontend.gir);
-    harness.metadata = Some(
-        crate::frontend::gc::derive(
-            &frontend.mono.universe,
-            &frontend.gir,
-            frontend.hir.module(),
-        )
-        .unwrap(),
-    );
-    harness.root_frames = Some(Default::default());
-    let mut memory = vec![0; 262144];
+fn check_leases_with(
+    harness: &mut Harness<'_>,
+    memory: &mut Vec<u8>,
+    function: &str,
+    panic: bool,
+    expected: &[u64],
+) {
+    harness.reset_for_next_call(memory);
     for i in 0..4 {
-        put(&mut memory, 1024 + i * 256, 2);
+        put(memory, 1024 + i * 256, 2);
     }
     let result = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
-        harness.invoke("std/array_init_probe.gg", function, &[], &mut memory)
+        harness.invoke(RESOURCE_PROBE_PATH, function, &[], memory)
     }));
     if panic {
         assert!(result.unwrap_err().is::<root_trace::InterpretedPanic>());
@@ -359,32 +440,32 @@ fn check_leases(function: &str, panic: bool, expected: &[u64]) {
         assert!(result.unwrap().is_empty());
     }
     for (i, count) in expected.iter().enumerate() {
-        assert_eq!(word(&memory, 1024 + i as u64 * 256), *count, "control {i}");
+        assert_eq!(word(memory, 1024 + i as u64 * 256), *count, "control {i}");
     }
     assert!(harness.close_requests.is_empty(), "外部租约必须仍然存活");
 }
 
 #[test]
-fn overwriting_after_init_releases_old_lease_exactly_once() {
-    check_leases("overwrite", false, &[1, 1, 1, 1]);
-}
-
-#[test]
-fn panicking_rhs_releases_only_the_initialized_prefix() {
-    check_leases("partial", true, &[1, 1, 2, 2]);
-}
-
-#[test]
-fn empty_resource_init_loop_never_evaluates_rhs() {
-    check_leases("empty", false, &[2, 2, 2, 2]);
-}
-
-#[test]
-fn repeated_local_init_loops_release_each_iterations_leases() {
-    check_leases("repeated_local", false, &[1, 1, 1, 1]);
-}
-
-#[test]
-fn repeated_local_init_loop_panic_does_not_release_prior_iterations_leases() {
-    check_leases("repeated_local_panic", true, &[1, 1, 2, 2]);
+fn array_init_resource_lease_contracts() {
+    let (frontend, lir) = resource_protocol();
+    let metadata = crate::frontend::gc::derive(
+        &frontend.mono.universe,
+        &frontend.gir,
+        frontend.hir.module(),
+    )
+    .unwrap();
+    let mut harness = Harness::from_bodies(frontend.hir.module(), lir.bodies());
+    harness.set_sizes(&frontend.gir);
+    harness.metadata = Some(metadata);
+    harness.root_frames = Some(Default::default());
+    let mut memory = vec![0; 262144];
+    for (function, panic, expected) in [
+        ("overwrite", false, [1, 1, 1, 1]),
+        ("partial", true, [1, 1, 2, 2]),
+        ("empty", false, [2, 2, 2, 2]),
+        ("repeated_local", false, [1, 1, 1, 1]),
+        ("repeated_local_panic", true, [1, 1, 2, 2]),
+    ] {
+        check_leases_with(&mut harness, &mut memory, function, panic, &expected);
+    }
 }

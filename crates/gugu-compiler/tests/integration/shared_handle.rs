@@ -5,7 +5,7 @@ fn shared_closure_uses_guarded_payload_and_real_runtime_entries() {
     let output = Compiler::with_artifacts(&EMBEDDED_ARTIFACTS).compile_full_for_test(
         CompileRequest::single_file(
             "main.gg",
-            include_str!("fixtures/shared_handle.gg"),
+            include_str!("../fixtures/shared_handle.gg"),
             TargetName::X86_64Linux,
         ),
     );
@@ -45,7 +45,7 @@ fn pin_after_channel_publication_keeps_scope_cleanup() {
     let output = Compiler::with_artifacts(&EMBEDDED_ARTIFACTS).compile_full_for_test(
         CompileRequest::single_file(
             "main.gg",
-            include_str!("fixtures/shared_pin.gg"),
+            include_str!("../fixtures/shared_pin.gg"),
             TargetName::X86_64Linux,
         ),
     );

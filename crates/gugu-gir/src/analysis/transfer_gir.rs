@@ -119,11 +119,10 @@ pub fn execute_statement(
     callees: &dyn Fn(CallSite) -> Option<FunctionSummary>,
     compare: &mut Option<CompareFact>,
 ) {
-    sync_resolved(module, owner, body, state);
     match kind {
         StatementKind::Assign(place, rvalue) => {
-            assign(module, owner, body, state, *place, rvalue, callees, compare);
             sync_resolved(module, owner, body, state);
+            assign(module, owner, body, state, *place, rvalue, callees, compare);
         }
         StatementKind::Atomic { .. } | StatementKind::Volatile { .. } => state.bump_foreign(),
         StatementKind::ValueAction { descriptor, .. } => {
@@ -145,57 +144,98 @@ pub fn execute_statement(
     }
 }
 
-pub fn successor_states(
+#[expect(
+    clippy::too_many_arguments,
+    reason = "边展开需要上下文、当前状态、分支复写缓冲与边回调"
+)]
+pub fn for_each_successor(
     module: &Module,
     owner: &Owner,
     body: &IndexedBody<'_>,
-    mut state: AbstractState,
+    state: &mut AbstractState,
+    branch_scratch: &mut AbstractState,
     terminator: &Terminator,
     compare: Option<&CompareFact>,
     callees: &dyn Fn(CallSite) -> Option<FunctionSummary>,
-) -> Vec<(BlockId, AbstractState)> {
-    sync_resolved(module, owner, body, &mut state);
+    mut on_edge: impl FnMut(BlockId, &AbstractState),
+) {
+    sync_resolved(module, owner, body, state);
     match terminator {
-        Terminator::Goto { target } => vec![(*target, state)],
+        Terminator::Goto { target } => on_edge(*target, state),
         Terminator::SwitchInt {
             value,
             targets,
             otherwise,
-        } => switch_edges(body, owner, state, value, targets, *otherwise, compare),
+        } => {
+            for &(imm, block) in targets {
+                branch_scratch.copy_from(state);
+                assume_switch(body, owner, branch_scratch, value, Some(imm), compare);
+                on_edge(block, branch_scratch);
+            }
+            let fallback = match targets.as_slice() {
+                [(1, _)] => Some(0),
+                [(0, _)] => Some(1),
+                _ => None,
+            };
+            assume_switch(body, owner, state, value, fallback, compare);
+            on_edge(*otherwise, state);
+        }
         Terminator::Call {
             site,
             destination,
             normal,
             unwind,
             ..
-        } => call_edges(
-            module,
-            owner,
-            body,
-            state,
-            *site,
-            *destination,
-            *normal,
-            *unwind,
-            callees,
-        ),
+        } => {
+            transfer::apply_site(module, owner, state, *site, callees);
+            sync_resolved(module, owner, body, state);
+            if destination.is_local()
+                && let CallSite::Expression(id) = *site
+            {
+                let range = state.range(ValueKey::Expr(hir::ExprId(id)));
+                write_place(module, owner, body, state, *destination, range);
+            }
+            on_edge(*normal, state);
+            if let Some(unwind) = *unwind
+                && state.effects.panic
+            {
+                on_edge(unwind, state);
+            }
+        }
         Terminator::Panic { unwind, .. } => {
             state.effects.panic = true;
-            vec![(*unwind, state)]
+            on_edge(*unwind, state);
         }
         Terminator::Suspend {
             resume, cancelled, ..
-        } => suspend_edges(state, *resume, *cancelled),
+        } => {
+            state.effects.suspend = true;
+            state.bump_heap();
+            on_edge(*resume, state);
+            if let Some(cancelled) = *cancelled {
+                on_edge(cancelled, state);
+            }
+        }
         Terminator::SelectCommit {
             ready,
             suspend,
             cancelled,
             ..
-        } => select_edges(state, *ready, *suspend, *cancelled),
+        } => {
+            state.effects.suspend = true;
+            state.bump_heap();
+            on_edge(*ready, state);
+            if let Some(suspend) = *suspend {
+                on_edge(suspend, state);
+            }
+            if let Some(cancelled) = *cancelled {
+                on_edge(cancelled, state);
+            }
+        }
         Terminator::Return
         | Terminator::ResumePanic
         | Terminator::Abort
-        | Terminator::Unreachable => Vec::new(),
+        | Terminator::Unreachable => {}
     }
 }
 
@@ -440,10 +480,14 @@ fn derive_resolved(
     body: &IndexedBody<'_>,
     state: &mut AbstractState,
 ) {
+    if body.resolved.is_empty() {
+        state.mark_derived();
+        return;
+    }
     let mut cache = body.resolved_cache.borrow_mut();
     for (index, &(expr, local)) in body.resolved.iter().enumerate() {
-        let base = state.range(ValueKey::Local(local));
-        let len = state.range(ValueKey::LocalLen(local));
+        let base = state.local_range[local.index()];
+        let len = state.local_len[local.index()];
         let slot = &mut cache[index];
         if slot.0 != base || slot.1 != len {
             *slot = (
@@ -452,8 +496,8 @@ fn derive_resolved(
                 transfer::integer_range(module, owner, expr, base),
             );
         }
-        state.set_range(ValueKey::Expr(expr), slot.2);
-        state.set_range(ValueKey::ExprLen(expr), len);
+        state.expr_range[expr.index()] = slot.2;
+        state.expr_len[expr.index()] = len;
     }
     state.mark_derived();
 }
@@ -527,31 +571,6 @@ fn invalidate_place(body: &IndexedBody<'_>, state: &mut AbstractState, place: Pl
     } else {
         state.bump_heap();
     }
-}
-
-fn switch_edges(
-    body: &IndexedBody<'_>,
-    owner: &Owner,
-    mut state: AbstractState,
-    value: &Operand,
-    targets: &[(u128, BlockId)],
-    otherwise: BlockId,
-    compare: Option<&CompareFact>,
-) -> Vec<(BlockId, AbstractState)> {
-    let mut edges = Vec::with_capacity(targets.len() + 1);
-    for &(imm, block) in targets {
-        let mut next = state.clone();
-        assume_switch(body, owner, &mut next, value, Some(imm), compare);
-        edges.push((block, next));
-    }
-    let fallback = match targets {
-        [(1, _)] => Some(0),
-        [(0, _)] => Some(1),
-        _ => None,
-    };
-    assume_switch(body, owner, &mut state, value, fallback, compare);
-    edges.push((otherwise, state));
-    edges
 }
 
 fn assume_switch(
@@ -628,69 +647,6 @@ fn operand_key(body: &IndexedBody<'_>, operand: &Operand) -> Option<ValueKey> {
         return Some(ValueKey::Local(hir));
     }
     mapped_expr(body, local).map(ValueKey::Expr)
-}
-
-#[expect(
-    clippy::too_many_arguments,
-    reason = "调用边展开需要调用点、目标 place 与正常/展开后继块"
-)]
-fn call_edges(
-    module: &Module,
-    owner: &Owner,
-    body: &IndexedBody<'_>,
-    mut state: AbstractState,
-    site: CallSite,
-    destination: Place,
-    normal: BlockId,
-    unwind: Option<BlockId>,
-    callees: &dyn Fn(CallSite) -> Option<FunctionSummary>,
-) -> Vec<(BlockId, AbstractState)> {
-    transfer::apply_site(module, owner, &mut state, site, callees);
-    sync_resolved(module, owner, body, &mut state);
-    if destination.is_local()
-        && let CallSite::Expression(id) = site
-    {
-        let range = state.range(ValueKey::Expr(hir::ExprId(id)));
-        write_place(module, owner, body, &mut state, destination, range);
-    }
-    match unwind {
-        Some(unwind) if state.effects.panic => vec![(normal, state.clone()), (unwind, state)],
-        _ => vec![(normal, state)],
-    }
-}
-
-fn suspend_edges(
-    mut state: AbstractState,
-    resume: BlockId,
-    cancelled: Option<BlockId>,
-) -> Vec<(BlockId, AbstractState)> {
-    state.effects.suspend = true;
-    state.bump_heap();
-    match cancelled {
-        Some(cancelled) => vec![(resume, state.clone()), (cancelled, state)],
-        None => vec![(resume, state)],
-    }
-}
-
-fn select_edges(
-    mut state: AbstractState,
-    ready: BlockId,
-    suspend: Option<BlockId>,
-    cancelled: Option<BlockId>,
-) -> Vec<(BlockId, AbstractState)> {
-    state.effects.suspend = true;
-    state.bump_heap();
-    match (suspend, cancelled) {
-        (Some(suspend), Some(cancelled)) => {
-            vec![
-                (ready, state.clone()),
-                (suspend, state.clone()),
-                (cancelled, state),
-            ]
-        }
-        (Some(next), None) | (None, Some(next)) => vec![(ready, state.clone()), (next, state)],
-        (None, None) => vec![(ready, state)],
-    }
 }
 
 fn compare_bin(op: CompareOp) -> BinOp {
