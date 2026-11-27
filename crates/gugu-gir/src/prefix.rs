@@ -61,7 +61,7 @@ impl<'a> BuiltinPrefix<'a> {
         let record_types: Vec<crate::gir::concrete::RecordTypes> =
             decode_table(prebuilt, RECORD_TYPES_TABLE, &prebuilt.record_types)?;
         // GIR body 逐条编码，表摘要按「空表头 + 全部 body」一组计算，与构建期一致。
-        let mut slices: Vec<&[u8]> = prebuilt.gir_bodies.iter().map(Vec::as_slice).collect();
+        let mut slices: Vec<&[u8]> = prebuilt.gir_bodies.iter().map(AsRef::as_ref).collect();
         slices.insert(0, &[]);
         let declared = declared_content_digest(prebuilt, GIR_BODIES_TABLE)
             .ok_or_else(|| invalid("内建块物化表缺少 gir.bodies 表指纹"))?;

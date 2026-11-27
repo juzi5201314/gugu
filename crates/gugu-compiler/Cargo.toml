@@ -15,6 +15,7 @@ runtime-gc-probes = [
 slow-tests = ["gugu-frontend/slow-tests"]
 
 [dependencies]
+bytes.workspace = true
 gugu-compiler-core = { path = "../gugu-compiler-core" }
 gugu-frontend = { path = "../gugu-frontend" }
 
@@ -25,6 +26,7 @@ gugu-runtime-abi = { path = "../gugu-runtime-abi" }
 gugu-runtime-world = { path = "../gugu-runtime-world" }
 
 [build-dependencies]
+bytes.workspace = true
 gugu-compiler-core = { path = "../gugu-compiler-core" }
 gugu-frontend = { path = "../gugu-frontend" }
 gugu-runtime-builder = { path = "../gugu-runtime-builder" }

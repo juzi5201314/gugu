@@ -1044,7 +1044,6 @@ fn region_decisions(
         }
         return RegionDecisions { plans };
     }
-    let liveness = Liveness::analyze(body);
     let adjacency = adjacency(body.locals.len(), edges);
     let words = body.locals.len().div_ceil(64).max(1);
     let mut per_segment: Vec<Vec<(u32, u32, u32)>> = vec![Vec::new(); facts.exits.len()];
@@ -1067,6 +1066,8 @@ fn region_decisions(
         }
         per_segment[segment as usize].push((index as u32, place.local.0, block));
     }
+    // 只有候选通过支配检查后才需要活跃性；无 region 候选的 body 不构造整张表。
+    let liveness = std::cell::OnceCell::new();
     for (segment, sites) in per_segment.iter().enumerate() {
         if sites.is_empty() {
             continue;
@@ -1082,6 +1083,7 @@ fn region_decisions(
         {
             continue;
         }
+        let liveness = liveness.get_or_init(|| Liveness::analyze(body));
         let mut reachable = vec![0_u64; words];
         for (_, local, _) in sites {
             reachable_from(&adjacency, *local, &mut reachable);

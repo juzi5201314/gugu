@@ -1,4 +1,4 @@
-use super::{Graph, edges, invalid};
+use super::{Graph, invalid};
 use crate::Diagnostic;
 use crate::body::{BlockId, Body, Op, Origin, Terminator, ValueId, id, range};
 use crate::gir::body::{CallKind, ViewMode};
@@ -315,11 +315,8 @@ pub(super) fn verify(body: &Body, graph: &Graph, mode: Mode) -> Result<Layout, D
             }
             view_call(body, &state, call, body.args(arguments))?;
         }
-        let mut successors = Vec::new();
-        edges(body, &block.terminator, |edge| {
-            successors.push(body.edges[edge.index()].to)
-        });
-        if successors.is_empty()
+        let mut successors = body.successors(block_id).peekable();
+        if successors.peek().is_none()
             && (!state.regions.is_empty() || !state.views.is_empty() || !state.shared.is_empty())
         {
             return Err(invalid("控制流出口留下未闭合的 region/view/access guard"));
@@ -442,15 +439,14 @@ fn acyclic(body: &Body, members: &[bool]) -> Result<(), Diagnostic> {
     let mut visited = 0;
     while let Some(block) = ready.pop() {
         visited += 1;
-        edges(body, &body.blocks[block.index()].terminator, |edge| {
-            let target = body.edges[edge.index()].to;
+        for target in body.successors(block) {
             if members[target.index()] {
                 incoming[target.index()] -= 1;
                 if incoming[target.index()] == 0 {
                     ready.push(target);
                 }
             }
-        });
+        }
     }
     if visited != members.iter().filter(|member| **member).count() {
         Err(invalid("NoSafepointRegion 含有不可约环"))
@@ -769,9 +765,7 @@ fn reachable(body: &Body) -> Vec<bool> {
         if std::mem::replace(&mut seen[block.index()], true) {
             continue;
         }
-        edges(body, &body.blocks[block.index()].terminator, |edge| {
-            stack.push(body.edges[edge.index()].to)
-        });
+        stack.extend(body.successors(block));
     }
     seen
 }

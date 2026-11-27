@@ -81,6 +81,7 @@ impl Encoder<'_> {
         let index = u16::try_from(index).expect("IR schema 的枚举变体数量小于 65536");
         self.output.extend_from_slice(&index.to_le_bytes());
     }
+    #[inline]
     fn child<T: ?Sized + Serialize>(&mut self, value: &T) -> Result<(), Error> {
         value.serialize(Encoder {
             output: self.output,
@@ -305,6 +306,7 @@ impl<'a> Sequence<'a> {
             prefix,
         })
     }
+    #[inline]
     fn element<T: ?Sized + Serialize>(&mut self, value: &T) -> Result<(), Error> {
         value.serialize(Encoder {
             output: self.output,
@@ -331,6 +333,7 @@ impl<'a> Sequence<'a> {
 impl SerializeSeq for Sequence<'_> {
     type Ok = ();
     type Error = Error;
+    #[inline]
     fn serialize_element<T: ?Sized + Serialize>(&mut self, value: &T) -> Result<(), Error> {
         self.element(value)
     }
@@ -342,6 +345,7 @@ impl SerializeSeq for Sequence<'_> {
 impl SerializeTuple for Sequence<'_> {
     type Ok = ();
     type Error = Error;
+    #[inline]
     fn serialize_element<T: ?Sized + Serialize>(&mut self, value: &T) -> Result<(), Error> {
         self.element(value)
     }
@@ -353,6 +357,7 @@ impl SerializeTuple for Sequence<'_> {
 impl SerializeTupleStruct for Sequence<'_> {
     type Ok = ();
     type Error = Error;
+    #[inline]
     fn serialize_field<T: ?Sized + Serialize>(&mut self, value: &T) -> Result<(), Error> {
         self.element(value)
     }
@@ -364,6 +369,7 @@ impl SerializeTupleStruct for Sequence<'_> {
 impl SerializeTupleVariant for Sequence<'_> {
     type Ok = ();
     type Error = Error;
+    #[inline]
     fn serialize_field<T: ?Sized + Serialize>(&mut self, value: &T) -> Result<(), Error> {
         self.element(value)
     }
@@ -375,6 +381,7 @@ impl SerializeTupleVariant for Sequence<'_> {
 impl SerializeStruct for Sequence<'_> {
     type Ok = ();
     type Error = Error;
+    #[inline]
     fn serialize_field<T: ?Sized + Serialize>(
         &mut self,
         _key: &'static str,
@@ -390,6 +397,7 @@ impl SerializeStruct for Sequence<'_> {
 impl SerializeStructVariant for Sequence<'_> {
     type Ok = ();
     type Error = Error;
+    #[inline]
     fn serialize_field<T: ?Sized + Serialize>(
         &mut self,
         _key: &'static str,

@@ -280,36 +280,8 @@ fn visit(body: &Body, id: BlockId, seen: &mut [bool], post: &mut Vec<BlockId>) {
         return;
     }
     seen[id.index()] = true;
-    for successor in successors(body, id) {
+    for successor in body.successors(id) {
         visit(body, successor, seen, post);
     }
     post.push(id);
-}
-
-pub fn successors(body: &Body, id: BlockId) -> Vec<BlockId> {
-    let terminator = &body.blocks[id.index()].terminator;
-    match terminator {
-        Terminator::Jump(edge) => vec![body.edges[edge.index()].to],
-        Terminator::Branch { yes, no, .. } => {
-            vec![body.edges[yes.index()].to, body.edges[no.index()].to]
-        }
-        Terminator::Switch {
-            cases, otherwise, ..
-        } => {
-            let mut targets = Vec::new();
-            for (_, edge) in &body.switch_cases[crate::lir::body::range(cases)] {
-                targets.push(body.edges[edge.index()].to);
-            }
-            targets.push(body.edges[otherwise.index()].to);
-            targets
-        }
-        Terminator::Invoke { normal, unwind, .. } => {
-            vec![body.edges[normal.index()].to, body.edges[unwind.index()].to]
-        }
-        Terminator::Return { .. }
-        | Terminator::ResumePanic { .. }
-        | Terminator::TailCall { .. }
-        | Terminator::Trap { .. }
-        | Terminator::Unreachable { .. } => Vec::new(),
-    }
 }

@@ -91,6 +91,8 @@ pub enum BindingTarget {
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub struct RuntimeGlueBindings {
     map: BTreeMap<&'static str, BindingTarget>,
+    /// 构造时生成一次；热路径点查与 writer 的有序枚举共用同一集合。
+    symbols: std::collections::BTreeSet<String>,
     runtime_owners: std::collections::BTreeSet<[u8; 32]>,
     fingerprint: [u8; 32],
 }
@@ -159,6 +161,10 @@ impl RuntimeGlueBindings {
             }
         }
         let bindings = Self {
+            symbols: map
+                .keys()
+                .map(|glue| mangle::mangle_runtime(glue))
+                .collect(),
             map,
             runtime_owners: Default::default(),
             fingerprint: [0; 32],
@@ -268,17 +274,12 @@ impl RuntimeGlueBindings {
 
     /// 该 mangled 符号是否属于已绑定 glue。
     pub fn is_bound_symbol(&self, symbol: &str) -> bool {
-        self.map
-            .keys()
-            .any(|glue| mangle::mangle_runtime(glue) == symbol)
+        self.symbols.contains(symbol)
     }
 
     /// 已绑定 glue 的 mangled 符号名集合；镜像 writer 用它判定「绑定但缺失定义」。
     pub fn bound_symbols(&self) -> std::collections::BTreeSet<String> {
-        self.map
-            .keys()
-            .map(|glue| mangle::mangle_runtime(glue))
-            .collect()
+        self.symbols.clone()
     }
 
     /// 每个 Item 绑定的调用点 ABI 形状必须与绑定函数自身的签名一致。

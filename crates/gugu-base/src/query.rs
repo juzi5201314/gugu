@@ -653,24 +653,26 @@ impl ObjectCache {
         key: ObjectKey,
         target: crate::target::TargetName,
     ) -> Result<gugu_compiler_core::RuntimeArtifactV1, ObjectError> {
-        let payload = self.load(key, QueryKind::CodegenFragment, 1, |bytes| {
-            let artifact = gugu_compiler_core::RuntimeArtifactV1::decode(bytes)
-                .map_err(|error| error.to_string())?;
-            if artifact.manifest.target != target.name() {
-                return Err(format!(
-                    "runtime artifact target 不匹配：期望 {}，实际 {}",
-                    target.name(),
-                    artifact.manifest.target
-                ));
-            }
-            Ok(())
-        })?;
-        gugu_compiler_core::RuntimeArtifactV1::decode(&payload).map_err(|error| {
-            ObjectError::Invalid {
-                path: self.object_path(key),
-                message: error.to_string(),
-            }
-        })
+        let payload = self.load(key, QueryKind::CodegenFragment, 1, |_| Ok(()))?;
+        let artifact = gugu_compiler_core::RuntimeArtifactV1::decode(payload.into())
+            .map_err(|error| error.to_string())
+            .and_then(|artifact| {
+                if artifact.manifest.target != target.name() {
+                    Err(format!(
+                        "runtime artifact target 不匹配：期望 {}，实际 {}",
+                        target.name(),
+                        artifact.manifest.target
+                    ))
+                } else {
+                    Ok(artifact)
+                }
+            });
+        artifact
+            .map_err(|message| invalid_object(&self.object_path(key), message))
+            .or_else(|error| {
+                self.quarantine(&self.object_path(key))?;
+                Err(error)
+            })
     }
 
     fn object_path(&self, key: ObjectKey) -> PathBuf {
@@ -898,5 +900,42 @@ mod tests {
         ));
         assert!(!object.exists());
         assert!(cache.root().join("quarantine").join(key.hex()).exists());
+    }
+
+    #[test]
+    fn runtime_artifact_cache_preserves_target_and_inner_digest_validation() {
+        use crate::target::TargetName;
+        use gugu_compiler_core::{RuntimeArtifactBuilder, TargetName as CoreTarget};
+
+        let root = TempDir::new().expect("cache root");
+        let cache = ObjectCache::new(root.path());
+        let artifact = RuntimeArtifactBuilder::build(CoreTarget::X86_64Linux, &[])
+            .expect("构造 runtime artifact");
+        let bytes = artifact.encode().expect("编码 runtime artifact");
+        let key = cache
+            .store(QueryKind::CodegenFragment, 1, &bytes)
+            .expect("store");
+        assert_eq!(
+            cache
+                .load_runtime_artifact(key, TargetName::X86_64Linux)
+                .expect("load"),
+            artifact
+        );
+        let mut corrupted = bytes.clone();
+        *corrupted.last_mut().expect("容器摘要") ^= 1;
+        for (payload, target) in [
+            (bytes, TargetName::X86_64Windows),
+            (corrupted, TargetName::X86_64Linux),
+        ] {
+            let key = cache
+                .store(QueryKind::CodegenFragment, 1, &payload)
+                .expect("store");
+            assert!(matches!(
+                cache.load_runtime_artifact(key, target),
+                Err(ObjectError::Invalid { .. })
+            ));
+            assert!(!cache.object_path(key).exists());
+            assert!(cache.root().join("quarantine").join(key.hex()).exists());
+        }
     }
 }

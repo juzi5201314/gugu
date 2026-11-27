@@ -690,43 +690,35 @@ pub enum Terminator {
 }
 
 impl Terminator {
-    /// 按固定顺序列出全部后继（含 unwind/cancelled 边）。
-    pub fn successors(&self) -> Vec<BlockId> {
-        match self {
-            Self::Goto { target } => vec![*target],
+    /// 按固定顺序遍历全部后继（含 unwind/cancelled 边），不分配临时集合。
+    #[inline]
+    pub fn successors(&self) -> impl DoubleEndedIterator<Item = BlockId> + Clone + '_ {
+        // 非 switch 终结符由类型定义保证至多三个直接后继；switch 借用原表，不限制分支数。
+        let (direct, targets, otherwise) = match self {
+            Self::Goto { target } => ([Some(*target), None, None], &[][..], None),
             Self::SwitchInt {
                 targets, otherwise, ..
-            } => {
-                let mut out: Vec<_> = targets.iter().map(|(_, block)| *block).collect();
-                out.push(*otherwise);
-                out
+            } => ([None; 3], targets.as_slice(), Some(*otherwise)),
+            Self::Call { normal, unwind, .. } => ([Some(*normal), *unwind, None], &[][..], None),
+            Self::Panic { unwind, .. } => ([Some(*unwind), None, None], &[][..], None),
+            Self::Return | Self::ResumePanic | Self::Abort | Self::Unreachable => {
+                ([None; 3], &[][..], None)
             }
-            Self::Call { normal, unwind, .. } => {
-                let mut out = vec![*normal];
-                out.extend(*unwind);
-                out
-            }
-            Self::Panic { unwind, .. } => vec![*unwind],
-            Self::Return | Self::ResumePanic | Self::Abort | Self::Unreachable => Vec::new(),
             Self::Suspend {
                 resume, cancelled, ..
-            } => {
-                let mut out = vec![*resume];
-                out.extend(*cancelled);
-                out
-            }
+            } => ([Some(*resume), *cancelled, None], &[][..], None),
             Self::SelectCommit {
                 ready,
                 suspend,
                 cancelled,
                 ..
-            } => {
-                let mut out = vec![*ready];
-                out.extend(*suspend);
-                out.extend(*cancelled);
-                out
-            }
-        }
+            } => ([Some(*ready), *suspend, *cancelled], &[][..], None),
+        };
+        direct
+            .into_iter()
+            .flatten()
+            .chain(targets.iter().map(|(_, block)| *block))
+            .chain(otherwise)
     }
 }
 
@@ -775,5 +767,39 @@ impl GirBody {
             .update(&bytes)
             .finalize()
             .as_bytes()
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::{BlockId, ConstId, LocalId, Operand, SafepointId, Terminator};
+
+    #[test]
+    fn switch_successors_preserve_order_duplicates_and_default() {
+        let terminator = Terminator::SwitchInt {
+            value: Operand::Constant(ConstId(0)),
+            targets: vec![(1, BlockId(2)), (2, BlockId(1)), (3, BlockId(2))],
+            otherwise: BlockId(0),
+        };
+        assert_eq!(
+            terminator.successors().collect::<Vec<_>>(),
+            [BlockId(2), BlockId(1), BlockId(2), BlockId(0)]
+        );
+    }
+
+    #[test]
+    fn select_keeps_cancellation_without_a_suspend_edge() {
+        let terminator = Terminator::SelectCommit {
+            cases: 0..0,
+            index: LocalId(0),
+            ready: BlockId(1),
+            suspend: None,
+            cancelled: Some(BlockId(2)),
+            safepoint: SafepointId(0),
+        };
+        assert_eq!(
+            terminator.successors().collect::<Vec<_>>(),
+            [BlockId(1), BlockId(2)]
+        );
     }
 }

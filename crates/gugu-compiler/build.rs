@@ -42,9 +42,9 @@ fn main() {
     for (target, artifact) in artifacts {
         let artifact =
             gugu_frontend::materialize(frontend_target(target), artifact).expect("内建块物化");
-        let bytes = artifact.encode().expect("runtime artifact encode");
-        let decoded =
-            gugu_compiler_core::RuntimeArtifactV1::decode(&bytes).expect("runtime artifact decode");
+        let bytes = bytes::Bytes::from(artifact.encode().expect("runtime artifact encode"));
+        let decoded = gugu_compiler_core::RuntimeArtifactV1::decode(bytes.clone())
+            .expect("runtime artifact decode");
         decoded.for_target(target).expect("runtime artifact target");
         let name = match target {
             gugu_compiler_core::TargetName::X86_64Linux => "runtime-x86_64-linux",

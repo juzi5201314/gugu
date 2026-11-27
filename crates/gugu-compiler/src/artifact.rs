@@ -3,54 +3,55 @@
 //! 这里不保存 runtime source table；source/artifact 只在 `build.rs` 由 builder 生成，进程内
 //! 首次访问时解码并验证。解码错误是 compiler invariant，不会回退到源码重编。
 
+use bytes::Bytes;
 use std::sync::LazyLock;
 
 use gugu_frontend::{RuntimeArtifactError, RuntimeArtifactProvider, RuntimeArtifactV1, TargetName};
 
 static LINUX: LazyLock<Result<RuntimeArtifactV1, RuntimeArtifactError>> = LazyLock::new(|| {
-    RuntimeArtifactV1::decode(include_bytes!(concat!(
+    RuntimeArtifactV1::decode(Bytes::from_static(include_bytes!(concat!(
         env!("OUT_DIR"),
         "/runtime-x86_64-linux",
         env!("GUGU_PREBUILT_FLAVOR"),
         ".gbc"
-    )))
+    ))))
 });
 
 static WINDOWS: LazyLock<Result<RuntimeArtifactV1, RuntimeArtifactError>> = LazyLock::new(|| {
-    RuntimeArtifactV1::decode(include_bytes!(concat!(
+    RuntimeArtifactV1::decode(Bytes::from_static(include_bytes!(concat!(
         env!("OUT_DIR"),
         "/runtime-x86_64-windows",
         env!("GUGU_PREBUILT_FLAVOR"),
         ".gbc"
-    )))
+    ))))
 });
 static MACOS: LazyLock<Result<RuntimeArtifactV1, RuntimeArtifactError>> = LazyLock::new(|| {
-    RuntimeArtifactV1::decode(include_bytes!(concat!(
+    RuntimeArtifactV1::decode(Bytes::from_static(include_bytes!(concat!(
         env!("OUT_DIR"),
         "/runtime-x86_64-macos",
         env!("GUGU_PREBUILT_FLAVOR"),
         ".gbc"
-    )))
+    ))))
 });
 
 static AARCH64_LINUX: LazyLock<Result<RuntimeArtifactV1, RuntimeArtifactError>> =
     LazyLock::new(|| {
-        RuntimeArtifactV1::decode(include_bytes!(concat!(
+        RuntimeArtifactV1::decode(Bytes::from_static(include_bytes!(concat!(
             env!("OUT_DIR"),
             "/runtime-aarch64-linux",
             env!("GUGU_PREBUILT_FLAVOR"),
             ".gbc"
-        )))
+        ))))
     });
 
 static AARCH64_MACOS: LazyLock<Result<RuntimeArtifactV1, RuntimeArtifactError>> =
     LazyLock::new(|| {
-        RuntimeArtifactV1::decode(include_bytes!(concat!(
+        RuntimeArtifactV1::decode(Bytes::from_static(include_bytes!(concat!(
             env!("OUT_DIR"),
             "/runtime-aarch64-macos",
             env!("GUGU_PREBUILT_FLAVOR"),
             ".gbc"
-        )))
+        ))))
     });
 
 /// 返回目标的 core 目标名。
