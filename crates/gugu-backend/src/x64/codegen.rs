@@ -983,10 +983,12 @@ impl DataPool {
 /// 常量数据去重域；与 `mangle::data_key` 的输入（下标）不同，两者不会互相碰撞。
 const CONST_DATA_DOMAIN: &str = "gugu-const-data-v1";
 
+type VtableBlobs = (Vec<(String, Vec<u8>)>, Vec<BlobRelocation>);
+
 fn vtable_blobs(
     fragments: &[FragmentPayload],
     universe: &TypeUniverse,
-) -> Result<(Vec<(String, Vec<u8>)>, Vec<BlobRelocation>), Vec<Diagnostic>> {
+) -> Result<VtableBlobs, Vec<Diagnostic>> {
     let mut referenced = std::collections::BTreeSet::new();
     for fragment in fragments {
         for relocation in &fragment.relocations {
