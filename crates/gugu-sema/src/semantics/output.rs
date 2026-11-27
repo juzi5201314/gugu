@@ -6,14 +6,15 @@ use super::{
     model::{DefRef, Model, Ty},
 };
 use crate::{Diagnostic, DiagnosticCode};
+use gugu_base::SharedTable;
 
 pub const SCHEMA_VERSION: u32 = 29;
 
 #[derive(Clone, Debug, Default, Eq, PartialEq, serde::Serialize, serde::Deserialize)]
 pub struct CheckedSemantics {
     pub early_constants: super::comptime::EarlyConstTable,
-    pub bodies: Vec<CheckedBody>,
-    pub initialization: Vec<Initialization>,
+    pub bodies: SharedTable<CheckedBody>,
+    pub initialization: SharedTable<Initialization>,
     pub input_fingerprint: [u8; 32],
     pub hidden_types: Vec<Option<Ty>>,
     pub foreign_definitions: Vec<super::foreign::ForeignDefinition>,

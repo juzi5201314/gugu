@@ -22,6 +22,7 @@ pub use verify::verify;
 use crate::hir::{self, TypeId};
 use crate::mono::MonoWorldV1;
 use crate::{Diagnostic, DiagnosticCode};
+use gugu_base::SharedTable;
 use serde::{Deserialize, Serialize};
 
 pub const WORLD_SCHEMA: u32 = 4;
@@ -37,7 +38,7 @@ pub struct GirFragment {
 pub struct GirWorldV1 {
     pub schema: u32,
     pub hir_fingerprint: [u8; 32],
-    pub bodies: Vec<GirBody>,
+    pub bodies: SharedTable<GirBody>,
     pub fragments: Vec<GirFragment>,
     pub placement: placement::PlacementWorldV1,
     pub concrete: Vec<concrete::ConcreteBody>,
@@ -69,16 +70,16 @@ pub fn empty_world() -> GirWorldV1 {
     GirWorldV1 {
         schema: WORLD_SCHEMA,
         hir_fingerprint: [0; 32],
-        bodies: Vec::new(),
+        bodies: SharedTable::default(),
         fragments: Vec::new(),
-        fingerprint: world_fingerprint(&[], &[], [0; 32], &placement, &[]),
+        fingerprint: world_fingerprint(&SharedTable::default(), &[], [0; 32], &placement, &[]),
         placement,
         concrete: Vec::new(),
     }
 }
 
 pub fn world_fingerprint(
-    bodies: &[GirBody],
+    bodies: &SharedTable<GirBody>,
     fragments: &[GirFragment],
     hir_fingerprint: [u8; 32],
     placement: &placement::PlacementWorldV1,
@@ -149,7 +150,7 @@ pub fn body_kind(kind: hir::DefinitionKind) -> BodyKind {
     }
 }
 
-pub fn fragments_of(mono: &MonoWorldV1, bodies: &[GirBody]) -> Vec<GirFragment> {
+pub fn fragments_of(mono: &MonoWorldV1, bodies: &SharedTable<GirBody>) -> Vec<GirFragment> {
     // DefId 是 HIR 稠密 arena 下标；这里只索引具有 body 的前缀范围。
     let extent = bodies
         .iter()

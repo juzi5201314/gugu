@@ -281,6 +281,7 @@ fn check_sources(
                 .count();
             Some(prefix::BuiltinPrefix::decode(
                 resources.prebuilt(),
+                resources.target_name(),
                 materialized_sources,
                 source_map,
             )?)

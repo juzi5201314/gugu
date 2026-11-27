@@ -41,6 +41,13 @@ Heaptrack 采集使用 `--record-only`，离线分析显式调用 `heaptrack_pri
 - runtime artifact 的 opaque 表与函数层字节用 `Bytes` 切片共享输入缓冲；静态嵌入不复制，
   文件输入收编 `Vec` 所有权。对象缓存只解码一次，语义失败仍隔离坏对象；容器布局、
   schema、摘要、UTF-8、目标及安装端的内容校验不变。
+- 内建前缀缓存只保存按目标、实际物化表内容身份与层 revision 验证过的不可变解码基底，
+  最多登记八份输入缓冲身份；持有 `Bytes` 所有权并比对元数据、缓冲位置与长度后，热命中
+  不重算大表摘要。新缓冲先计算实际内容身份，相同目标与内容可以共享解码 cell；不同制品
+  的首次解码不占用登记表锁。命中复用语义/GIR 表与结构验证结果。每次安装仍按当前
+  `SourceMap` 重建名称/导入记录对应的 `Span` overlay 并校验源、模块前缀，记录本身共享；
+  用户派生数据留在会话侧追加，编号与诊断位置不跨会话复用。稠密表保持共享前缀，owner
+  的输入身份单独重建，不能在追加时展平整表。
 - 单态化上下文按稠密 `DefId` 索引首次 capture 的类型参数；runtime glue 源定义按
   登记表槽位惰性索引，缺失也只记忆化到当前不可变 world，不跨编译复用。
 - GIR/LIR 的后继与边遍历借用原始存储，不在固定点、可达性或 verifier 循环里构造
@@ -85,6 +92,27 @@ Rust 重新编译，也不将插桩耗时混进正常延迟。
 原默认配置的单项 3 秒截止时间在本机仍有超时；减少到 8 个测试槽也未消除该问题，
 因此没有据此调整默认调度，也不把完整采样通过写成默认门禁通过。
 
+### 内建共享基底实测
+
+2026-11-27 以 `d6c18cb2ba54b1ac5793627054bb55605830bc0f` 的源码快照为优化前，
+与共享基底实现使用逐字节相同的 `pipeline_baseline` harness；两侧均为 `--profile test`
+的 O3 配置和 `x86_64-linux` 目标。每个用例单独启动进程、连续六轮，每轮新建 `Compiler`，
+不沿用会话 query。计时覆盖完整编译，不包含 Rust 构建；首轮单列，热会话取后五轮中位数。
+
+| 用例 | 首轮前 → 后（µs） | 热会话前 → 后（µs） | 热会话降低 | 最大 RSS 前 → 后（KiB） |
+| --- | ---: | ---: | ---: | ---: |
+| `minimal-main`（13 B） | 827030 → 812853 | 680979 → 602297 | 11.6% | 316224 → 302180 |
+| `std-collections-io`（273 B） | 808268 → 759996 | 681156 → 592068 | 13.1% | 316076 → 302480 |
+
+两侧每轮的完整 LIR 指纹在各自进程内保持相同，跨实现报告的指纹前缀也一致；镜像均为
+1880064 B。标准库用例包含集合类型、泛型调用和导入检查，入口仍是空 `main`，不代表
+大规模集合程序的后端成本。首轮只有一个样本，不据此声称稳定的冷启动收益；RSS 是每个
+六轮进程的高水位。共享基底只在进程内复用，首次解码与会话绑定工作仍然存在。
+
+复现时分别设置 `GUGU_PIPELINE_CASE=minimal-main` 或 `GUGU_PIPELINE_CASE=std-collections-io`、
+`GUGU_PIPELINE_REPEATS=6`，运行 `cargo bench -p gugu-compiler --profile test --bench pipeline_baseline`；
+内存测量用 `/usr/bin/time` 包住已构建的 bench 二进制，不把 Cargo/Rust 编译计入。
+
 ### CI 执行与缓存
 
 `.github/workflows/ci.yml` 保留 `Rust checks`、`Rust lint`、mdBook 与 Linux
@@ -113,7 +141,7 @@ Rust job 使用 `Swatinem/rust-cache` 缓存 Cargo 依赖，使用 sccache 的 G
 | bench | 覆盖面 | 指标 |
 | --- | --- | --- |
 | `workload_gate` | 双目标端到端编译（channel/select、I/O、FFI 混合源）、owner return 的 direct 与 radix routing profile、分配-归还 pacing | 编译 µs、镜像 B、action key、发布/消费 item/µs、remote hop、单次发布尾 µs |
-| `pipeline_baseline` | 冷流水线地板、最小用户源、`std.collections`/`std.io` 实例化 | 每用例 elapsed µs、action 指纹 |
+| `pipeline_baseline` | 冷流水线地板、最小用户源、`std.collections`/`std.io` 类型与导入检查 | 每轮 elapsed µs、输入 B、LIR 指纹、镜像 B；区分首次与热进程的新会话 |
 | `coroutine_context` | context switch 机器片段往返 | switch/restore 计数值 |
 | `morestack_entry`、`stackmap_walk` | 栈增长入口、栈图遍历 | 片段正确性与代价 |
 | `x64_encoding`、`x64_select`、`x64_frame` | 编码/选指/帧布局吞吐 | 每千条 µs |

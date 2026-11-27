@@ -17,7 +17,7 @@
 
 ### Build-time runtime artifact
 
-compiler 构建阶段由 `gugu-runtime-builder` 读取内建 `std/` 与 `runtime/` 源，按目标生成 `GUGURT01` artifact；`gugu-compiler`（façade）嵌入并校验 Linux/Windows bytes，`gugu-frontend` 不持有字节，只按目标接收注入的 `RuntimeArtifactProvider`。当前 artifact 固化 source blob 与 manifest，用户 frontend 仍解析这些固定源码；它不是已编译的 runtime fragment 容器。独立布局证据从 record 签名形成，不依赖 executable 闭包。
+compiler 构建阶段由 `gugu-runtime-builder` 读取内建 `std/` 与 `runtime/` 源，按目标生成 `GUGURT01` artifact；`gugu-compiler`（façade）嵌入并校验 Linux/Windows bytes，`gugu-frontend` 不持有字节，只按目标接收注入的 `RuntimeArtifactProvider`。artifact 固化 source blob、manifest 与已物化的内建派生表。frontend 按目标、物化表实际内容身份及层 revision 复用通过结构 verifier 的不可变解码基底；缓存身份覆盖表字节、指纹、模块顺序与 revision，不能只凭声明摘要命中。每次会话仍校验源码前缀与模块归属；名称与导入记录共享解码表，`Span` / `SourceTableId` 在独立会话 overlay 中重建；用户定义按稳定前缀之后的编号追加。独立布局证据从 record 签名形成，不依赖 executable 闭包。
 
 runtime 的契约入口为 record-only 根：用于原有 size/align/offset/managed 校验，不生成 executable body。runtime `#[used]` 不再隐式形成全局执行根；rt0 启动、登记机器片段的源目标与可达 GIR 操作产生的 glue 需求进入单态化固定点。用户的 `#[used]`、导出、入口和初始化语义不变。未引用的源 glue 缺少实例时不绑定，实际引用缺少目标仍是 invariant error。
 

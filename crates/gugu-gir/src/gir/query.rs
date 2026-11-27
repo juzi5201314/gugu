@@ -17,7 +17,15 @@ pub fn build_world(
     installed: Option<&crate::prefix::BuiltinPrefix>,
 ) -> Result<GirWorldV1, Vec<Diagnostic>> {
     let module = hir.module();
-    let mut bodies = Vec::with_capacity(module.owners.len());
+    let mut bodies = installed
+        .map(|prefix| prefix.gir_bodies().clone())
+        .unwrap_or_default();
+    if bodies.len() > module.owners.len() {
+        return Err(vec![super::gir_error(
+            "物化 GIR 前缀超过当前 owner 表",
+            None,
+        )]);
+    }
     for (index, owner) in module.owners.iter().enumerate() {
         if let Some(body) = installed.and_then(|prefix| prefix.gir_body(index)) {
             // 物化 body 与现算 body 必须同源：owner、稳定键与结构逐条对上，否则报 invariant，
@@ -26,10 +34,11 @@ pub fn build_world(
             if body.owner != owner.definition || body.owner_key != definition.key {
                 return Err(vec![super::gir_error("物化 GIR 与当前 owner 不一致", None)]);
             }
+            debug_assert!(std::ptr::eq(&bodies[index], body));
             super::verify(module, body).map_err(|error| vec![error])?;
-            bodies.push(body.clone());
             continue;
         }
+        debug_assert_eq!(bodies.len(), index, "用户 owner 紧随共享内建前缀");
         bodies.push(compute_body(hir, index, owner, queries, sources)?);
     }
     let placement = PlacementWorldV1::empty();
