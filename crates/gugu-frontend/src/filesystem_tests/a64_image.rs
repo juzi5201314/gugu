@@ -80,3 +80,63 @@ fn aarch64_runtime_program_assembles() {
     ));
     assert!(output.is_success(), "{:?}", output.diagnostics().items());
 }
+
+const DYN_PROGRAM: &str = r#"use std.io.{println}
+trait Describable {
+    fn describe(self: &Self) string
+}
+struct Dog { pub name: string }
+impl Describable for Dog {
+    fn describe(self: &Self) string { self.name }
+}
+fn show(d: dyn Describable) {
+    println(d.describe())
+}
+fn main() {
+    show(Dog { name: "rex" })
+}
+"#;
+
+/// issue #152：`dyn Trait` 擦除不再经过不存在的 runtime `dynamic_erase`；
+/// aarch64 两个对象格式都能装配出含 vtable shim 的镜像。
+#[test]
+fn aarch64_dyn_trait_erasure_assembles() {
+    for target in [TargetName::Aarch64Macos, TargetName::Aarch64Linux] {
+        let output = compile(DYN_PROGRAM, target);
+        let lir = output.dump_lir().expect("LIR");
+        assert!(lir.contains("$vtable"), "缺少 vtable shim：{lir}");
+        assert!(
+            lir.contains("SymbolAddr(Vtable"),
+            "擦除必须引用编译期 vtable 符号：{lir}"
+        );
+        assert!(!lir.contains("DynamicErase"), "dyn 擦除不能走 runtime glue");
+    }
+}
+
+const DYN_BY_VALUE_PROGRAM: &str = r#"use std.io.{println}
+trait Valuable {
+    fn value(self) int
+}
+struct Num { pub x: int, pub y: int }
+impl Valuable for Num {
+    fn value(self) int { self.x + self.y }
+}
+fn show(v: dyn Valuable) {
+    println(v.value())
+}
+fn main() {
+    show(Num { x: 3, y: 4 })
+}
+"#;
+
+/// 按值 receiver 的动态调用以 dyn 胖对入栈；shim 必须从载荷重读两条直接 ABI 车道。
+#[test]
+fn aarch64_dyn_trait_by_value_receiver_assembles() {
+    let output = compile(DYN_BY_VALUE_PROGRAM, TargetName::Aarch64Linux);
+    let lir = output.dump_lir().expect("LIR");
+    assert!(
+        lir.contains("PtrOffset"),
+        "双车道 receiver 必须读取第二个字：{lir}"
+    );
+    assert!(lir.contains("$vtable"), "缺少按值 receiver shim：{lir}");
+}

@@ -753,26 +753,13 @@ kind 为 0 global、1 OS-thread-local template、2 coroutine-local template、3 
 尚未接线：TLS 局部项的模板块放置与运行期扫描，以及受管静态值的根记录生产者。
 
 根记录的 `location` 是镜像内真实地址，布局后才知道：编译器只产出稳定符号名，写入
-`BlobRelocation { offset, symbol }` 清单（blob 内字节偏移 + 已登记符号），由两个 writer 在
+`BlobRelocation { blob, offset, symbol }` 清单（目标 blob、blob 内字节偏移 + 已登记符号），由两个 writer 在
 `defined_layout`/`assign_rvas` 之后回填 8 字节地址；符号缺失或偏移越界/未对齐一律链接失败，
 不留零值让运行期读到无效地址。action key 只含符号名与偏移，因此不含运行地址。
 
-vtable 是 variable record，由 `vtable_count + 1` 个 `u64` index 定界：
+`.gugu.meta` 的 vtable data 是定长审计记录：每条 64 byte，前 32 byte 为 `trait_key`、后 32 byte 为具体类型的稳定类型键；`vtable_count + 1` 个 `u64` index 仍按 64 byte 步长定界。相同 `(concrete_type, trait_key)` 只能有一条。该记录表达闭世界组合关系，不保存方法 RVA，也不是动态调用时解引用的表。
 
-
-```text
-concrete_type_id: u32
-method_count:     u32
-trait_key:        [u8; 32] StableDefKey
-size:             u64
-align:            u32
-flags:            u32
-copy_glue_rva:    u64
-drop_glue_rva:    u64
-method_rvas:      [u64; method_count]
-```
-
-method 按 trait 声明槽顺序排列。相同 `(concrete_type_id, trait_key)` 只能有一条。`dyn` data pointer 由 stack/object descriptor 追踪，vtable pointer 是 metadata pointer，不加入 GC root。
+实际动态分派表是后端按 `Symbol::Vtable { interface, concrete }` 单独发射的编译期 blob；x64 放入只读数据，A64 ELF 按该 writer 的静态重定位契约使用 file-backed RW data，语言层仍没有可变别名。每个可调用 trait 方法占一个 8 byte 代码地址槽，顺序与 trait 声明槽过滤掉语言内建非 callable 项后的顺序一致；writer 用同一份 `BlobRelocation` 机制在布局后回填方法入口。`self: &Self` 槽指向 compiler-generated vtable shim：shim 收到 dyn 对象引用，读出数据指针后调用单态方法。无 COW/resource 动作且直接 ABI 不超过 16 byte 的按值 `self` 由 shim 从 payload 重新加载接收者车道；COW/resource 或间接 ABI 的按值 receiver 当前在编译期拒绝，不能退化为直接调用具体方法。`dyn Any` 的 `type_of` 走固有实现，不占可调用 vtable 槽。`dyn` data pointer 由 stack/object descriptor 追踪，vtable pointer 是 metadata pointer，不加入 GC root。
 arena allocation owner 同时维护该 arena 的 card mailbox；`CardMarkBatch` 消费只合并 card index/range 并设置 dirty byte，不重新扫描对象，也不改变 `MarkTicket` 的 mark work。card mailbox 为空不是 minor cycle 完成条件，未消费 batch 必须由 owner credit 和 pressure 账本继续保留。
 
 每个 `SourceRecord` 固定 32 字节：

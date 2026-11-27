@@ -62,6 +62,7 @@ fn metadata_blob_symbol_relocations_are_filled_at_link_time() {
         bytes: meta,
     });
     prepared.blob_relocations = vec![BlobRelocation {
+        blob: ".gugu.meta".to_owned(),
         offset: 8,
         symbol: "_start".to_owned(),
     }];
@@ -76,6 +77,7 @@ fn metadata_blob_symbol_relocations_are_filled_at_link_time() {
 
     // 符号缺失必须失败，不能留零值让运行期读到无效地址。
     prepared.blob_relocations = vec![BlobRelocation {
+        blob: ".gugu.meta".to_owned(),
         offset: 8,
         symbol: "missing_symbol".to_owned(),
     }];

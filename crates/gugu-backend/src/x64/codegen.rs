@@ -436,6 +436,8 @@ impl X64Fragments {
 /// 由 writer 在 `defined_layout`/`assign_rvas` 之后回填，action key 因此不含运行地址。
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub struct BlobRelocation {
+    /// 目标只读 blob 名；常量、vtable 与 `.gugu.meta` 共用同一回填机制。
+    pub blob: String,
     /// blob 内字节偏移，必须 8 字节对齐且留足 8 字节。
     pub offset: u64,
     /// 已登记符号名（与代码重定位同一命名空间）。
@@ -981,6 +983,58 @@ impl DataPool {
 /// 常量数据去重域；与 `mangle::data_key` 的输入（下标）不同，两者不会互相碰撞。
 const CONST_DATA_DOMAIN: &str = "gugu-const-data-v1";
 
+fn vtable_blobs(
+    fragments: &[FragmentPayload],
+    universe: &TypeUniverse,
+) -> Result<(Vec<(String, Vec<u8>)>, Vec<BlobRelocation>), Vec<Diagnostic>> {
+    let mut referenced = std::collections::BTreeSet::new();
+    for fragment in fragments {
+        for relocation in &fragment.relocations {
+            if let RelocTarget::Lir(crate::lir::body::Symbol::Vtable {
+                interface,
+                concrete,
+            }) = relocation.target
+            {
+                referenced.insert((interface, concrete));
+            }
+        }
+    }
+    let mut blobs = Vec::new();
+    let mut relocations = Vec::new();
+    for (interface, concrete) in referenced {
+        let vtable = universe
+            .vtables
+            .iter()
+            .find(|vtable| {
+                vtable.interface == interface
+                    && universe
+                        .records
+                        .get(vtable.concrete as usize)
+                        .is_some_and(|record| record.key == concrete)
+            })
+            .ok_or_else(|| vec![invalid("vtable 引用不在冻结类型表")])?;
+        let name = super::mangle::mangle_symbol(&crate::lir::body::Symbol::Vtable {
+            interface,
+            concrete,
+        });
+        let bytes = vtable
+            .methods
+            .len()
+            .checked_mul(8)
+            .ok_or_else(|| vec![invalid("vtable 尺寸溢出")])?;
+        for (slot, method) in vtable.methods.iter().enumerate() {
+            let instance = crate::lir::vtable_shim::key(&interface, &concrete, &method.instance);
+            relocations.push(BlobRelocation {
+                blob: name.clone(),
+                offset: (slot * 8) as u64,
+                symbol: super::mangle::mangle_instance(&instance),
+            });
+        }
+        blobs.push((name, vec![0; bytes.max(1)]));
+    }
+    Ok((blobs, relocations))
+}
+
 #[expect(
     clippy::too_many_arguments,
     reason = "代码生成需要 LIR、类型宇宙、运行时契约与 query 上下文"
@@ -1012,6 +1066,10 @@ pub fn build(
     let metadata = super::metadata::build(lir, &fragments, sources, target, raw)?;
     let type_descriptors = type_descriptor_offsets(&fragments, universe)?;
     let globals = global_blocks(&fragments)?;
+    let (vtables, blob_relocations) = vtable_blobs(&fragments, universe)?;
+    let mut constant_blobs = constants.blobs();
+    constant_blobs.extend(vtables);
+    constant_blobs.sort_by(|left, right| left.0.cmp(&right.0));
     let native_exports = lir
         .exports()
         .iter()
@@ -1028,11 +1086,9 @@ pub fn build(
         entry_symbol,
         metadata,
         glues,
-        constants: constants.blobs(),
+        constants: constant_blobs,
         globals,
-        // 根记录生产者接入后，这里填入 `(记录 location 偏移, 静态块符号)`；当前无受管静态，
-        // 列表为空但仍进入指纹与 writer 路径，避免之后新增第二种回填机制。
-        blob_relocations: Vec::new(),
+        blob_relocations,
         type_descriptors,
         fingerprint: [0; 32],
     };
@@ -1280,6 +1336,7 @@ fn world_fingerprint(world: &X64World) -> [u8; 32] {
         hasher.update(&bytes.to_le_bytes());
     }
     for relocation in &world.blob_relocations {
+        hasher.update(relocation.blob.as_bytes());
         hasher.update(&relocation.offset.to_le_bytes());
         hasher.update(relocation.symbol.as_bytes());
     }

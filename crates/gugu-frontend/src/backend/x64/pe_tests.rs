@@ -37,6 +37,7 @@ fn metadata_blob_symbol_relocations_are_filled_at_link_time() {
     meta.extend_from_slice(&[0u8; 8]);
     prepared.readonly.push((".ggmeta".to_owned(), meta));
     prepared.blob_relocations = vec![BlobRelocation {
+        blob: ".ggmeta".to_owned(),
         offset: 8,
         symbol: "main".to_owned(),
     }];
@@ -53,6 +54,7 @@ fn metadata_blob_symbol_relocations_are_filled_at_link_time() {
     assert_eq!(value, expected, "元数据符号必须回填成符号布局给出的 RVA");
 
     prepared.blob_relocations = vec![BlobRelocation {
+        blob: ".ggmeta".to_owned(),
         offset: 8,
         symbol: "missing_symbol".to_owned(),
     }];

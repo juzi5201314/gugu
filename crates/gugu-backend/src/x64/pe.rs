@@ -469,6 +469,16 @@ fn link_inner(request: &PeRequest) -> Result<(PeImage, BTreeMap<String, u64>), S
         }
     }
     defined.insert("__gugu_fragments_base".to_owned(), fragment_rva);
+    // 独立命名只读节本身也是可重定位 blob 目标；节名就是符号名。
+    for (name, bytes) in &request.readonly {
+        if bytes.is_empty() {
+            continue;
+        }
+        let rva = rva_of(&sections, name)?;
+        if defined.insert(name.clone(), rva).is_some() {
+            return Err(format!("只读 blob {name} 与已有符号重名"));
+        }
+    }
     apply_blob_relocations(request, &mut sections, &defined)?;
     fill_imports(&mut sections, rdata_rva, data_rva, import_at, &imports)?;
     patch_rip(
@@ -753,23 +763,32 @@ fn apply_blob_relocations(
     if request.blob_relocations.is_empty() {
         return Ok(());
     }
-    let metadata = sections
-        .iter_mut()
-        .find(|section| section.name == ".ggmeta")
-        .ok_or_else(|| "元数据重定位缺少 .ggmeta 段".to_owned())?;
     for relocation in &request.blob_relocations {
         if !relocation.offset.is_multiple_of(8) {
-            return Err("元数据重定位偏移未对齐到 8 字节".to_owned());
+            return Err("blob 重定位偏移未对齐到 8 字节".to_owned());
         }
-        let at = usize::try_from(relocation.offset).map_err(|_| "元数据偏移超出宿主")?;
-        let slot = metadata
-            .bytes
-            .get_mut(at..at + 8)
-            .ok_or_else(|| "元数据重定位偏移越过 blob".to_owned())?;
-        let address = *defined
-            .get(&relocation.symbol)
-            .ok_or_else(|| format!("元数据重定位符号 {} 没有地址", relocation.symbol))?;
-        slot.copy_from_slice(&address.to_le_bytes());
+        let base = *defined
+            .get(&relocation.blob)
+            .ok_or_else(|| format!("blob 重定位缺少 {} 地址", relocation.blob))?;
+        let at = base
+            .checked_add(relocation.offset)
+            .ok_or_else(|| "blob 重定位地址溢出".to_owned())?;
+        let mut patched = false;
+        for section in sections.iter_mut() {
+            if at < section.rva || at + 8 > section.rva + section.bytes.len() as u64 {
+                continue;
+            }
+            let offset = usize::try_from(at - section.rva).map_err(|_| "blob 偏移超出宿主")?;
+            let address = *defined
+                .get(&relocation.symbol)
+                .ok_or_else(|| format!("blob 重定位符号 {} 没有地址", relocation.symbol))?;
+            section.bytes[offset..offset + 8].copy_from_slice(&address.to_le_bytes());
+            patched = true;
+            break;
+        }
+        if !patched {
+            return Err(format!("blob 重定位 {} 越过已布局节", relocation.blob));
+        }
     }
     Ok(())
 }
