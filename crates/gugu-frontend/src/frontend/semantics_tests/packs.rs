@@ -31,7 +31,7 @@ fn rejects_control(control: &str) {
     let source = format!(
         "fn visit[Ts: Print...](...args: Ts) {{ for a in args {{ {control} }} }}\nfn main() {{ visit(1, true) }}"
     );
-    let output = Compiler::shared().compile(CompileRequest::single_file(
+    let output = Compiler::shared().compile_to_lir(CompileRequest::single_file(
         "main.gg",
         &source,
         TargetName::X86_64Linux,

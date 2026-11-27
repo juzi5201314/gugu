@@ -1,7 +1,7 @@
 use gugu_compiler::{CompileRequest, Compiler, EMBEDDED_ARTIFACTS, Severity, TargetName};
 
 fn compile(request: CompileRequest) -> gugu_compiler::Compilation {
-    Compiler::with_artifacts(&EMBEDDED_ARTIFACTS).compile(request)
+    Compiler::with_artifacts(&EMBEDDED_ARTIFACTS).compile_to_lir(request)
 }
 
 fn single_file(source: &str) -> gugu_compiler::Compilation {

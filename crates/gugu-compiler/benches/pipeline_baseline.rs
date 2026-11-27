@@ -45,6 +45,10 @@ fn measure(label: &str, request: CompileRequest) -> f64 {
     let mut elapsed_ms = 0.0;
     for _ in 0..REPEATS {
         let start = Instant::now();
+        #[expect(
+            clippy::disallowed_methods,
+            reason = "pipeline bench 测量用户源码完整编译路径"
+        )]
         let compilation = Compiler::with_artifacts(&EMBEDDED_ARTIFACTS).compile(request.clone());
         elapsed_ms = start.elapsed().as_secs_f64() * 1000.0;
         let fingerprint = compilation

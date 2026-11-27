@@ -98,26 +98,13 @@ fn verify_pe_exports(bytes: &[u8]) {
 
 #[test]
 fn source_calls_to_c_exports_use_the_native_entry() {
-    use gugu_compiler::{NativeImport, NativeLink};
     for target in [TargetName::X86_64Linux, TargetName::X86_64Windows] {
-        let imports = if target == TargetName::X86_64Linux {
-            NativeLink::THREAD_SYMBOLS
-                .into_iter()
-                .map(|name| NativeImport::function("libc.so.6", name))
-                .collect()
-        } else {
-            Vec::new()
-        };
-        let output = Compiler::with_artifacts(&EMBEDDED_ARTIFACTS).compile(
+        let output = Compiler::with_artifacts(&EMBEDDED_ARTIFACTS).compile_to_lir(
             CompileRequest::single_file(
                 "main.gg",
                 include_str!("fixtures/callback_local.gg"),
                 target,
-            )
-            .with_native_link(NativeLink {
-                imports,
-                interpreter: (target == TargetName::X86_64Linux).then(|| "/target/ld.so".into()),
-            }),
+            ),
         );
         assert!(output.is_success(), "{:?}", output.diagnostics().items());
         let dump = output.dump_lir().unwrap();
@@ -131,7 +118,7 @@ fn source_calls_to_c_exports_use_the_native_entry() {
 #[test]
 fn c_exports_materialize_managed_callback_adapters() {
     for target in [TargetName::X86_64Linux, TargetName::X86_64Windows] {
-        let output = Compiler::with_artifacts(&EMBEDDED_ARTIFACTS).compile(
+        let output = Compiler::with_artifacts(&EMBEDDED_ARTIFACTS).compile_full_for_test(
             CompileRequest::single_file("main.gg", include_str!("fixtures/callback.gg"), target),
         );
         assert!(

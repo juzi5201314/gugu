@@ -24,7 +24,7 @@ fn compile(source: &str, target: TargetName, symbols: &[&str]) -> (Compilation, 
                 .map(|name| NativeImport::function("libc.so.6", name)),
         );
     }
-    let output = Compiler::with_artifacts(&EMBEDDED_ARTIFACTS).compile(
+    let output = Compiler::with_artifacts(&EMBEDDED_ARTIFACTS).compile_full_for_test(
         CompileRequest::single_file("main.gg", source, target).with_native_link(NativeLink {
             imports,
             interpreter: (target == TargetName::X86_64Linux).then(|| "/toolchain/ld.so".into()),

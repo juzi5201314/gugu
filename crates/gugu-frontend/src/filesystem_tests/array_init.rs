@@ -1,14 +1,8 @@
 use super::{
-    Compilation, CompileRequest, Compiler, TargetName,
+    CompileRequest, Compiler, TargetName,
     harness::{Harness, put, word},
     root_trace,
 };
-
-fn compile(source: &str, target: TargetName) -> Compilation {
-    let output = Compiler::shared().compile(CompileRequest::single_file("main.gg", source, target));
-    assert!(output.is_success(), "{:?}", output.diagnostics().items());
-    output
-}
 
 const REPEAT: &str = r#"
 fn repeat[T, comptime n: int](x: T) [T; n] {
@@ -29,7 +23,12 @@ fn main() { _ = run() }
 
 #[test]
 fn concrete_generic_and_empty_arrays_execute() {
-    let output = compile(REPEAT, TargetName::X86_64Linux);
+    let output = Compiler::shared().compile_to_lir(CompileRequest::single_file(
+        "main.gg",
+        REPEAT,
+        TargetName::X86_64Linux,
+    ));
+    assert!(output.is_success(), "{:?}", output.diagnostics().items());
     let mut harness = Harness::new(&output);
     assert_eq!(
         harness.invoke("main.gg", "run", &[], &mut vec![0; 65536]),
@@ -225,7 +224,9 @@ fn init_loop_root_events_reach_generated_images() {
         TargetName::X86_64Windows,
         TargetName::X86_64Macos,
     ] {
-        let output = compile(MANAGED, target);
+        let output = Compiler::shared()
+            .compile_full_for_test(CompileRequest::single_file("main.gg", MANAGED, target));
+        assert!(output.is_success(), "{:?}", output.diagnostics().items());
         assert!(!output.image_plan().unwrap().gc_type_section().is_empty());
         assert!(
             output

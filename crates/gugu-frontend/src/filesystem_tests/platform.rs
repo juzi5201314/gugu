@@ -157,7 +157,7 @@ impl<'a> Adapter<'a> {
 }
 
 fn compile(target: TargetName) -> Compilation {
-    let output = Compiler::shared().compile(CompileRequest::single_file(
+    let output = Compiler::shared().compile_to_lir(CompileRequest::single_file(
         "main.gg",
         include_str!("../../../gugu-compiler/tests/fixtures/fs_api.gg"),
         target,

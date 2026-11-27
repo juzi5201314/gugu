@@ -448,7 +448,7 @@ impl Compilation {
         self.lir.is_some() && !self.diagnostics.has_errors()
     }
 
-    /// 返回完整编译 action 的内容寻址 key；前端或 LIR 失败时为 `None`。
+    /// 返回完整编译 action 的内容寻址 key。
     pub fn action_key(&self) -> Option<project::ActionKey> {
         self.action_key
     }
@@ -653,6 +653,26 @@ impl Compiler {
 
     /// 执行一次确定性的 bootstrap action graph。
     pub fn compile(&self, request: CompileRequest) -> Compilation {
+        self.compile_inner(request, false)
+    }
+
+    /// 完成 runtime 契约、机器码与镜像编译，供后端回归测试使用。
+    #[cfg(any(test, feature = "test-support"))]
+    #[expect(
+        clippy::disallowed_methods,
+        reason = "显式完整编译回归必须覆盖后端契约"
+    )]
+    pub fn compile_full_for_test(&self, request: CompileRequest) -> Compilation {
+        self.compile(request)
+    }
+
+    /// 沿生产流水线编译至已验证 LIR，供回归测试读取 IR、诊断或解释执行。
+    #[cfg(any(test, feature = "test-support"))]
+    pub fn compile_to_lir(&self, request: CompileRequest) -> Compilation {
+        self.compile_inner(request, true)
+    }
+
+    fn compile_inner(&self, request: CompileRequest, stop_after_lir: bool) -> Compilation {
         let CompileRequest {
             target,
             input,
@@ -816,6 +836,34 @@ impl Compiler {
                 };
             }
         };
+        if stop_after_lir {
+            graph.complete(
+                ActionKind::BuildIr,
+                format!(
+                    "{} 个 LIR body / {} 条指令 / {} 个 Mem effect，已通过 verifier",
+                    lir.body_count(),
+                    lir.instructions(),
+                    lir.memory_operations()
+                ),
+            );
+            graph.skip_after(ActionKind::BuildIr, "测试请求只编译到已验证 LIR");
+            diagnostics.sort();
+            return Compilation {
+                graph,
+                diagnostics,
+                source_map,
+                image_plan: None,
+                hir: Some(frontend.hir),
+                gir: Some(frontend.gir),
+                gir_stats: frontend.gir_stats,
+                lir: Some(lir),
+                raw_contract: None,
+                x64: None,
+                a64: None,
+                action_key: None,
+                docs: Some(frontend.docs),
+            };
+        }
         // runtime glue 绑定：被 LIR 引用的 glue 在此解析为镜像内定义；失败在写出前闭环。
         let glues =
             match backend::x64::glue::RuntimeGlueBindings::resolve(&resources, &frontend.hir, &lir)
@@ -3507,7 +3555,7 @@ mod tests {
         }];
         // 逃逸闭包的环境必须落受管堆：这是仓库里已知会产生分配的最小形态。
         let source = "fn make() fn() int {\n let value = 1\n return fn() int { return value }\n}\nfn main() {\n let closure = make()\n _ = closure()\n}";
-        let compilation = Compiler::new().compile(
+        let compilation = Compiler::new().compile_to_lir(
             CompileRequest::single_file("main.gg", source, TargetName::X86_64Linux)
                 .with_compression_policy(CompressionPolicyV1::cage(
                     4 * runtime::gc_metadata_contract::GC_ARENA_BYTES,
@@ -3532,8 +3580,8 @@ mod tests {
 
     #[test]
     fn empty_package_has_complete_graph_without_image() {
-        let compilation =
-            Compiler::new().compile(CompileRequest::empty_package(TargetName::X86_64Linux));
+        let compilation = Compiler::new()
+            .compile_full_for_test(CompileRequest::empty_package(TargetName::X86_64Linux));
 
         assert!(
             compilation.is_success(),
@@ -3557,7 +3605,7 @@ mod tests {
     #[test]
     #[cfg(feature = "slow-tests")]
     fn simple_main_reaches_runtime_and_image_plan() {
-        let compilation = Compiler::new().compile(CompileRequest::single_file(
+        let compilation = Compiler::new().compile_full_for_test(CompileRequest::single_file(
             "main.gg",
             "fn main() {}",
             TargetName::X86_64Linux,
@@ -3596,7 +3644,7 @@ mod tests {
 
     #[test]
     fn malformed_source_never_reaches_image_plan() {
-        let compilation = Compiler::new().compile(CompileRequest::single_file(
+        let compilation = Compiler::new().compile_full_for_test(CompileRequest::single_file(
             "broken.gg",
             "fn main( {}",
             TargetName::X86_64Linux,
@@ -3641,7 +3689,7 @@ mod tests {
         let entry = root.path().join("src/lib.gg");
         std::fs::create_dir_all(entry.parent().expect("parent exists")).expect("create src");
         std::fs::write(&entry, "fn util() int { 1 }\n").expect("write lib");
-        let compilation = Compiler::new().compile(CompileRequest::library_file(
+        let compilation = Compiler::new().compile_full_for_test(CompileRequest::library_file(
             &entry,
             TargetName::X86_64Linux,
         ));
@@ -3722,7 +3770,7 @@ mod tests {
             build_request.target,
             TargetName::host().unwrap_or(TargetName::X86_64Windows)
         );
-        let compilation = Compiler::new().compile(CompileRequest::project_target(
+        let compilation = Compiler::new().compile_full_for_test(CompileRequest::project_target(
             package,
             target,
             "demo@1.0.0 (path+.)",
@@ -3761,7 +3809,7 @@ mod tests {
         .expect("write entry");
         std::fs::write(src.join("data.bin"), b"abc").expect("write asset");
 
-        let compilation = Compiler::new().compile(CompileRequest::single_file_path(
+        let compilation = Compiler::new().compile_to_lir(CompileRequest::single_file_path(
             src.join("main.gg"),
             TargetName::X86_64Linux,
         ));
@@ -3787,7 +3835,7 @@ mod tests {
         )
         .expect("write entry");
 
-        let compilation = Compiler::new().compile(CompileRequest::single_file_path(
+        let compilation = Compiler::new().compile_full_for_test(CompileRequest::single_file_path(
             src.join("main.gg"),
             TargetName::X86_64Linux,
         ));
@@ -3836,7 +3884,7 @@ mod tests {
             .find(|target| target.kind() == TargetKind::Bin)
             .expect("bin target");
 
-        let compilation = Compiler::new().compile(CompileRequest::project_target(
+        let compilation = Compiler::new().compile_to_lir(CompileRequest::project_target(
             package,
             target,
             "demo@1.0.0 (path+.)",
@@ -3858,7 +3906,7 @@ mod tests {
         let entry = root.path().join("src/main.gg");
         std::fs::create_dir_all(entry.parent().expect("parent exists")).expect("create src");
         std::fs::write(&entry, b"\xef\xbb\xbffn main() {}").expect("write bom source");
-        let compilation = Compiler::new().compile(CompileRequest::single_file_path(
+        let compilation = Compiler::new().compile_full_for_test(CompileRequest::single_file_path(
             &entry,
             TargetName::X86_64Linux,
         ));
@@ -3889,8 +3937,8 @@ mod tests {
                 TargetName::X86_64Linux,
             )
         };
-        let cold = compiler.compile(request());
-        let warm = compiler.compile(request());
+        let cold = compiler.compile_full_for_test(request());
+        let warm = compiler.compile_full_for_test(request());
         assert!(cold.is_success(), "{:?}", cold.diagnostics().items());
         let plan = cold.image_plan().expect("可执行入口必须有镜像计划");
         assert!(plan.raw_size_class_count() > 0);
@@ -3952,7 +4000,7 @@ mod tests {
     #[cfg(feature = "slow-tests")]
     fn image_plan_reports_resource_lease_sites() {
         let source = "struct ResourceCell { id: uint }\nfn main() {\n let a = ResourceCell { id: 1 }\n let b = a\n b = ResourceCell { id: 2 }\n _ = b\n}";
-        let compilation = Compiler::new().compile(CompileRequest::single_file(
+        let compilation = Compiler::new().compile_full_for_test(CompileRequest::single_file(
             "main.gg",
             source,
             TargetName::X86_64Linux,
@@ -3986,12 +4034,12 @@ mod tests {
     #[cfg(feature = "slow-tests")]
     fn configured_target_changes_raw_contract_fingerprint() {
         let source = "fn main() { let value = 1\n _ = value }";
-        let linux = Compiler::new().compile(CompileRequest::single_file(
+        let linux = Compiler::new().compile_full_for_test(CompileRequest::single_file(
             "main.gg",
             source,
             TargetName::X86_64Linux,
         ));
-        let windows = Compiler::new().compile(CompileRequest::single_file(
+        let windows = Compiler::new().compile_full_for_test(CompileRequest::single_file(
             "main.gg",
             source,
             TargetName::X86_64Windows,
@@ -4009,7 +4057,7 @@ mod tests {
     #[cfg(feature = "slow-tests")]
     fn image_plan_reports_rt0_startup_contract() {
         let source = "fn main() { let value = 1\n _ = value }";
-        let compilation = Compiler::new().compile(CompileRequest::single_file(
+        let compilation = Compiler::new().compile_full_for_test(CompileRequest::single_file(
             "main.gg",
             source,
             TargetName::X86_64Linux,
@@ -4042,7 +4090,7 @@ mod tests {
     fn main_result_type_enters_rt0_demand_and_contract() {
         let unit = "fn main() { let value = 1\n _ = value }";
         let result = "fn main() Result[(), string] {\n Err(\"e\")\n}";
-        let unit_compilation = Compiler::new().compile(CompileRequest::single_file(
+        let unit_compilation = Compiler::new().compile_full_for_test(CompileRequest::single_file(
             "main.gg",
             unit,
             TargetName::X86_64Linux,
@@ -4050,11 +4098,9 @@ mod tests {
         let unit_plan = unit_compilation.image_plan().expect("unit main 的镜像计划");
         assert!(unit_plan.rt0_entry_present());
         assert!(!unit_plan.rt0_main_returns_result());
-        let result_compilation = Compiler::new().compile(CompileRequest::single_file(
-            "main.gg",
-            result,
-            TargetName::X86_64Linux,
-        ));
+        let result_compilation = Compiler::new().compile_full_for_test(
+            CompileRequest::single_file("main.gg", result, TargetName::X86_64Linux),
+        );
         assert!(
             result_compilation.is_success(),
             "{:?}",
@@ -4075,12 +4121,12 @@ mod tests {
     #[cfg(feature = "slow-tests")]
     fn rt0_contract_fingerprint_is_deterministic_across_compilations() {
         let source = "fn main() { let value = 1\n _ = value }";
-        let first = Compiler::new().compile(CompileRequest::single_file(
+        let first = Compiler::new().compile_full_for_test(CompileRequest::single_file(
             "main.gg",
             source,
             TargetName::X86_64Linux,
         ));
-        let second = Compiler::new().compile(CompileRequest::single_file(
+        let second = Compiler::new().compile_full_for_test(CompileRequest::single_file(
             "main.gg",
             source,
             TargetName::X86_64Linux,
@@ -4098,7 +4144,7 @@ mod tests {
     #[cfg(feature = "slow-tests")]
     fn image_plan_reports_gc_metadata_contract() {
         let source = "struct ResourceCell { id: uint }\nfn main() {\n let value = ResourceCell { id: 1 }\n _ = value\n }";
-        let compilation = Compiler::shared().compile(CompileRequest::single_file(
+        let compilation = Compiler::shared().compile_full_for_test(CompileRequest::single_file(
             "main.gg",
             source,
             TargetName::X86_64Linux,
@@ -4143,7 +4189,7 @@ mod tests {
     /// 编译一份 GC metadata 用例源码：第一次整体编译约 1.2 秒，逐个场景分开成测。
     #[cfg(feature = "slow-tests")]
     fn gc_metadata_compilation(source: &str) -> crate::Compilation {
-        Compiler::shared().compile(CompileRequest::single_file(
+        Compiler::shared().compile_full_for_test(CompileRequest::single_file(
             "main.gg",
             source,
             TargetName::X86_64Linux,
@@ -4202,7 +4248,7 @@ mod tests {
     fn image_plan_reports_turn_region_contract() {
         let reset_source = "fn main() {\n let value = 1\n let closure = fn() int { return value }\n _ = closure()\n }";
         let transfer_source = "fn main() {\n let channel = chan[fn() int](1)\n let value = 1\n let closure = fn() int { return value }\n channel.send(closure)\n }";
-        let reset = Compiler::new().compile(CompileRequest::single_file(
+        let reset = Compiler::new().compile_full_for_test(CompileRequest::single_file(
             "main.gg",
             reset_source,
             TargetName::X86_64Linux,
@@ -4246,7 +4292,7 @@ mod tests {
         assert!(dump.contains("region-fingerprint"));
 
         // sender 之后不再使用闭包时整区移交：transfer 需求来自优化后的 LIR。
-        let transfer = Compiler::new().compile(CompileRequest::single_file(
+        let transfer = Compiler::new().compile_full_for_test(CompileRequest::single_file(
             "main.gg",
             transfer_source,
             TargetName::X86_64Linux,
@@ -4275,7 +4321,7 @@ mod tests {
     #[cfg(feature = "slow-tests")]
     fn image_plan_reports_barrier_contract_for_managed_writes() {
         let source = "fn main() {\n let value = 1\n let closure = fn() int { return value }\n _ = closure()\n }";
-        let compilation = Compiler::new().compile(CompileRequest::single_file(
+        let compilation = Compiler::new().compile_full_for_test(CompileRequest::single_file(
             "main.gg",
             source,
             TargetName::X86_64Linux,
@@ -4322,7 +4368,7 @@ mod tests {
         let source = "#[repr(C, align(64))] struct Large { head: uint, tail: [uint; 4096] }\n\
                       #[used] fn field(value: &Large) &uint = &value.head\n\
                       fn main() {}\n";
-        let compilation = Compiler::new().compile(CompileRequest::single_file(
+        let compilation = Compiler::new().compile_full_for_test(CompileRequest::single_file(
             "main.gg",
             source,
             TargetName::X86_64Linux,

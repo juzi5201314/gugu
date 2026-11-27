@@ -18,7 +18,7 @@ fn verify(target: TargetName) {
                 .map(|name| NativeImport::function("libc.so.6", name)),
         );
     }
-    let output = Compiler::with_artifacts(&EMBEDDED_ARTIFACTS).compile(
+    let output = Compiler::with_artifacts(&EMBEDDED_ARTIFACTS).compile_full_for_test(
         CompileRequest::single_file("main.gg", include_str!("fixtures/foreign_roots.gg"), target)
             .with_native_link(NativeLink {
                 imports,

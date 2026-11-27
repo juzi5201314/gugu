@@ -16,7 +16,7 @@ fn verify(target: TargetName) {
     };
     let request =
         CompileRequest::single_file("main.gg", include_str!("fixtures/native_link.gg"), target);
-    let output = compiler.compile(request.clone().with_native_link(config.clone()));
+    let output = compiler.compile_full_for_test(request.clone().with_native_link(config.clone()));
     assert!(output.is_success(), "{:?}", output.diagnostics().items());
     let plan = output.image_plan().unwrap();
     let bytes = if target == TargetName::X86_64Linux {
@@ -39,7 +39,7 @@ fn verify(target: TargetName) {
         "other.dll"
     }
     .into();
-    let second = compiler.compile(request.with_native_link(changed));
+    let second = compiler.compile_full_for_test(request.with_native_link(changed));
     assert!(second.is_success(), "{:?}", second.diagnostics().items());
     assert_ne!(
         output.action_key(),
@@ -70,7 +70,7 @@ fn ordinary(target: TargetName) {
             .map(|symbol| NativeImport::function("libc.so.6", symbol)),
         );
     }
-    let output = Compiler::with_artifacts(&EMBEDDED_ARTIFACTS).compile(
+    let output = Compiler::with_artifacts(&EMBEDDED_ARTIFACTS).compile_full_for_test(
         CompileRequest::single_file(
             "main.gg",
             include_str!("fixtures/foreign_bridge.gg"),
@@ -107,7 +107,7 @@ fn missing_target(target: TargetName) {
     } else {
         Vec::new()
     };
-    let output = Compiler::with_artifacts(&EMBEDDED_ARTIFACTS).compile(
+    let output = Compiler::with_artifacts(&EMBEDDED_ARTIFACTS).compile_full_for_test(
         CompileRequest::single_file(
             "main.gg",
             include_str!("fixtures/foreign_bridge.gg"),
@@ -134,12 +134,13 @@ fn missing_target(target: TargetName) {
 
 #[test]
 fn ordinary_foreign_bridge_requires_explicit_linux_thread_runtime() {
-    let output =
-        Compiler::with_artifacts(&EMBEDDED_ARTIFACTS).compile(CompileRequest::single_file(
+    let output = Compiler::with_artifacts(&EMBEDDED_ARTIFACTS).compile_full_for_test(
+        CompileRequest::single_file(
             "main.gg",
             include_str!("fixtures/foreign_bridge.gg"),
             TargetName::X86_64Linux,
-        ));
+        ),
+    );
     assert!(!output.is_success());
     assert!(output.image_plan().is_none());
     assert!(
@@ -153,20 +154,12 @@ fn ordinary_foreign_bridge_requires_explicit_linux_thread_runtime() {
 
 #[test]
 fn dirty_foreign_bridge_reaches_windows_dispatcher() {
-    let output = Compiler::with_artifacts(&EMBEDDED_ARTIFACTS).compile(
-        CompileRequest::single_file(
+    let output =
+        Compiler::with_artifacts(&EMBEDDED_ARTIFACTS).compile_to_lir(CompileRequest::single_file(
             "main.gg",
             include_str!("fixtures/dirty_bridge.gg"),
             TargetName::X86_64Windows,
-        )
-        .with_native_link(NativeLink {
-            imports: vec![
-                NativeImport::function("probe.dll", "native_probe"),
-                NativeImport::function("probe.dll", "dirty_probe"),
-            ],
-            interpreter: None,
-        }),
-    );
+        ));
     assert!(output.is_success(), "{:?}", output.diagnostics().items());
     let lir = output.dump_lir().unwrap();
     assert!(lir.contains("fn foreign_dirty_dispatch "));

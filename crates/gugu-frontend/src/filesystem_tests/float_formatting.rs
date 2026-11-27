@@ -20,7 +20,7 @@ fn compiled(name: &str) -> &'static Compilation {
         main.push_str("_ = dynamic(0, 0, 0)\n");
         source.push_str(&main);
         source.push_str("}\n");
-        let output = Compiler::shared().compile(CompileRequest::single_file(
+        let output = Compiler::shared().compile_to_lir(CompileRequest::single_file(
             "main.gg",
             &source,
             TargetName::X86_64Linux,

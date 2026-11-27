@@ -143,7 +143,8 @@ fn edge_staging_counts_batches_and_major_consumes_overflow() {
 
 #[test]
 fn major_collection_preserves_reachable_resource_then_releases_cycle_once() {
-    let output = compile();
+    let output = Compiler::shared().compile_full_for_test(fs_api_request());
+    assert!(output.is_success(), "{:?}", output.diagnostics().items());
     stack::verify_compiled_spills(&output);
     let mut harness = ResourceHarness::new(&output);
     harness.gc_config = CONFIG;

@@ -54,7 +54,7 @@ fn region_field_barrier_and_minor_preserve_young_reference() {
 
 #[test]
 fn retired_region_keeps_fields_and_pin_until_last_root_then_releases_once() {
-    let output = Compiler::shared().compile(CompileRequest::single_file(
+    let output = Compiler::shared().compile_to_lir(CompileRequest::single_file(
         "main.gg",
         include_str!("../../../../../gugu-compiler/tests/fixtures/pin.gg"),
         TargetName::X86_64Linux,

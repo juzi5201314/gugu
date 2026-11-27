@@ -3,7 +3,7 @@
 //! 文档围栏是唯一真实的示例集合：本测试逐块提取并在进程内编译，失败的块带
 //! 文件名、序号与行号报错。约定（标注写在围栏前一行，mdBook 不渲染）：
 //!
-//! - 无标注：完整编译；无 `fn main` 的声明片段补空入口；`gugu-test` 在普通域
+//! - 无标注：编译至已验证 LIR。无 `fn main` 的声明片段补空入口。`gugu-test` 在普通域
 //!   编译同一源码（`#[test]` 项在 bin 域是普通函数），域语义由 spec/testing.md 负责。
 //! - `<!-- docs-example: parse -->`：只要求语法合法，用于语言/标准库自身声明的
 //!   展示（预导入 trait、lang item）与刻意省略上下文的骨架。
@@ -69,7 +69,11 @@ fn check(relative: &str, range: RangeInclusive<usize>) {
                 );
             }
             Mode::Compile => match block.file.as_deref() {
-                Some("main.gg") => run(&at, block, &compile_package(&all, block)),
+                Some("main.gg") => run(
+                    &at,
+                    block,
+                    &compile_package(&all, block, Compiler::compile_to_lir),
+                ),
                 Some(_) => {}
                 None => run(&at, block, &compile_single(block)),
             },
@@ -82,15 +86,28 @@ fn compile_single(block: &Block) -> Compilation {
     if !source.contains("fn main") {
         source.push_str("\nfn main() {}\n");
     }
-    Compiler::shared().compile(CompileRequest::single_file(
+    Compiler::shared().compile_to_lir(CompileRequest::single_file(
         "main.gg",
         source,
         TargetName::X86_64Linux,
     ))
 }
 
+pub(super) fn compile_overview_image() -> Compilation {
+    let all = read("spec/overview.md");
+    let main = all
+        .iter()
+        .find(|block| block.file.as_deref() == Some("main.gg"))
+        .expect("概述示例必须包含 main.gg");
+    compile_package(&all, main, Compiler::compile_full_for_test)
+}
+
 /// 与 `main.gg` 相邻的带标签块组成一个包，在临时目录中按项目 bin target 编译。
-fn compile_package(all: &[Block], main: &Block) -> Compilation {
+fn compile_package(
+    all: &[Block],
+    main: &Block,
+    compile: fn(&Compiler, CompileRequest) -> Compilation,
+) -> Compilation {
     let index = main.ordinal - 1;
     let start = (0..index)
         .rev()
@@ -120,14 +137,17 @@ fn compile_package(all: &[Block], main: &Block) -> Compilation {
         .iter()
         .find(|target| target.kind() == TargetKind::Bin)
         .expect("bin target");
-    Compiler::shared().compile(CompileRequest::project_target(
-        package,
-        target,
-        "docs@0.0.0 (path+.)",
-        TargetName::X86_64Linux,
-        vec!["default".to_owned()],
-        BTreeSet::new(),
-    ))
+    compile(
+        &Compiler::shared(),
+        CompileRequest::project_target(
+            package,
+            target,
+            "docs@0.0.0 (path+.)",
+            TargetName::X86_64Linux,
+            vec!["default".to_owned()],
+            BTreeSet::new(),
+        ),
+    )
 }
 
 fn run(at: &str, block: &Block, output: &Compilation) {
@@ -157,7 +177,7 @@ fn run(at: &str, block: &Block, output: &Compilation) {
         .flat_map(|(_, bytes)| bytes.iter().map(|byte| *byte as u8))
         .collect();
     assert_eq!(
-        String::from_utf8_lossy(&stdout),
+        std::str::from_utf8(&stdout).unwrap_or_else(|error| panic!("{at} 输出无效: {error}")),
         expected.as_str(),
         "{at} 的输出与文档不符"
     );

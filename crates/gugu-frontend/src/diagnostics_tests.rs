@@ -1061,7 +1061,7 @@ const CASES: &[Case] = &[
         DiagnosticCode::BackendInvariant,
         "机器片段与 encoder 契约 verifier 只在编译器自身不一致时失败；直接构造断言保留在 backend/x64/tests.rs",
     ),
-    // E0061 warn：丢掉 Option/Result 默认告警，不阻止镜像。
+    // E0061 warn：丢掉 Option/Result 默认告警，仍可生成已验证 LIR。
     warning_row(
         DiagnosticCode::UnusedMustUse,
         Input::Source {
@@ -1167,7 +1167,7 @@ impl Runner {
                     std::fs::write(&path, bytes).expect("写入 fixture");
                 }
                 self.compiler
-                    .compile(CompileRequest::single_file_path(&path, TARGET))
+                    .compile_to_lir(CompileRequest::single_file_path(&path, TARGET))
                     .diagnostics()
                     .items()
                     .to_vec()
@@ -1198,7 +1198,7 @@ impl Runner {
                     vec![target],
                 );
                 self.compiler
-                    .compile(CompileRequest::project_target(
+                    .compile_to_lir(CompileRequest::project_target(
                         &package,
                         package.targets().first().expect("bin target"),
                         "demo@1.0.0 (path+.)",
@@ -1236,7 +1236,7 @@ impl Runner {
     /// 以内存单文件请求编译并取回诊断。
     fn compile_memory(&self, path: &str, text: &str) -> Vec<Diagnostic> {
         self.compiler
-            .compile(CompileRequest::single_file(path, text, TARGET))
+            .compile_to_lir(CompileRequest::single_file(path, text, TARGET))
             .diagnostics()
             .items()
             .to_vec()

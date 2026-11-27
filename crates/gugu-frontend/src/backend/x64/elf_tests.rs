@@ -586,7 +586,7 @@ fn archive_member_resolves_an_unresolved_c_symbol() {
 #[ignore = "slow full compilation"]
 fn panic_message_constant_reaches_the_image() {
     let source = "fn main() { panic(\"boom\") }";
-    let compilation = Compiler::shared().compile(CompileRequest::single_file(
+    let compilation = Compiler::shared().compile_full_for_test(CompileRequest::single_file(
         "main.gg",
         source,
         TargetName::X86_64Linux,
@@ -608,7 +608,7 @@ fn panic_message_constant_reaches_the_image() {
 #[ignore = "slow full compilation"]
 fn compiled_main_is_static_pie_without_interpreter() {
     let source = "fn main() {}";
-    let compilation = Compiler::shared().compile(CompileRequest::single_file(
+    let compilation = Compiler::shared().compile_full_for_test(CompileRequest::single_file(
         "main.gg",
         source,
         TargetName::X86_64Linux,
@@ -631,7 +631,7 @@ fn compiled_main_is_static_pie_without_interpreter() {
     assert!(bytes.windows(8).any(|window| window == b"GUGUSRC1"));
     let entry = plan.linux_entry_vaddr() as usize;
     assert_eq!(&bytes[entry..entry + 3], &[0x48, 0x8d, 0x1d]);
-    let again = Compiler::new().compile(CompileRequest::single_file(
+    let again = Compiler::new().compile_full_for_test(CompileRequest::single_file(
         "main.gg",
         source,
         TargetName::X86_64Linux,

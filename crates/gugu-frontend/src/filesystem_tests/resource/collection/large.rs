@@ -33,7 +33,7 @@ fn large_field_barrier_uses_registered_range_without_arena_probe() {
 
 #[test]
 fn large_mapping_is_traced_then_released_once() {
-    let output = Compiler::shared().compile(CompileRequest::single_file(
+    let output = Compiler::shared().compile_to_lir(CompileRequest::single_file(
         "main.gg",
         include_str!("../../../../../gugu-compiler/tests/fixtures/pin.gg"),
         TargetName::X86_64Linux,

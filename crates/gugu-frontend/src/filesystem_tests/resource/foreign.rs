@@ -69,25 +69,11 @@ fn native_work(harness: &mut ResourceHarness<'_>, memory: &mut Vec<u8>) {
 
 #[test]
 fn dirty_admission_is_independent_of_blocking_credit_and_observes_completion() {
-    let mut imports: Vec<_> = crate::NativeLink::THREAD_SYMBOLS
-        .into_iter()
-        .map(|name| crate::NativeImport::function("libc.so.6", name))
-        .collect();
-    imports.extend(
-        ["native_probe", "dirty_probe"]
-            .map(|name| crate::NativeImport::function("libprobe.so", name)),
-    );
-    let output = Compiler::shared().compile(
-        CompileRequest::single_file(
-            "main.gg",
-            include_str!("../../../../gugu-compiler/tests/fixtures/dirty_bridge.gg"),
-            TargetName::X86_64Linux,
-        )
-        .with_native_link(crate::NativeLink {
-            imports,
-            interpreter: Some("/target/ld.so".into()),
-        }),
-    );
+    let output = Compiler::shared().compile_to_lir(CompileRequest::single_file(
+        "main.gg",
+        include_str!("../../../../gugu-compiler/tests/fixtures/dirty_bridge.gg"),
+        TargetName::X86_64Linux,
+    ));
     assert!(output.is_success(), "{:?}", output.diagnostics().items());
     let mut harness = ResourceHarness::new(&output);
     harness.block_budget = 2048;
@@ -152,22 +138,11 @@ fn dirty_work(harness: &mut ResourceHarness<'_>, memory: &mut Vec<u8>) {
 
 #[test]
 fn ordinary_c_and_files_share_admission_and_release_packet_after_completion() {
-    let mut imports: Vec<_> = crate::NativeLink::THREAD_SYMBOLS
-        .into_iter()
-        .map(|name| crate::NativeImport::function("libc.so.6", name))
-        .collect();
-    imports.push(crate::NativeImport::function("libprobe.so", "native_probe"));
-    let output = Compiler::shared().compile(
-        CompileRequest::single_file(
-            "main.gg",
-            include_str!("../../../../gugu-compiler/tests/fixtures/foreign_bridge.gg"),
-            TargetName::X86_64Linux,
-        )
-        .with_native_link(crate::NativeLink {
-            imports,
-            interpreter: Some("/target/ld.so".into()),
-        }),
-    );
+    let output = Compiler::shared().compile_to_lir(CompileRequest::single_file(
+        "main.gg",
+        include_str!("../../../../gugu-compiler/tests/fixtures/foreign_bridge.gg"),
+        TargetName::X86_64Linux,
+    ));
     assert!(output.is_success(), "{:?}", output.diagnostics().items());
     let mut harness = ResourceHarness::new(&output);
     harness.reserve_result = RAW;

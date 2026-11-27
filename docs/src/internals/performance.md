@@ -10,10 +10,19 @@
 
 ## 默认正确性套件
 
-编译器自身的默认正确性套件在进程内验证语言契约。资源协议用例直接解释构建期
-artifact 中的生产 LIR，并为每个场景创建独立内存与平台钩子；用户源码到镜像、
-栈图与目标 ABI 的集成检查仍单独执行完整编译。教程围栏逐块验证，较重章节按
-围栏拆分，不能通过跳过示例或删减协议断言缩短默认套件。
+语言、标准库和协议用例按所检查的产物选择编译阶段。只观察诊断、GIR 或 LIR 的用例，
+以及解释执行用户程序的用例，走 `Compiler::compile_to_lir`。该入口和完整编译共享目标
+选择、内建制品、前端及 GIR/LIR 校验。资源协议用例也可直接解释构建期 artifact 中的
+生产 LIR，并为每个场景创建独立内存与平台钩子。文档围栏按原登记逐块执行，普通围栏
+编译到已验证 LIR，带预期输出的围栏继续逐字节比较解释器的输出。
+
+检查 runtime 契约、物理栈图、机器码、目标 ABI、重定位或镜像的用例使用对应的后端产物。
+概述示例检查多文件项目完整编译产出的 ELF，A64 镜像用例验证目标装配。CI 的格式化与集合用例还执行
+实际生成的镜像，覆盖从 Gugu 源码到宿主运行的路径。
+
+根 `clippy.toml` 登记了生产 `Compiler::compile`。CI 对 workspace 所有常规 target，以及
+启用全部特性后的测试 target，运行 Clippy `disallowed_methods` 检查。测试直接调用生产
+入口会报错。完整编译用例使用 `compile_full_for_test`，断言负责说明所需的后端契约。
 
 ### 本地全量测试
 
@@ -81,8 +90,8 @@ Rust 重新编译，也不将插桩耗时混进正常延迟。
 `.github/workflows/ci.yml` 保留 `Rust checks`、`Rust lint`、mdBook 与 Linux
 可执行程序验收。`Rust checks` 直接由 nextest 构建并运行测试，不再先执行一次
 `cargo build --workspace`；普通 CLI 镜像仍由可执行程序验收独立构建。
-格式检查与 `cargo clippy --workspace --all-targets -- -D warnings` 在
-`Rust lint` 中执行，与测试并行，不删减目标或放宽诊断。
+格式检查、常规 target 的严格 Clippy 检查和全特性测试的编译入口检查在 `Rust lint` 中执行，
+与测试并行。
 
 变更分流只把 `docs/` 和 `book.toml` 视为纯文档输入。PR 按整个 PR 相对目标分支的
 差异判断，`master` push 按本次 push 前后的差异判断；混合变更、工作流、Cargo

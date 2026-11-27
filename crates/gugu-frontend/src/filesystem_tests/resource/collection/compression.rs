@@ -5,7 +5,7 @@ const CAGE: u64 = 768;
 #[test]
 fn cage_capture_compilation_encodes_relative_to_runtime_base() {
     use crate::lir::body::{IntOp, Op};
-    let output = Compiler::shared().compile(
+    let output = Compiler::shared().compile_full_for_test(
         CompileRequest::single_file(
             "main.gg",
             include_str!("../../../../../gugu-compiler/tests/fixtures/runtime_cage.gg"),
@@ -46,7 +46,7 @@ fn cage_capture_compilation_encodes_relative_to_runtime_base() {
 
 #[test]
 fn large_capture_uses_full_pointer_cells_with_cage_enabled() {
-    let output = Compiler::shared().compile(
+    let output = Compiler::shared().compile_to_lir(
         CompileRequest::single_file(
             "main.gg",
             include_str!("../../../../../gugu-compiler/tests/fixtures/runtime_cage_large.gg"),

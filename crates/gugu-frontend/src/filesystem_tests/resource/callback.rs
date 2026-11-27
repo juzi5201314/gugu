@@ -80,7 +80,7 @@ fn callback_storage_reuses_retired_records_and_pressure_releases_mapping() {
 #[test]
 fn runtime_transactions_defer_poll_but_user_loop_keeps_scheduler_entry() {
     use crate::backend::x64::mangle;
-    let output = Compiler::shared().compile(CompileRequest::single_file(
+    let output = Compiler::shared().compile_full_for_test(CompileRequest::single_file(
         "main.gg",
         include_str!("../../../../gugu-compiler/tests/fixtures/runtime_poll.gg"),
         TargetName::X86_64Linux,
@@ -130,7 +130,7 @@ fn windows_callback_adapters_roundtrip_scalar_mixed_and_large_values() {
 
 fn verify_adapters(target: TargetName) {
     {
-        let output = Compiler::shared().compile(CompileRequest::single_file(
+        let output = Compiler::shared().compile_to_lir(CompileRequest::single_file(
             "main.gg",
             include_str!("../../../../gugu-compiler/tests/fixtures/callback.gg"),
             target,
@@ -241,7 +241,7 @@ fn callback_waiter_executes_fifo_without_releasing_outer_credit() {
 
 #[test]
 fn callback_completion_follows_root_and_stack_retirement() {
-    let output = Compiler::shared().compile(CompileRequest::single_file(
+    let output = Compiler::shared().compile_to_lir(CompileRequest::single_file(
         "main.gg",
         include_str!("../../../../gugu-compiler/tests/fixtures/fs_join_error.gg"),
         TargetName::X86_64Linux,

@@ -6,7 +6,7 @@ use crate::frontend::semantics::model::{Model, Ty};
 use crate::{CompileRequest, Compiler, DiagnosticCode, QueryEngine, TargetName};
 
 fn diagnostics_of(source: &str) -> Vec<DiagnosticCode> {
-    let compilation = Compiler::shared().compile(CompileRequest::single_file(
+    let compilation = Compiler::shared().compile_to_lir(CompileRequest::single_file(
         "main.gg",
         source,
         TargetName::X86_64Linux,
@@ -299,17 +299,17 @@ fn cyclic_and_unevaluable_initializers_still_fail_at_use_sites() {
 fn action_key_is_deterministic_and_input_sensitive() {
     let compiler = Compiler::new();
     let source = "const N: int = 4\nfn main() { let a = [0; N]\n _ = a }";
-    let first = compiler.compile(CompileRequest::single_file(
+    let first = compiler.compile_full_for_test(CompileRequest::single_file(
         "main.gg",
         source,
         TargetName::X86_64Linux,
     ));
-    let second = compiler.compile(CompileRequest::single_file(
+    let second = compiler.compile_full_for_test(CompileRequest::single_file(
         "main.gg",
         source,
         TargetName::X86_64Linux,
     ));
-    let changed = compiler.compile(CompileRequest::single_file(
+    let changed = compiler.compile_full_for_test(CompileRequest::single_file(
         "main.gg",
         "const N: int = 5\nfn main() { let a = [0; N]\n _ = a }",
         TargetName::X86_64Linux,

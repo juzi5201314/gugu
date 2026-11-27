@@ -7,7 +7,7 @@ const BUFFER: u64 = 128;
 const SLOT: u64 = 256;
 
 fn compile(target: TargetName) -> Compilation {
-    let output = Compiler::shared().compile(CompileRequest::single_file(
+    let output = Compiler::shared().compile_to_lir(CompileRequest::single_file(
         "main.gg",
         include_str!("../../../../gugu-compiler/tests/fixtures/net_io.gg"),
         target,
@@ -39,7 +39,7 @@ fn submit(h: &mut Harness<'_>, memory: &mut Vec<u8>, node: u64) -> Vec<u64> {
 }
 
 fn control_contract(target: TargetName) {
-    let output = Compiler::shared().compile(CompileRequest::single_file(
+    let output = Compiler::shared().compile_to_lir(CompileRequest::single_file(
         "main.gg",
         include_str!("../../../../gugu-compiler/tests/fixtures/net_control.gg"),
         target,

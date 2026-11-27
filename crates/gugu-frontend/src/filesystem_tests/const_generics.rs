@@ -26,7 +26,7 @@ fn main() {
 
 #[test]
 fn early_dependent_array_arguments_check_parenthesized_lengths() {
-    let compiled = Compiler::shared().compile(CompileRequest::single_file(
+    let compiled = Compiler::shared().compile_to_lir(CompileRequest::single_file(
         "main.gg",
         r#"
 fn take(comptime n: int, a: [int; ((n))]) int { a[0] }
@@ -77,7 +77,7 @@ fn main() { let s = S {}
 
 #[test]
 fn dependent_value_parameters_reject_implicit_receiver_borrows() {
-    let compiled = Compiler::shared().compile(CompileRequest::single_file(
+    let compiled = Compiler::shared().compile_to_lir(CompileRequest::single_file(
         "main.gg",
         r#"
 trait Change { fn change(self: &Self) }
@@ -106,7 +106,7 @@ fn dependent_value_parameter_instances_use_values_and_survive_cache_hits() {
         let source = format!(
             "fn f(comptime n: int) [int; n] {{ [0; n] }}\nfn main() {{ _ = f(2)\n _ = f({n}) }}"
         );
-        let compiled = Compiler::shared().compile(CompileRequest::single_file(
+        let compiled = Compiler::shared().compile_full_for_test(CompileRequest::single_file(
             "main.gg",
             source,
             TargetName::X86_64Linux,
@@ -137,7 +137,7 @@ fn dependent_value_parameter_cannot_be_mutated_or_borrowed() {
         let source = format!(
             "fn f(comptime n: int) [int; n] {{ {statement}\n [0; n] }}\nfn main() {{ _ = f(2) }}"
         );
-        let compiled = Compiler::shared().compile(CompileRequest::single_file(
+        let compiled = Compiler::shared().compile_to_lir(CompileRequest::single_file(
             "main.gg",
             source,
             TargetName::X86_64Linux,
@@ -188,8 +188,11 @@ fn main() {
 
 #[test]
 fn dependent_value_parameters_reject_nonconstant_arguments() {
-    let compiled = Compiler::shared().compile(CompileRequest::single_file("main.gg",
-        "fn repeat(comptime n: int) [int; n] { [0; n] }\nfn f(n: int) { _ = repeat(n) }\nfn main() {}", TargetName::X86_64Linux));
+    let compiled = Compiler::shared().compile_to_lir(CompileRequest::single_file(
+        "main.gg",
+        "fn repeat(comptime n: int) [int; n] { [0; n] }\nfn f(n: int) { _ = repeat(n) }\nfn main() {}",
+        TargetName::X86_64Linux,
+    ));
     assert!(!compiled.is_success());
     assert!(
         compiled
@@ -204,7 +207,7 @@ fn dependent_value_parameters_reject_nonconstant_arguments() {
 
 #[test]
 fn dependent_value_parameters_reject_type_arithmetic() {
-    let compiled = Compiler::shared().compile(CompileRequest::single_file(
+    let compiled = Compiler::shared().compile_to_lir(CompileRequest::single_file(
         "main.gg",
         "fn f(comptime n: int) [int; n + 1] { [0; n + 1] }\nfn main() { _ = f(2) }",
         TargetName::X86_64Linux,
@@ -303,7 +306,7 @@ fn compile_imported_result_constructors(source: &str) -> crate::Compilation {
         .iter()
         .find(|target| target.kind() == crate::TargetKind::Bin)
         .unwrap();
-    Compiler::shared().compile(CompileRequest::project_target(
+    Compiler::shared().compile_to_lir(CompileRequest::project_target(
         package,
         target,
         "constructors@0.0.0 (path+.)",
@@ -351,7 +354,7 @@ const ANSWER: int = comptime source {{
 fn main() {{ _ = ANSWER }}
 "#
         );
-        let compiled = Compiler::shared().compile(CompileRequest::single_file(
+        let compiled = Compiler::shared().compile_to_lir(CompileRequest::single_file(
             "main.gg",
             source,
             TargetName::X86_64Linux,
@@ -442,7 +445,7 @@ const ANSWER: int = comptime source {{
 fn main() {{ _ = ANSWER }}
 "#
         );
-        let compiled = Compiler::shared().compile(CompileRequest::single_file(
+        let compiled = Compiler::shared().compile_to_lir(CompileRequest::single_file(
             "main.gg",
             source,
             TargetName::X86_64Linux,
@@ -475,7 +478,7 @@ fn early_array_arguments_match_explicit_lengths_during_type_formation() {
         let source = format!(
             "fn length[T, comptime N: int](a: {parameter}) int {{ N }}\nstruct Storage {{ data: [int; length::[int, {count}]({argument})] }}\nfn main() {{}}"
         );
-        let compiled = Compiler::shared().compile(CompileRequest::single_file(
+        let compiled = Compiler::shared().compile_to_lir(CompileRequest::single_file(
             "main.gg",
             &source,
             TargetName::X86_64Linux,
@@ -543,7 +546,7 @@ fn main() { println(length::[4](7)) }
 }
 
 fn requires_explicit_early_const_arguments(source: &str) {
-    let compiled = Compiler::shared().compile(CompileRequest::single_file(
+    let compiled = Compiler::shared().compile_to_lir(CompileRequest::single_file(
         "main.gg",
         source,
         TargetName::X86_64Linux,
@@ -566,7 +569,7 @@ fn early_const_calls_do_not_reform_parameter_lengths() {
     let source = "const SIZE: int = length([0])\nfn length[comptime N: int](a: [int; SIZE]) int { N }\nfn main() { _ = SIZE }";
     requires_explicit_early_const_arguments(source);
     let explicit = source.replace("length([0])", "length::[1]([0])");
-    let compiled = Compiler::shared().compile(CompileRequest::single_file(
+    let compiled = Compiler::shared().compile_to_lir(CompileRequest::single_file(
         "main.gg",
         &explicit,
         TargetName::X86_64Linux,
@@ -746,13 +749,13 @@ fn main() { println(EXPLICIT)
 fn const_generic_cached_callee_preserves_instance_identity() {
     let compiler = Compiler::new();
     let source = "fn length[comptime N: int](a: [int; N]) int { _ = a\n N }\nfn main() { _ = length([1, 2, 3]) }";
-    let cold = compiler.compile(CompileRequest::single_file(
+    let cold = compiler.compile_full_for_test(CompileRequest::single_file(
         "main.gg",
         source,
         TargetName::X86_64Linux,
     ));
     assert!(cold.is_success(), "{:?}", cold.diagnostics().items());
-    let warm = compiler.compile(CompileRequest::single_file(
+    let warm = compiler.compile_full_for_test(CompileRequest::single_file(
         "main.gg",
         source,
         TargetName::X86_64Linux,
@@ -770,7 +773,7 @@ fn symbolic_array_patterns_require_unconditional_rest() {
         let source = format!(
             "fn empty[comptime N: int](a: [int; N]) bool {{ match a {{ {pattern} => true, _ => false }} }}\nfn main() {{ _ = empty([1, 2]) }}"
         );
-        let compiled = Compiler::shared().compile(CompileRequest::single_file(
+        let compiled = Compiler::shared().compile_to_lir(CompileRequest::single_file(
             "main.gg",
             &source,
             TargetName::X86_64Linux,
@@ -856,7 +859,7 @@ fn main() {
 
 #[test]
 fn const_generic_enum_and_union_fields_accept_concrete_lengths() {
-    let compiled = Compiler::shared().compile(CompileRequest::single_file(
+    let compiled = Compiler::shared().compile_to_lir(CompileRequest::single_file(
         "main.gg",
         r#"
 enum SizedChoice[T, comptime N: int] { Data([T; N]), Empty }
@@ -887,7 +890,7 @@ fn const_generic_arrays_reject_invalid_lengths_and_kinds() {
         "struct A[comptime N: int] { a: N }\nfn main() {}",
         "struct A[comptime N: string] { a: [int; N] }\nfn main() {}",
     ] {
-        let compiled = Compiler::shared().compile(CompileRequest::single_file(
+        let compiled = Compiler::shared().compile_to_lir(CompileRequest::single_file(
             "main.gg",
             source,
             TargetName::X86_64Linux,
@@ -899,7 +902,7 @@ fn const_generic_arrays_reject_invalid_lengths_and_kinds() {
 
 #[test]
 fn const_generic_array_arithmetic_has_explicit_diagnostic() {
-    let compiled = Compiler::shared().compile(CompileRequest::single_file(
+    let compiled = Compiler::shared().compile_to_lir(CompileRequest::single_file(
         "main.gg",
         "struct A[comptime N: int] { a: [int; N + 1] }\nfn main() {}",
         TargetName::X86_64Linux,

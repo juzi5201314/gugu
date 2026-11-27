@@ -22,7 +22,7 @@ pub(super) fn render(source: &str) -> String {
 
 fn render_with_heap(source: &str) -> (String, usize) {
     let source = format!("{source}\nfn main() {{ _ = render() }}");
-    let output = Compiler::shared().compile(CompileRequest::single_file(
+    let output = Compiler::shared().compile_to_lir(CompileRequest::single_file(
         "main.gg",
         &source,
         TargetName::X86_64Linux,

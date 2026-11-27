@@ -175,7 +175,7 @@ fn scalar_widths_and_algebraic_hash_feeding() {
 
 #[test]
 fn unsupported_builtin_hash_has_explicit_diagnostic() {
-    let compiled = super::Compiler::shared().compile(super::CompileRequest::single_file(
+    let compiled = super::Compiler::shared().compile_to_lir(super::CompileRequest::single_file(
         "main.gg",
         "fn main() { let h = Hasher::with_seed(0)\nlet values: [int; 2] = [1, 2]\nvalues.hash(&h) }",
         super::TargetName::X86_64Linux,

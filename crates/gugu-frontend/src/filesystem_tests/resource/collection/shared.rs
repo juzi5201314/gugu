@@ -143,7 +143,7 @@ fn pressure_reclaims_empty_shared_table_and_clears_reclaimable_bytes() {
 
 #[test]
 fn shared_access_and_root_keep_payload_then_generation_rejects_stale_handle() {
-    let output = Compiler::shared().compile(CompileRequest::single_file(
+    let output = Compiler::shared().compile_to_lir(CompileRequest::single_file(
         "main.gg",
         include_str!("../../../../../gugu-compiler/tests/fixtures/shared_pin.gg"),
         TargetName::X86_64Linux,

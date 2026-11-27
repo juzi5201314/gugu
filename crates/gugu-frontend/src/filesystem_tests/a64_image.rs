@@ -5,7 +5,8 @@
 use super::{CompileRequest, Compiler, TargetName};
 
 fn compile(source: &str, target: TargetName) -> super::Compilation {
-    let output = Compiler::shared().compile(CompileRequest::single_file("main.gg", source, target));
+    let output = Compiler::shared()
+        .compile_full_for_test(CompileRequest::single_file("main.gg", source, target));
     assert!(output.is_success(), "{:?}", output.diagnostics().items());
     output
 }
@@ -73,7 +74,7 @@ fn aarch64_targets_have_distinct_action_keys() {
 /// 在 aarch64-linux 上端到端装配成功。
 #[test]
 fn aarch64_runtime_program_assembles() {
-    let output = Compiler::shared().compile(CompileRequest::single_file(
+    let output = Compiler::shared().compile_full_for_test(CompileRequest::single_file(
         "main.gg",
         "use std.io.{println}\nfn main() { println(\"hello\") }\n",
         TargetName::Aarch64Linux,

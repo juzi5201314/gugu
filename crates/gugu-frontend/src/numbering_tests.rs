@@ -62,8 +62,10 @@ fn snapshot(compilation: &Compilation) -> Snapshot {
 
 /// 同一程序在两条路径上的编号无关指纹与诊断必须逐项一致。
 fn assert_numbering_stable(label: &str, request: impl Fn() -> CompileRequest) {
-    let installed = session().compile(request());
-    let derived = session().deriving_builtins().compile(request());
+    let installed = session().compile_full_for_test(request());
+    let derived = session()
+        .deriving_builtins()
+        .compile_full_for_test(request());
     assert!(
         !installed.diagnostics().has_errors(),
         "{label}：语料本身必须编译通过：{:?}",

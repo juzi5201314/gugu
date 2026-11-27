@@ -259,6 +259,8 @@ frontend
       ↓
 build-ir
       ↓
+codegen
+      ↓
 plan-backend
       ↓
 attach-runtime
@@ -269,6 +271,15 @@ emit-image
 ```
 
 节点状态只有 `pending`、`complete`、`skipped` 和 `failed`。成功路径的 `validate-image` 验证镜像计划，`emit-image` 在镜像字节生成后为 `complete`（落盘由宿主工具完成）。失败路径从第一个失败节点开始把下游节点标为 `skipped`，编排器不执行降级编译、不调用外部 assembler/linker，也不写出部分产物。
+
+回归测试使用 `Compiler::compile_to_lir` 或 `Compiler::compile_full_for_test` 显式选择阶段。
+Clippy `disallowed_methods` 门禁禁止测试直接调用生产 `Compiler::compile`；需要完整后端的回归
+使用测试专用入口声明阶段需求。
+
+`Compiler::compile_to_lir` 与 `Compiler::compile` 共用前置流水线，
+在 LIR 通过结构校验后结束。成功结果保留诊断、源码表、HIR、GIR 和 LIR，将 `build-ir`
+记为 `complete`、`codegen` 及下游记为 `skipped`。完整编译继续解析 runtime glue、派生
+GC metadata 和 runtime raw 契约，然后进入机器码生成与镜像规划。
 
 输入形态如下：
 

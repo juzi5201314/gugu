@@ -104,7 +104,7 @@ fn native_file_errors_preserve_categories_and_unknown_codes() {
             ][..],
         ),
     ] {
-        let output = Compiler::shared().compile(CompileRequest::single_file(
+        let output = Compiler::shared().compile_to_lir(CompileRequest::single_file(
             "main.gg",
             "use std.io as io\nfn main() { _ = io.from_native_error(13) }",
             target,
@@ -124,7 +124,7 @@ fn native_file_errors_preserve_categories_and_unknown_codes() {
 
 #[test]
 fn file_options_validate_every_combination_before_native_open() {
-    let output = Compiler::shared().compile(CompileRequest::single_file(
+    let output = Compiler::shared().compile_to_lir(CompileRequest::single_file(
         "main.gg", "use std.fs as fs\nuse std.path.{Path}\nfn main() { _ = fs.open(Path::from_string(\"unused\"), fs.OpenOptions::new()) }", TargetName::X86_64Linux,
     ));
     assert!(output.is_success(), "{:?}", output.diagnostics().items());
@@ -156,7 +156,7 @@ fn file_options_validate_every_combination_before_native_open() {
 
 #[test]
 fn windows_nofollow_defers_truncation_until_handle_validation() {
-    let output = Compiler::shared().compile(CompileRequest::single_file(
+    let output = Compiler::shared().compile_to_lir(CompileRequest::single_file(
         "main.gg", "use std.fs as fs\nuse std.path.{Path}\nfn main() { _ = fs.open(Path::from_string(\"unused\"), fs.OpenOptions::new()) }", TargetName::X86_64Windows,
     ));
     assert!(output.is_success(), "{:?}", output.diagnostics().items());

@@ -40,7 +40,7 @@ pub(super) fn output_with_heap(
     script: &[(u64, u64, u64)],
     heap_bytes: usize,
 ) -> Vec<(u64, Vec<u8>)> {
-    let compiled = Compiler::shared().compile(CompileRequest::single_file(
+    let compiled = Compiler::shared().compile_to_lir(CompileRequest::single_file(
         "main.gg",
         source,
         TargetName::X86_64Linux,
@@ -50,13 +50,7 @@ pub(super) fn output_with_heap(
         "{:?}",
         compiled.diagnostics().items()
     );
-    assert!(
-        compiled
-            .image_plan()
-            .unwrap()
-            .linux_image()
-            .starts_with(b"\x7fELF")
-    );
+    assert!(compiled.image_plan().is_none());
     let mut harness = Harness::new(&compiled);
     harness.machine_hook = Some(capture);
     harness.script.extend(script.iter().copied());
@@ -261,23 +255,7 @@ fn print_stops_on_write_error() {
 
 #[test]
 fn print_overview_example_compiles_to_linux_elf() {
-    let overview = include_str!("../../../../docs/src/spec/overview.md");
-    let source = overview
-        .split("`main.gg`：")
-        .nth(1)
-        .unwrap()
-        .split("```gugu\n")
-        .nth(1)
-        .unwrap()
-        .split("```")
-        .next()
-        .unwrap()
-        .replace("use green.{bar}", "fn bar() string = \"bar\"");
-    let compiled = Compiler::shared().compile(CompileRequest::single_file(
-        "main.gg",
-        &source,
-        TargetName::X86_64Linux,
-    ));
+    let compiled = super::docs_examples::compile_overview_image();
     assert!(
         compiled.is_success(),
         "{:?}",

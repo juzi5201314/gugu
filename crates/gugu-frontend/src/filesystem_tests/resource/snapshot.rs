@@ -2,7 +2,7 @@
 use super::*;
 
 fn compile_stats() -> Compilation {
-    let output = Compiler::shared().compile(CompileRequest::single_file(
+    let output = Compiler::shared().compile_to_lir(CompileRequest::single_file(
         "main.gg",
         include_str!("../../../../gugu-compiler/tests/fixtures/runtime_stats.gg"),
         TargetName::X86_64Linux,

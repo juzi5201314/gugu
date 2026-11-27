@@ -19,7 +19,7 @@ fn filesystem_api_links_macos() {
 #[test]
 fn borrowed_array_slice_preserves_referent() {
     let output =
-        Compiler::with_artifacts(&EMBEDDED_ARTIFACTS).compile(CompileRequest::single_file(
+        Compiler::with_artifacts(&EMBEDDED_ARTIFACTS).compile_to_lir(CompileRequest::single_file(
             "main.gg",
             include_str!("fixtures/array_slice.gg"),
             TargetName::X86_64Linux,
@@ -60,7 +60,7 @@ fn borrowed_array_slice_preserves_referent() {
 fn check(target: TargetName) {
     let source = include_str!("fixtures/fs_api.gg");
     let output = Compiler::with_artifacts(&EMBEDDED_ARTIFACTS)
-        .compile(CompileRequest::single_file("main.gg", source, target));
+        .compile_full_for_test(CompileRequest::single_file("main.gg", source, target));
     assert!(output.is_success(), "{:?}", output.diagnostics().items());
     let plan = output.image_plan().expect("完整 API 必须形成镜像");
     let bytes = match target {

@@ -72,7 +72,7 @@ fn resolver_cancellation_releases_late_result_and_wakes_only_once() {
 
 fn compile(fixture: &str, target: TargetName) -> Compilation {
     let output =
-        Compiler::shared().compile(CompileRequest::single_file("main.gg", fixture, target));
+        Compiler::shared().compile_to_lir(CompileRequest::single_file("main.gg", fixture, target));
     assert!(output.is_success(), "{:?}", output.diagnostics().items());
     output
 }

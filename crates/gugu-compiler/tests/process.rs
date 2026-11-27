@@ -2,7 +2,7 @@ use gugu_compiler::{CompileRequest, Compiler, EMBEDDED_ARTIFACTS, TargetName};
 
 fn compile(source: &str, target: TargetName) -> gugu_compiler::Compilation {
     let output = Compiler::with_artifacts(&EMBEDDED_ARTIFACTS)
-        .compile(CompileRequest::single_file("main.gg", source, target));
+        .compile_full_for_test(CompileRequest::single_file("main.gg", source, target));
     assert!(output.is_success(), "{:?}", output.diagnostics().items());
     output
 }

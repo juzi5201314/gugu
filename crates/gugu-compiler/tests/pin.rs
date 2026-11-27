@@ -1,7 +1,7 @@
 use gugu_compiler::{CompileRequest, Compiler, EMBEDDED_ARTIFACTS, TargetName};
 
 fn verify(target: TargetName) {
-    let output = Compiler::with_artifacts(&EMBEDDED_ARTIFACTS).compile(
+    let output = Compiler::with_artifacts(&EMBEDDED_ARTIFACTS).compile_full_for_test(
         CompileRequest::single_file("main.gg", include_str!("fixtures/pin.gg"), target),
     );
     assert!(output.is_success(), "{:?}", output.diagnostics().items());

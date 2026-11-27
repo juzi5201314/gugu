@@ -30,7 +30,7 @@ mod type_aliases;
 mod unsafety;
 
 pub(super) fn accepts(source: &str) -> bool {
-    let c = Compiler::shared().compile(CompileRequest::single_file(
+    let c = Compiler::shared().compile_to_lir(CompileRequest::single_file(
         "main.gg",
         source,
         TargetName::X86_64Linux,
@@ -653,12 +653,12 @@ fn runtime_checks_survive_queries_and_reach_the_backend_plan() {
     assert_eq!(operand_type(*float), &Ty::Float(64));
     assert_eq!(operand_type(*scalar), &Ty::int());
     let compiler = Compiler::shared();
-    let first = compiler.compile(CompileRequest::single_file(
+    let first = compiler.compile_full_for_test(CompileRequest::single_file(
         "main.gg",
         "fn main() { let x = 1 }",
         TargetName::X86_64Linux,
     ));
-    let second = compiler.compile(CompileRequest::single_file(
+    let second = compiler.compile_full_for_test(CompileRequest::single_file(
         "main.gg",
         "fn main() { let x = 2 }",
         TargetName::X86_64Linux,
@@ -675,7 +675,7 @@ fn failed_cached_queries_rebind_source_locations_and_stop_lowering() {
     let compiler = Compiler::new();
     let source = "fn main() { let x: int\n _ = x }";
     for _ in 0..2 {
-        let failed = compiler.compile(CompileRequest::single_file(
+        let failed = compiler.compile_full_for_test(CompileRequest::single_file(
             "main.gg",
             source,
             TargetName::X86_64Linux,

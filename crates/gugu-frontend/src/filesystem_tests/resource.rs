@@ -1022,11 +1022,15 @@ fn pressure_reuses_completed_stack_for_waiter_before_trimming() {
 }
 
 fn compile() -> Compilation {
-    let output = Compiler::shared().compile(CompileRequest::single_file(
+    let output = Compiler::shared().compile_to_lir(fs_api_request());
+    assert!(output.is_success(), "{:?}", output.diagnostics().items());
+    output
+}
+
+fn fs_api_request() -> CompileRequest {
+    CompileRequest::single_file(
         "main.gg",
         include_str!("../../../gugu-compiler/tests/fixtures/fs_api.gg"),
         TargetName::X86_64Linux,
-    ));
-    assert!(output.is_success(), "{:?}", output.diagnostics().items());
-    output
+    )
 }

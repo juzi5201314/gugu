@@ -2,7 +2,7 @@
 use gugu_compiler::{CompileRequest, Compiler, EMBEDDED_ARTIFACTS, TargetName};
 
 fn verify(target: TargetName) {
-    let output = Compiler::with_artifacts(&EMBEDDED_ARTIFACTS).compile(
+    let output = Compiler::with_artifacts(&EMBEDDED_ARTIFACTS).compile_full_for_test(
         CompileRequest::single_file("main.gg", include_str!("fixtures/runtime_stats.gg"), target),
     );
     assert!(output.is_success(), "{:?}", output.diagnostics().items());
@@ -14,12 +14,13 @@ fn verify(target: TargetName) {
 }
 #[test]
 fn stack_access_intrinsics_are_private_even_through_aliases() {
-    let output =
-        Compiler::with_artifacts(&EMBEDDED_ARTIFACTS).compile(CompileRequest::single_file(
+    let output = Compiler::with_artifacts(&EMBEDDED_ARTIFACTS).compile_full_for_test(
+        CompileRequest::single_file(
             "main.gg",
             include_str!("fixtures/private_stack_access.gg"),
             TargetName::X86_64Linux,
-        ));
+        ),
+    );
     assert!(!output.is_success());
     assert!(output.image_plan().is_none());
     assert!(output.diagnostics().items().iter().any(|diagnostic| {
@@ -27,12 +28,13 @@ fn stack_access_intrinsics_are_private_even_through_aliases() {
             .message()
             .contains("不存在可导入项 `stack_read_word`")
     }));
-    let direct =
-        Compiler::with_artifacts(&EMBEDDED_ARTIFACTS).compile(CompileRequest::single_file(
+    let direct = Compiler::with_artifacts(&EMBEDDED_ARTIFACTS).compile_full_for_test(
+        CompileRequest::single_file(
             "main.gg",
             include_str!("fixtures/private_stack_direct.gg"),
             TargetName::X86_64Linux,
-        ));
+        ),
+    );
     assert!(!direct.is_success());
     assert!(direct.image_plan().is_none());
     for name in ["stack_read_word", "stack_copy_raw"] {

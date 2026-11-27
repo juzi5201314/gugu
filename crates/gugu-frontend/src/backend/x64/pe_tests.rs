@@ -495,7 +495,7 @@ fn coff_archive_extracts_only_the_named_member() {
 #[ignore = "slow full compilation"]
 fn compiled_windows_main_is_an_exe_and_linux_image_is_absent() {
     let source = "fn main() {}";
-    let compilation = Compiler::shared().compile(CompileRequest::single_file(
+    let compilation = Compiler::shared().compile_full_for_test(CompileRequest::single_file(
         "main.gg",
         source,
         TargetName::X86_64Windows,
@@ -515,7 +515,7 @@ fn compiled_windows_main_is_an_exe_and_linux_image_is_absent() {
     assert_eq!(&bytes[64..68], b"PE\0\0");
     assert!(bytes.windows(8).any(|window| window == b"GUGUSM01"));
     assert!(bytes.windows(8).any(|window| window == b"GUGUUN01"));
-    let again = Compiler::new().compile(CompileRequest::single_file(
+    let again = Compiler::new().compile_full_for_test(CompileRequest::single_file(
         "main.gg",
         source,
         TargetName::X86_64Windows,

@@ -1,11 +1,11 @@
-//! 检查实际镜像的阻塞通道恢复边，不执行 native 程序或依赖调度时序。
+//! 检查 LIR 中的阻塞通道恢复边，不执行机器码或依赖调度时序。
 use gugu_compiler::{CompileRequest, Compiler, EMBEDDED_ARTIFACTS, TargetName};
 use std::collections::{BTreeMap, BTreeSet};
 
 #[test]
 fn buffered_channel_resume_retries_payload_operation() {
     let output =
-        Compiler::with_artifacts(&EMBEDDED_ARTIFACTS).compile(CompileRequest::single_file(
+        Compiler::with_artifacts(&EMBEDDED_ARTIFACTS).compile_to_lir(CompileRequest::single_file(
             "main.gg",
             include_str!("fixtures/channel_resume.gg"),
             TargetName::X86_64Linux,
