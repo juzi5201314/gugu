@@ -1040,9 +1040,9 @@ impl Model<'_> {
         for part in parts.as_slice(&arena.fstring_parts) {
             match *part {
                 FStringPart::Text { text, .. } => {
-                    let text = self.name(module, text);
+                    let text = string::decode_fstring_text(self.name(module, text));
                     state.alloc(u64::try_from(text.len()).expect("文本长度可编码"), &span)?;
-                    output.push_str(text);
+                    output.push_str(&text);
                 }
                 FStringPart::Interp { expr, spec, .. } => {
                     let value = self.value(module, expr, state)?;
