@@ -78,8 +78,14 @@ impl Checker<'_, '_> {
                         expr.span.clone(),
                     );
                 }
-                for &arg in &args {
-                    self.expression(arg, None);
+                if args.len() != 1 {
+                    self.error(
+                        DiagnosticCode::InvalidExpression,
+                        "panic 需要一个 string 实参",
+                        expr.span.clone(),
+                    );
+                } else {
+                    self.expression(args[0], Some(&Ty::String));
                 }
                 return Ty::Never;
             }
