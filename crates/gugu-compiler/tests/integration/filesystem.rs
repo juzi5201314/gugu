@@ -100,11 +100,19 @@ struct Dog { pub name: string }
 impl Describable for Dog {
     fn describe(self: &Self) string { self.name }
 }
+struct EmptyDog {}
+impl Describable for EmptyDog {
+    fn describe(self: &Self) string = "dog"
+}
 fn show(d: dyn Describable) {
     println(d.describe())
 }
 fn main() {
     show(Dog { name: "rex" })
+    println("before")
+    let empty: dyn Describable = EmptyDog {}
+    println("after erase")
+    show(empty)
 }
 "#,
             TargetName::X86_64Linux,
@@ -114,4 +122,8 @@ fn main() {
     let lir = output.dump_lir().expect("LIR");
     assert!(lir.contains("$vtable"), "缺少 vtable shim");
     assert!(lir.contains("SymbolAddr(Vtable"), "缺少 vtable 符号");
+    assert!(
+        !lir.contains("DynamicErase"),
+        "擦除不能进入不存在的运行时入口"
+    );
 }

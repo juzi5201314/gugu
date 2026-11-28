@@ -441,12 +441,9 @@ impl Builder<'_> {
                     .layout
                     .ok_or_else(|| invalid("dyn 擦除载荷没有具体布局"))?
                     .size;
-                let payload = if bytes == 0 {
-                    // ZST 没有可观察载荷地址；fat pointer 仍需一个可管理的稳定指针身份。
-                    self.allocate(source_ty, 0, PlacementKind::LocalHeap, None)?
-                } else {
-                    self.allocate(source_ty, bytes, PlacementKind::LocalHeap, None)?
-                };
+                // 零字节分配返回空地址；dyn 即使装载 ZST 也必须持有有效受管对象。
+                let payload =
+                    self.allocate(source_ty, bytes.max(1), PlacementKind::LocalHeap, None)?;
                 self.copy_memory(payload, source, source_ty)?;
                 let destination = self.temporary(ty)?;
                 let concrete = self.layout(source_ty).key;

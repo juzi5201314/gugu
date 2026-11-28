@@ -8,6 +8,7 @@ mod const_generics;
 mod copy;
 mod debug_builders;
 mod docs_examples;
+mod dyn_erasure;
 mod float_formatting;
 mod formatting;
 mod harness;

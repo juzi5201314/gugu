@@ -219,6 +219,8 @@ HIR同样提供保持源码臂优先级的 pattern matrix。GIR把它编译成�
 栈根表是 enum 变体的并集，初始全零可追踪不表示以后能无条件追踪标量载荷。
 LIR query/world schema 与 body revision 为 29，包含逐根动态字节地址、C 聚合自然对齐、零大小 dyn 载荷分配，以及 scoped callback 的 view 参数车道。
 
+`dyn Trait` 擦除为具体值分配受管载荷，并写入编译期 vtable 地址。即使具体值是 ZST，载荷也至少分配一个物理字节，避免零字节分配返回的空地址进入受管引用；类型描述符、`size_of` 与值复制仍按原有零大小布局处理。
+
 成功元素写入后，LIR 用 `RootInitAddr(slot)` 取得帧内逐根字节基址，计算
 `index * element_root_count + field_root_index`，再按当前活动变体复位和置位。
 发射量取决于元素形状，与外层数组长度无关；没有按下标枚举的选择 CFG。

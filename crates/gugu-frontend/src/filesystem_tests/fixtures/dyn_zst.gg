@@ -1,0 +1,17 @@
+trait Named {
+    fn name(self: &Self) string
+}
+
+struct Dog {}
+
+impl Named for Dog {
+    fn name(self: &Self) string = "dog"
+}
+
+#[used]
+fn erase() dyn Named = Dog {}
+
+fn main() {
+    let named = erase()
+    _ = named.name()
+}
