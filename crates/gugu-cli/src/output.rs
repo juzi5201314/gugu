@@ -585,7 +585,7 @@ pub(crate) fn emit_diagnostic(diagnostic: &gugu_compiler::Diagnostic, format: Ou
 
 pub(crate) fn emit_cli_error(format: OutputFormat, message: &str) {
     let cwd = env::current_dir().unwrap_or_else(|_| PathBuf::from("."));
-    let message = sanitize_message(message, None, &cwd);
+    let message = cli_error_message(format, message, &cwd);
     match format {
         OutputFormat::Text => eprintln!("error: {message}"),
         OutputFormat::Json | OutputFormat::JsonDiagnosticShort => {
@@ -593,6 +593,15 @@ pub(crate) fn emit_cli_error(format: OutputFormat, message: &str) {
                 "cli-error",
                 json!({ "message": message, "suggestion": Value::Null }),
             );
+        }
+    }
+}
+
+fn cli_error_message(format: OutputFormat, message: &str, cwd: &Path) -> String {
+    match format {
+        OutputFormat::Text => redact_secrets(message),
+        OutputFormat::Json | OutputFormat::JsonDiagnosticShort => {
+            sanitize_message(message, None, cwd)
         }
     }
 }
@@ -743,6 +752,22 @@ pub(crate) fn redact_secrets(message: &str) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn text_cli_errors_preserve_search_paths_and_redact_credentials() {
+        let cwd = Path::new("/tmp/project");
+        for path in ["/tmp/project", "/tmp/another project", "C:\\work\\demo"] {
+            let message = format!("从 {path} 向父目录未找到 gugu.toml; token=abc");
+            let text = cli_error_message(OutputFormat::Text, &message, cwd);
+            assert!(text.contains(path));
+            assert!(!text.contains("abc"));
+            assert!(text.contains("token=<redacted>"));
+        }
+        for format in [OutputFormat::Json, OutputFormat::JsonDiagnosticShort] {
+            let text = cli_error_message(format, "从 /tmp/project 向父目录未找到 gugu.toml", cwd);
+            assert_eq!(text, "从 . 向父目录未找到 gugu.toml");
+        }
+    }
 
     #[test]
     fn machine_stats_label_follows_target_architecture() {
