@@ -87,6 +87,13 @@ accept_cases! {
     initialization_merges_only_reachable_predecessors_03: false, "fn main() { let x: int\n _ = x }";
 }
 #[cfg(feature = "slow-tests")]
+accept_cases! {
+    panic_requires_a_string_argument_00: true, "fn main() { panic(\"bug\") }";
+    panic_requires_a_string_argument_01: false, "fn main() { panic(42) }";
+    panic_requires_a_string_argument_02: false, "fn main() { panic() }";
+}
+
+#[cfg(feature = "slow-tests")]
 #[test]
 fn boolean_product_coverage_is_structural() {
     assert!(accepts(
@@ -146,6 +153,36 @@ accept_cases! {
         "fn main() { let n: u128 = 340282366920938463463374607431768211455\n _ = n }";
     literal_bounds_and_signed_patterns_04: false,
         "fn main() { let n: u128 = 340282366920938463463374607431768211456 }";
+    literal_bounds_and_signed_patterns_05: true,
+        "fn main() { let n = -9223372036854775808\n _ = n }";
+    literal_bounds_and_signed_patterns_06: false,
+        "fn main() { let n = 0 - 9223372036854775808\n _ = n }";
+}
+
+#[cfg(feature = "slow-tests")]
+accept_cases! {
+    qualified_user_variants_do_not_use_prelude_constructors_00: true,
+        "enum Mine { Ok(int), Err(string) }\nenum Other { Some(int), None }\nfn main() { let x = Mine::Ok(42)\n let y = Other::Some(1)\n let z = Other::None\n match x { Mine::Ok(v) => { _ = v }, Mine::Err(e) => { _ = e } }\n _ = y\n _ = z\n let r: Result[int, string] = Result::Ok(1)\n let o: Option[int] = Option::Some(1)\n _ = r\n _ = o }";
+    qualified_user_variants_do_not_use_prelude_constructors_01: false,
+        "enum Mine { Ok(int), Err(string) }\nfn main() { _ = Mine::Ok(\"wrong\") }";
+    explicit_generic_variant_constructors_use_type_arguments_00: true,
+        "enum Either[L, R] { Left(L), Right(R) }\nenum E[T] { Unit, Tuple(T), Rec { x: T } }\nfn main() { let e = Either[int, string]::Left(42)\n match e { Either::Left(v) => { _ = v }, Either::Right(s) => { _ = s } }\n let a = E[int]::Unit\n let b = E[int]::Tuple(1)\n let c = E[int]::Rec { x: 2 }\n _ = a\n _ = b\n _ = c }";
+    explicit_generic_variant_constructors_use_type_arguments_01: false,
+        "enum Either[L, R] { Left(L), Right(R) }\nfn main() { _ = Either[int, string]::Left(\"wrong\") }";
+    explicit_generic_variant_constructors_use_type_arguments_02: false,
+        "enum Either[L, R] { Left(L), Right(R) }\nfn main() { _ = Either[int]::Left(42) }";
+    /* 显式构造器的普通类型参数拒绝 comptime 值实参：unit/tuple/struct 变体同样检查。*/
+    explicit_generic_variant_constructors_reject_comptime_for_type_03: false,
+        "enum E[T] { Unit }\nfn main() { _ = E[3]::Unit }";
+    explicit_generic_variant_constructors_reject_comptime_for_type_04: false,
+        "enum E[T] { Tuple(T) }\nfn main() { _ = E[3]::Tuple(1) }";
+    explicit_generic_variant_constructors_reject_comptime_for_type_05: false,
+        "enum E[T] { Rec { x: T } }\nfn main() { _ = E[3]::Rec { x: 1 } }";
+    /* comptime 参数拒绝类型实参；合法类型与 comptime 实参仍可按种类实例化。*/
+    explicit_generic_variant_constructors_check_argument_kinds_06: false,
+        "enum E[comptime N: int] { Unit }\nfn main() { _ = E[int]::Unit }";
+    explicit_generic_variant_constructors_check_argument_kinds_07: true,
+        "enum E[T, comptime N: int] { Unit, Tuple(T) }\nfn main() { let a = E[int, 3]::Unit\n let b = E[int, 3]::Tuple(1)\n _ = a\n _ = b }";
 }
 
 #[cfg(feature = "slow-tests")]
