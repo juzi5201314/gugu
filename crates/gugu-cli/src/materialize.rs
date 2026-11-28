@@ -228,7 +228,7 @@ pub(crate) fn make_executable(path: &Path, format: OutputFormat) -> Result<(), (
         })?;
     }
     #[cfg(not(unix))]
-    let _ = (path, kind, format);
+    let _ = (path, format);
     Ok(())
 }
 

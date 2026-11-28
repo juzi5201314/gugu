@@ -1813,7 +1813,7 @@ fn load_project_sources(
                 .map(Path::to_path_buf)
                 .unwrap_or_else(|| package_root.to_path_buf()),
         );
-        snapshots.push(read_project_snapshot(package_root, &path)?);
+        snapshots.push(read_project_snapshot(&path, &logical)?);
     }
     let entry = project_logical_path(package_root, entry)?;
     let source_root = if package_root == source_root {
@@ -1915,20 +1915,11 @@ fn collect_source_paths(directory: &Path, paths: &mut Vec<PathBuf>) -> Result<()
     Ok(())
 }
 
-fn read_project_snapshot(
-    package_root: &Path,
-    path: &Path,
-) -> Result<SourceSnapshot, LoadInputError> {
+fn read_project_snapshot(path: &Path, logical: &str) -> Result<SourceSnapshot, LoadInputError> {
     let bytes = fs::read(path).map_err(|error| LoadInputError::Read {
         path: path.to_path_buf(),
         error,
     })?;
-    let logical = path
-        .strip_prefix(package_root)
-        .map_err(|_| LoadInputError::ModuleTree {
-            path: path.to_path_buf(),
-            message: "模块源码越过 package 根".to_owned(),
-        })?;
     SourceSnapshot::from_bytes(logical, bytes).map_err(LoadInputError::Snapshot)
 }
 
@@ -1939,7 +1930,15 @@ fn project_logical_path(package_root: &Path, path: &Path) -> Result<String, Load
             path: path.to_path_buf(),
             message: "target 路径越过 package 根".to_owned(),
         })?;
-    crate::source::normalize_logical_path(relative).map_err(LoadInputError::Snapshot)
+    let logical = relative
+        .to_str()
+        .ok_or_else(|| {
+            LoadInputError::Snapshot(SourceError::InvalidPath {
+                path: relative.to_string_lossy().into_owned(),
+            })
+        })?
+        .replace(std::path::MAIN_SEPARATOR, "/");
+    crate::source::normalize_logical_path(Path::new(&logical)).map_err(LoadInputError::Snapshot)
 }
 
 fn logical_input_path(path: &std::path::Path) -> PathBuf {
@@ -4566,5 +4565,67 @@ mod tests {
             logical_input_path(Path::new("./src/main.gg")),
             PathBuf::from("src/main.gg")
         );
+    }
+
+    #[test]
+    fn project_logical_paths_follow_host_components() {
+        let root = Path::new("package");
+        for path in [
+            root.join("src").join("green.gg"),
+            root.join("src").join("nested").join("..").join("green.gg"),
+        ] {
+            assert_eq!(
+                super::project_logical_path(root, &path).unwrap(),
+                "src/green.gg"
+            );
+        }
+    }
+
+    #[test]
+    fn project_logical_paths_reject_invalid_shapes() {
+        for path in ["", "../outside.gg", "/absolute.gg"] {
+            assert!(matches!(
+                super::project_logical_path(Path::new(""), Path::new(path)),
+                Err(super::LoadInputError::Snapshot(
+                    super::SourceError::InvalidPath { .. }
+                ))
+            ));
+        }
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn project_logical_paths_reject_unix_invalid_components() {
+        use std::{ffi::OsStr, os::unix::ffi::OsStrExt};
+
+        let root = Path::new("package");
+        for name in [
+            OsStr::from_bytes(b"bad-\xff.gg"),
+            OsStr::new("bad\\name.gg"),
+        ] {
+            let path = root.join("src").join(name);
+            assert!(matches!(
+                super::project_logical_path(root, &path),
+                Err(super::LoadInputError::Snapshot(
+                    super::SourceError::InvalidPath { .. }
+                ))
+            ));
+        }
+    }
+
+    #[cfg(windows)]
+    #[test]
+    fn project_logical_paths_reject_windows_invalid_components() {
+        use std::{ffi::OsString, os::windows::ffi::OsStringExt};
+
+        let path = PathBuf::from("src").join(OsString::from_wide(&[0xd800]));
+        for path in [path, PathBuf::from("C:main.gg")] {
+            assert!(matches!(
+                super::project_logical_path(Path::new(""), &path),
+                Err(super::LoadInputError::Snapshot(
+                    super::SourceError::InvalidPath { .. }
+                ))
+            ));
+        }
     }
 }
