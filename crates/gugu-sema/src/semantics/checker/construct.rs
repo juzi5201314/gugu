@@ -28,6 +28,8 @@ impl Checker<'_, '_> {
                     return Ty::Error;
                 }
             }
+        } else if let Some(ty) = self.explicit_constructor_type(path, span) {
+            Some(ty)
         } else if expected.is_some() {
             expected.cloned()
         } else {

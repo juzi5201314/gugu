@@ -150,6 +150,28 @@ accept_cases! {
 
 #[cfg(feature = "slow-tests")]
 accept_cases! {
+    explicit_generic_variant_constructors_use_type_arguments_00: true,
+        "enum Either[L, R] { Left(L), Right(R) }\nenum E[T] { Unit, Tuple(T), Rec { x: T } }\nfn main() { let e = Either[int, string]::Left(42)\n match e { Either::Left(v) => { _ = v }, Either::Right(s) => { _ = s } }\n let a = E[int]::Unit\n let b = E[int]::Tuple(1)\n let c = E[int]::Rec { x: 2 }\n _ = a\n _ = b\n _ = c }";
+    explicit_generic_variant_constructors_use_type_arguments_01: false,
+        "enum Either[L, R] { Left(L), Right(R) }\nfn main() { _ = Either[int, string]::Left(\"wrong\") }";
+    explicit_generic_variant_constructors_use_type_arguments_02: false,
+        "enum Either[L, R] { Left(L), Right(R) }\nfn main() { _ = Either[int]::Left(42) }";
+    /* 显式构造器的普通类型参数拒绝 comptime 值实参：unit/tuple/struct 变体同样检查。*/
+    explicit_generic_variant_constructors_reject_comptime_for_type_03: false,
+        "enum E[T] { Unit }\nfn main() { _ = E[3]::Unit }";
+    explicit_generic_variant_constructors_reject_comptime_for_type_04: false,
+        "enum E[T] { Tuple(T) }\nfn main() { _ = E[3]::Tuple(1) }";
+    explicit_generic_variant_constructors_reject_comptime_for_type_05: false,
+        "enum E[T] { Rec { x: T } }\nfn main() { _ = E[3]::Rec { x: 1 } }";
+    /* comptime 参数拒绝类型实参；合法类型与 comptime 实参仍可按种类实例化。*/
+    explicit_generic_variant_constructors_check_argument_kinds_06: false,
+        "enum E[comptime N: int] { Unit }\nfn main() { _ = E[int]::Unit }";
+    explicit_generic_variant_constructors_check_argument_kinds_07: true,
+        "enum E[T, comptime N: int] { Unit, Tuple(T) }\nfn main() { let a = E[int, 3]::Unit\n let b = E[int, 3]::Tuple(1)\n _ = a\n _ = b }";
+}
+
+#[cfg(feature = "slow-tests")]
+accept_cases! {
     try_failures_join_initialization_before_the_expression_00: true,
         "fn f(o: Option[int]) Option[int] { let x = o?\n Some(x) }\nfn main() {}";
     try_failures_join_initialization_before_the_expression_01: false,
