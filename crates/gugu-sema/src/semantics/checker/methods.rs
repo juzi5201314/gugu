@@ -1,4 +1,4 @@
-use super::super::super::ast::{AstRange, BinOp, ExprId, ExprKind, GenericArg, PathId};
+use super::super::super::ast::{AstRange, BinOp, ExprId, ExprKind, GenericArg, ItemKind, PathId};
 use super::super::model::Ty;
 use super::super::traits::{MemberKind, TraitRef};
 use super::Checker;
@@ -33,13 +33,21 @@ impl Checker<'_, '_> {
                 let last = segments.last().expect("非空路径");
                 let name = self.model.name(self.module, last.name).to_owned();
                 if !last.colon {
-                    let mut ty = self.local(segments[0].name, true, &expression.span)?;
-                    for segment in &segments[1..segments.len() - 1] {
-                        ty = self.field(
-                            &ty,
-                            self.model.name(self.module, segment.name),
-                            &segment.span,
-                        );
+                    let parts = self.model.path(self.module, path);
+                    let local = self.local(segments[0].name, true, &expression.span);
+                    let local_root = local.is_some();
+                    let mut ty = match local {
+                        Some(ty) => ty,
+                        None => self.value_receiver(&parts[..parts.len() - 1])?,
+                    };
+                    if local_root {
+                        for segment in &segments[1..segments.len() - 1] {
+                            ty = self.field(
+                                &ty,
+                                self.model.name(self.module, segment.name),
+                                &segment.span,
+                            );
+                        }
                     }
                     (ty, None, name, true)
                 } else {
@@ -129,6 +137,25 @@ impl Checker<'_, '_> {
         Some(self.invoke_method(
             callee, ty, interface, &name, type_args, args, receiver, expected,
         ))
+    }
+
+    fn value_receiver(&mut self, parts: &[&str]) -> Option<Ty> {
+        if let Ok(Some((ty, constructor))) = self.model.constructor(self.module, parts, None)
+            && constructor.fields.is_empty()
+        {
+            return Some(ty);
+        }
+        let definition = self.model.resolve(self.module, parts).ok()?;
+        if !matches!(
+            self.model.modules[definition.module].arena.items[definition.item.0 as usize].kind,
+            ItemKind::Static { .. } | ItemKind::Const { .. }
+        ) {
+            return None;
+        }
+        if !self.dependencies.contains(&definition) {
+            self.dependencies.push(definition);
+        }
+        self.model.value_type(definition).ok()
     }
 
     fn concurrency_method(
