@@ -15,7 +15,12 @@ impl Model<'_> {
         let mut interfaces = Vec::new();
         for &path in paths.as_slice(&self.modules[module].arena.path_ids) {
             let interface = self.trait_ref(module, path, params)?;
-            self.object_safe(interface.id)?;
+            self.object_safe(interface.id).map_err(|error| {
+                self.error_at(
+                    &self.modules[module].arena.paths[path.0 as usize].span,
+                    error.message(),
+                )
+            })?;
             interfaces.push(interface);
         }
         interfaces.sort();

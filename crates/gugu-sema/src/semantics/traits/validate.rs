@@ -422,6 +422,7 @@ impl Model<'_> {
                                 Some(self.form_kind(
                                     module,
                                     TyKind::Fn { params: ps, ret },
+                                    &bound.span,
                                     params,
                                     &mut Vec::new(),
                                 )?),

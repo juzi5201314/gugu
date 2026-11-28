@@ -253,7 +253,7 @@ parser 必须满足：
 
 `gugu_gir::bootstrap_with` 在配置、定义收集和导入解析后调用唯一的 `semantics::check`。模型先形成声明签名和透明别名，body checker 再收集数值约束、检查位置和控制流、计算初始化状态与模式覆盖；布局计算消费同一份形成后的类型，不重新扫描 token 推断类型。
 
-版本化结果为 `CheckedSemantics`（schema 11），它在 TypeCheck query 中序列化，包含：
+版本化结果为 `CheckedSemantics`（schema 31），它在 TypeCheck query 中序列化，包含：
 
 - 每个 active 定义的已类型化表达式表、连续局部槽和模式绑定槽区间；表达式按 arena ID 排序、去重，数值变量必须完成收敛。
 - 每个局部槽的规范名称和声明字节范围；闭包捕获及清理路径的重检查可以据此指向同一个源码绑定，HIR 不把语义检查遍历中临时分配的槽编号当作持久绑定身份。
@@ -282,6 +282,8 @@ parser 必须满足：
 局部槽的存储需求编码为三个位：`ADDRESS_TAKEN`、`CAPTURED`、`CROSS_COROUTINE`。这些位与捕获表一起交给 HIR/GIR 的存储选择；捕获或跨协程槽不能仅因创建它的词法块结束而销毁。分析记录 callable 值在求值时引用的槽，遮蔽或后续函数值赋值不能重新绑定已经形成的闭包环境。
 
 TypeCheck query 输入覆盖规范路径、源码内容、cfg 和稳定名称解析结果。schema verifier 验证后的 `CheckedSemantics` 只用于布局和 HIR 形成，不再作为后端的平行输入。`LowerHir` query 登记真实 TypeCheck 依赖 fingerprint，并加入入口和源码展开上下文；成功结果经完整 HIR verifier 后序列化。当前 schema 为 5：owner 携带显式清理计划表与 `return_plan`，模块类型表在存在定义时 intern `Unit`/`Never`/`Bool`/`Ptr(Unit)`，规范指纹域为 `gugu-validated-hir-v2`；query 只构造、校验并冻结 Module，不再嵌套单态化、late 或全程序分析。缓存命中重新验证 Module、输入身份和规范字节，不能从缓存直接恢复 `Validated` 凭据。失败诊断保存级别、顺序、附注、展开身份及逻辑文件字节范围，并在命中时重绑定当前 `SourceMap`。任何检查失败均中止 BuildIr 及后续产物路径。
+
+`TypeCheck` query schema 为 31，`LowerHir` query schema 为 17，分别使旧的错误源范围与旧的 `Vec` 下标派发结果失效；此处的 query 版本独立于 HIR Module schema。comptime evaluator revision 为 16，并进入 registry 摘要，使早期常量及源码宏诊断重算。诊断位置或 lowering 行为变化必须更新对应版本，不能仅依赖用户源码摘要触发失效。
 
 镜像计划只从冻结 HIR 读取入口、owner 数量和域隔离的 BLAKE3 指纹；原先仅生成 `main -> ReturnUnit` 的 `ir.rs` 已删除。GIR cleanup CFG 已接入；外部桥接执行和汇编机器编码尚未物化。隐藏类型只向布局和单态化揭露，外部调用按声明约束检查；运行时稠密 TypeId 分配属于冻结类型集合，vtable 物化和实际容器分配属于后续 lowering。
 
@@ -452,6 +454,8 @@ Registration = Static | Flag | Chain
 ## 诊断与确定性
 
 阶段可以并行处理 owner，但最终诊断按规范路径、起始字节、结束字节、诊断代码和稳定定义键排序。相同位置的主诊断先于附注和建议。类型变量编号、hash 表遍历、线程完成顺序不能出现在用户诊断、HIR dump 或持久摘要中。
+
+类型形成必须显式携带当前 AST 类型或路径的 span；递归形成子类型时直接传播子节点诊断，不用外层类型范围覆盖。泛型实参数量、种类和 trait 路径错误在使用节点发射，数组长度错误指向长度表达式，声明中的非法 comptime 参数类型指向该类型节点。尝试把泛型路径解释为常量失败时保留原先的类型诊断，不能重新制造文件末尾诊断。常量类型推断错误指向出错表达式或数组元素；常量初始化循环指向参与循环的声明。调用约束使用调用表达式或其 callee 路径的 span，不能泄露标准库声明或模块末尾位置。
 
 调试 dump 使用 owner 的 `DefPath`、`LocalHirId` 和规范化类型文本；默认不打印裸 `DefId`、`TyId` 或地址。dump 只用于实现检查，不进入编译 action 的可观察输出摘要。
 

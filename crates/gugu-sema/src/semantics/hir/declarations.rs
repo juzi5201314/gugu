@@ -339,6 +339,7 @@ impl Builder<'_, '_> {
                     let signature = self.model.form_kind(
                         module,
                         ast::TyKind::Fn { params, ret },
+                        &bound.span,
                         &parameters,
                         &mut Vec::new(),
                     )?;

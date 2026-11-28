@@ -178,7 +178,10 @@ impl Model<'_> {
                     if let GenericParamKind::Comptime { ty, .. } = parameter.kind
                         && self.form(module, ty)? != Ty::int()
                     {
-                        return Err(self.error(module, "comptime 泛型参数目前必须声明为 int"));
+                        return Err(self.error_at(
+                            &parsed.arena.tys[ty.0 as usize].span,
+                            "comptime 泛型参数目前必须声明为 int",
+                        ));
                     }
                 }
             }
@@ -189,6 +192,7 @@ impl Model<'_> {
         &self,
         definition: DefRef,
         arguments: &[Ty],
+        span: &crate::Span,
     ) -> Result<(), Diagnostic> {
         let parsed = &self.modules[definition.module];
         let generics = match parsed.arena.items[definition.item.0 as usize].kind {
@@ -206,7 +210,7 @@ impl Model<'_> {
             if matches!(parameter.kind, GenericParamKind::Comptime { .. })
                 != matches!(argument, Ty::Const(_))
             {
-                return Err(self.error(definition.module, "类型与 comptime 泛型实参种类不符"));
+                return Err(self.error_at(span, "类型与 comptime 泛型实参种类不符"));
             }
         }
         Ok(())
@@ -246,7 +250,12 @@ impl Model<'_> {
         }
         u64::try_from(self.constant_int_with_context(module, expression, stack)?)
             .map(ArrayLength::Known)
-            .map_err(|_| self.error(module, "comptime 泛型实参或数组长度必须非负且不超过 u64"))
+            .map_err(|_| {
+                self.error_at(
+                    &arena.exprs[expression.0 as usize].span,
+                    "comptime 泛型实参或数组长度必须非负且不超过 u64",
+                )
+            })
     }
 
     pub(in super::super) fn has_const_parameter(

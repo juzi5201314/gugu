@@ -270,6 +270,30 @@ fn aggregate_printing_rejects_missing_format_traits_at_use() {
 }
 
 #[test]
+fn missing_print_diagnostic_identifies_the_callee_instead_of_eof() {
+    let source = include_str!("fixtures/missing_print_diagnostic.gg");
+    let compiled = Compiler::shared().compile_sema_for_test(CompileRequest::single_file(
+        "main.gg",
+        source,
+        TargetName::X86_64Linux,
+    ));
+    assert!(!compiled.is_success());
+    let errors = compiled.diagnostics().items();
+    let error = errors
+        .iter()
+        .find(|error| {
+            error.code() == crate::DiagnosticCode::InvalidType
+                && error.message().contains("不满足 trait Print")
+        })
+        .unwrap_or_else(|| panic!("Point 没有 Print 实现：{errors:?}"));
+    let span = error.span().expect("调用错误必须携带源范围");
+    let start = source.find("println(value)").unwrap();
+    assert_eq!((span.line(), span.column()), (5, 5));
+    assert_eq!(span.start() as usize, start);
+    assert_eq!(span.end() as usize, start + "println".len());
+}
+
+#[test]
 fn aggregate_printing_keeps_builtin_impls_authoritative() {
     for ty in ["(int,)", "[int; 1]"] {
         let source = format!(

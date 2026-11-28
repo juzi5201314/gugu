@@ -26,12 +26,14 @@ impl Model<'_> {
                     unsafety,
                 } = item.kind
                 {
-                    if generics
+                    if let Some(parameter) = generics
                         .as_slice(&parsed.arena.generic_params)
                         .iter()
-                        .any(|param| matches!(param.kind, GenericParamKind::Comptime { .. }))
+                        .find(|param| matches!(param.kind, GenericParamKind::Comptime { .. }))
                     {
-                        return Err(self.error(module, "trait 的 comptime 泛型参数尚未实现"));
+                        return Err(
+                            self.error_at(&parameter.span, "trait 的 comptime 泛型参数尚未实现")
+                        );
                     }
                     let definition = DefRef {
                         module,
@@ -95,8 +97,8 @@ impl Model<'_> {
                         TyKind::Array { .. }
                     ) && params.values().any(|ty| matches!(ty, Ty::Const(_)))
                     {
-                        return Err(self.error(
-                            module,
+                        return Err(self.error_at(
+                            &parsed.arena.tys[self_ty.0 as usize].span,
                             "未解析的编译期名称：数组 impl 的 comptime 参数匹配尚未实现",
                         ));
                     }

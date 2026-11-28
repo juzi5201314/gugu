@@ -23,6 +23,8 @@ pub use kinds::{CallableId, Constructor, DefRef, FieldInfo, Nominal, Ty};
 mod substitution;
 pub use substitution::substitute;
 mod paths;
+#[cfg(test)]
+mod tests;
 pub struct Model<'a> {
     pub modules: &'a [ParsedModule],
     /// 由 `RuntimeResources` 以 `Runtime` 角色注入的模块下标；GC 控制原语的授权依据。
@@ -407,6 +409,9 @@ impl<'a> Model<'a> {
             Some(self.modules[module].file.eof_span.clone()),
         )
     }
+    pub(super) fn error_at(&self, span: &crate::Span, message: impl Into<String>) -> Diagnostic {
+        Diagnostic::error(DiagnosticCode::InvalidType, message, Some(span.clone()))
+    }
     pub fn resolve(&self, module: usize, path: &[&str]) -> Result<DefRef, Diagnostic> {
         let Some(first) = path.first() else {
             return Err(self.error(module, "空名称路径"));
@@ -569,6 +574,7 @@ impl<'a> Model<'a> {
         self.form_kind(
             module,
             self.modules[module].arena.tys[id.0 as usize].kind,
+            &self.modules[module].arena.tys[id.0 as usize].span,
             params,
             stack,
         )
@@ -578,13 +584,14 @@ impl<'a> Model<'a> {
         &self,
         module: usize,
         kind: TyKind,
+        span: &crate::Span,
         params: &BTreeMap<String, Ty>,
         stack: &mut Vec<DefRef>,
     ) -> Result<Ty, Diagnostic> {
         let a = &self.modules[module].arena;
         Ok(match kind {
             TyKind::Never => Ty::Never,
-            TyKind::Infer | TyKind::Error => return Err(self.error(module, "类型尚未唯一收敛")),
+            TyKind::Infer | TyKind::Error => return Err(self.error_at(span, "类型尚未唯一收敛")),
             TyKind::Ref(t) => Ty::Ref(Box::new(self.form_inner(module, t, params, stack)?)),
             TyKind::Ptr(t) => Ty::Ptr(Box::new(self.form_inner(module, t, params, stack)?)),
             TyKind::Slice(t) => Ty::Ref(Box::new(Ty::Slice(Box::new(
@@ -621,7 +628,7 @@ impl<'a> Model<'a> {
                 let parts = self.path(module, path);
                 if let Some(ty) = params.get(&parts.join("::")) {
                     if matches!(ty, Ty::Const(_)) {
-                        return Err(self.error(module, "comptime 泛型参数不是类型"));
+                        return Err(self.error_at(span, "comptime 泛型参数不是类型"));
                     }
                     return Ok(ty.clone());
                 }
@@ -664,7 +671,7 @@ impl<'a> Model<'a> {
                 }
                 if self.external_path(module, &parts).as_deref() == Some("std.mem.MaybeUninit") {
                     let [inner] = args.as_slice() else {
-                        return Err(self.error(module, "MaybeUninit 需要一个类型实参"));
+                        return Err(self.error_at(span, "MaybeUninit 需要一个类型实参"));
                     };
                     return Ok(Ty::MaybeUninit(Box::new(inner.clone())));
                 }
@@ -675,7 +682,7 @@ impl<'a> Model<'a> {
                         Some(a.paths[path.0 as usize].span.clone()),
                     )
                 })?;
-                self.check_generic_kinds(def, &args)?;
+                self.check_generic_kinds(def, &args, span)?;
                 if let Some((i, n)) = self
                     .nominal
                     .iter()
@@ -683,24 +690,24 @@ impl<'a> Model<'a> {
                     .find(|(_, n)| n.definition == def)
                 {
                     if args.len() != n.params.len() {
-                        return Err(self.error(module, "泛型实参数量不符"));
+                        return Err(self.error_at(span, "泛型实参数量不符"));
                     }
                     Ty::Named(i, args)
                 } else {
                     if stack.contains(&def) {
-                        return Err(self.error(module, "透明别名形成循环"));
+                        return Err(self.error_at(span, "透明别名形成循环"));
                     }
                     let ItemKind::TypeAlias {
                         ty: Some(ty),
                         generics,
                     } = self.modules[def.module].arena.items[def.item.0 as usize].kind
                     else {
-                        return Err(self.error(module, "该声明不是类型"));
+                        return Err(self.error_at(span, "该声明不是类型"));
                     };
                     let mut bound = BTreeMap::new();
                     let gs = generics.as_slice(&self.modules[def.module].arena.generic_params);
                     if gs.len() != args.len() {
-                        return Err(self.error(module, "别名实参数量不符"));
+                        return Err(self.error_at(span, "别名实参数量不符"));
                     }
                     for (g, t) in gs.iter().zip(args) {
                         if let GenericParamKind::Type { name, .. } = g.kind {
@@ -715,12 +722,12 @@ impl<'a> Model<'a> {
             }
             TyKind::Chan(args) => {
                 let [arg] = args.as_slice(&a.generic_args) else {
-                    return Err(self.error(module, "chan 需要一个元素类型"));
+                    return Err(self.error_at(span, "chan 需要一个元素类型"));
                 };
                 Ty::Chan(Box::new(self.form_arg(module, *arg, params, stack)?))
             }
             TyKind::Dyn(paths) => self.form_dyn(module, paths, params)?,
-            _ => return Err(self.error(module, "该类型需要对应语义阶段形成")),
+            _ => return Err(self.error_at(span, "该类型需要对应语义阶段形成")),
         })
     }
 
@@ -740,7 +747,9 @@ impl<'a> Model<'a> {
                 {
                     return Ok(value.clone());
                 }
-                let def = self.resolve(module, &self.path(module, path))?;
+                let Ok(def) = self.resolve(module, &self.path(module, path)) else {
+                    return Err(error);
+                };
                 let ItemKind::Const {
                     value: Some(value), ..
                 } = self.modules[def.module].arena.items[def.item.0 as usize].kind
@@ -753,7 +762,13 @@ impl<'a> Model<'a> {
             GenericArg::Expr(expr) => {
                 match self.modules[module].arena.exprs[expr.0 as usize].kind {
                     ExprKind::Path(path) => self
-                        .form_kind(module, TyKind::Path(path), params, stack)
+                        .form_kind(
+                            module,
+                            TyKind::Path(path),
+                            &self.modules[module].arena.exprs[expr.0 as usize].span,
+                            params,
+                            stack,
+                        )
                         .or_else(|error| self.const_argument(module, expr, params, error, stack)),
                     _ => self
                         .array_length_with_context(module, expr, params, stack)
@@ -763,6 +778,13 @@ impl<'a> Model<'a> {
         }
     }
     pub fn value_type(&self, def: DefRef) -> Result<Ty, Diagnostic> {
+        self.value_type_at(
+            def,
+            &self.modules[def.module].arena.items[def.item.0 as usize].span,
+        )
+    }
+
+    pub(super) fn value_type_at(&self, def: DefRef, span: &crate::Span) -> Result<Ty, Diagnostic> {
         let m = &self.modules[def.module];
         match m.arena.items[def.item.0 as usize].kind {
             ItemKind::Function(id) => {
@@ -780,9 +802,9 @@ impl<'a> Model<'a> {
                             self.parameters_at(def.module, &f.span)
                                 .get("Self")
                                 .cloned()
-                                .ok_or_else(|| self.error(def.module, "self 只能用于关联方法"))
+                                .ok_or_else(|| self.error_at(&p.span, "self 只能用于关联方法"))
                         } else {
-                            Err(self.error(def.module, "形参类型尚未推断"))
+                            Err(self.error_at(&p.span, "形参类型尚未推断"))
                         }
                     })
                     .collect::<Result<_, _>>()?;
@@ -816,7 +838,7 @@ impl<'a> Model<'a> {
             ItemKind::Const {
                 value: Some(expr), ..
             } => self.constant_type(def.module, expr),
-            _ => Err(self.error(def.module, "声明不是值")),
+            _ => Err(self.error_at(span, "声明不是值")),
         }
     }
     pub fn variants(&self, ty: &Ty) -> Option<Vec<Constructor>> {

@@ -1,0 +1,67 @@
+struct Cell[T] {}
+fn read(value: &Cell) {}
+fn main() {}
+
+// ---
+type Alias[T] = T
+fn read(value: Alias[int, bool]) {}
+fn main() {}
+
+// ---
+struct Cell[T] {}
+fn read(value: Cell[3]) {}
+fn main() {}
+
+// ---
+struct Cell[T] {}
+fn read(value: Cell[Missing]) {}
+fn main() {}
+
+// ---
+fn read(value: [int; -1]) {}
+fn main() {}
+
+// ---
+struct Cell[comptime N: bool] {}
+fn main() {}
+
+// ---
+fn read[T: Missing](value: T) {}
+fn main() {}
+
+// ---
+trait Mark[T] {}
+fn read[T: Mark](value: T) {}
+fn main() {}
+
+// ---
+struct Cell[T] {}
+fn read(value: Cell::Item) {}
+fn main() {}
+
+// ---
+type Alias[T] = T
+fn read(value: Alias[int, bool]::Item) {}
+fn main() {}
+
+// ---
+trait Mark[T] { type Item }
+fn read(value: Mark::Item) {}
+fn main() {}
+
+// ---
+trait Mark { fn make() int }
+fn read(value: dyn Mark) {}
+fn main() {}
+
+// ---
+const value = []
+fn main() { _ = value }
+
+// ---
+const values = [1, true]
+fn main() { _ = values }
+
+// ---
+trait Mark {}
+fn main() { _ = Mark }

@@ -153,6 +153,7 @@ impl Model<'_> {
                         params: inputs,
                         ret,
                     },
+                    &bound.span,
                     params,
                     &mut Vec::new(),
                 )?),
@@ -170,10 +171,7 @@ impl Model<'_> {
         match signatures.len() {
             0 => Ok(None),
             1 => Ok(signatures.pop()),
-            _ => Err(self.error(
-                self.opaques.definitions[*id as usize].module,
-                "不透明类型的 Fn 约束签名不一致",
-            )),
+            _ => Err(self.error_at(self.opaque_span(*id), "不透明类型的 Fn 约束签名不一致")),
         }
     }
     pub(super) fn can_bind_opaque(&self, id: u32, module: usize, span: &Span) -> bool {
@@ -204,21 +202,13 @@ impl Model<'_> {
         let mut seen = Vec::new();
         while let Ty::Opaque(id, ref arguments) = result {
             if seen.contains(&id) {
-                return Err(self.error(
-                    self.opaques.definitions[id as usize].module,
-                    "隐藏类型形成循环",
-                ));
+                return Err(self.error_at(self.opaque_span(id), "隐藏类型形成循环"));
             }
             seen.push(id);
             let definition = hidden
                 .get(id as usize)
                 .and_then(Option::as_ref)
-                .ok_or_else(|| {
-                    self.error(
-                        self.opaques.definitions[id as usize].module,
-                        "隐藏类型尚未唯一形成",
-                    )
-                })?;
+                .ok_or_else(|| self.error_at(self.opaque_span(id), "隐藏类型尚未唯一形成"))?;
             result = substitute(definition, &self.opaque_bindings(id, arguments));
         }
         Ok(result)

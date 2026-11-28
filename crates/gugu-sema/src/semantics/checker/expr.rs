@@ -701,7 +701,7 @@ impl Checker<'_, '_> {
                 {
                     self.dependencies.push(def);
                 }
-                match self.model.value_type(def) {
+                match self.model.value_type_at(def, &p.span) {
                     Ok(ty) if path_arguments.len != 0 => {
                         self.path_index(expression, &ty, path_arguments, !read, &p.span)
                     }

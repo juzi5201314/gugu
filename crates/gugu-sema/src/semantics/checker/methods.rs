@@ -321,7 +321,7 @@ impl Checker<'_, '_> {
                     span.clone(),
                 );
             } else if !arguments.is_empty()
-                && let Err(error) = self.model.check_generic_kinds(def, &types)
+                && let Err(error) = self.model.check_generic_kinds(def, &types, span)
             {
                 self.errors.push(error);
             }

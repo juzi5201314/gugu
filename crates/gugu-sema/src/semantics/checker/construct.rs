@@ -18,10 +18,13 @@ impl Checker<'_, '_> {
         let target = if parts == ["Self"] {
             scope.get("Self").cloned()
         } else if arguments.len != 0 {
-            match self
-                .model
-                .form_kind(self.module, TyKind::Path(path), &scope, &mut Vec::new())
-            {
+            match self.model.form_kind(
+                self.module,
+                TyKind::Path(path),
+                &self.arena().paths[path.0 as usize].span,
+                &scope,
+                &mut Vec::new(),
+            ) {
                 Ok(ty) => Some(ty),
                 Err(error) => {
                     self.errors.push(error);
@@ -128,7 +131,7 @@ impl Checker<'_, '_> {
                 Ty::Error
             }
             Err(e) => {
-                self.errors.push(e);
+                self.error(e.code(), e.message(), span.clone());
                 Ty::Error
             }
         }

@@ -159,6 +159,7 @@ impl Model<'_> {
         params: &BTreeMap<String, Ty>,
     ) -> Result<TraitRef, Diagnostic> {
         let parts = self.path(module, path);
+        let span = &self.modules[module].arena.paths[path.0 as usize].span;
         let resolved = self.resolve(module, &parts).ok();
         let id = self
             .traits
@@ -168,7 +169,7 @@ impl Model<'_> {
                 Some(def) => Some(def) == resolved,
                 None => parts.len() == 1 && t.name == parts[0],
             })
-            .ok_or_else(|| self.error(module, format!("`{}` 不是 trait", parts.join("."))))?;
+            .ok_or_else(|| self.error_at(span, format!("`{}` 不是 trait", parts.join("."))))?;
         let arena = &self.modules[module].arena;
         let segment = arena.paths[path.0 as usize]
             .segments
@@ -182,7 +183,7 @@ impl Model<'_> {
             .map(|arg| self.form_arg(module, *arg, params, &mut Vec::new()))
             .collect::<Result<Vec<_>, _>>()?;
         if arguments.len() != self.traits.interfaces[id].parameters.len() {
-            return Err(self.error(module, "trait 实参数量不符"));
+            return Err(self.error_at(span, "trait 实参数量不符"));
         }
         Ok(TraitRef { id, arguments })
     }

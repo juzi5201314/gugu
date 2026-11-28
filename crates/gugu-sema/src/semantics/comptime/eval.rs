@@ -385,6 +385,7 @@ impl Model<'_> {
         expr: ExprId,
         stack: &mut Vec<DefRef>,
     ) -> Result<Ty, Diagnostic> {
+        let span = &self.modules[module].arena.exprs[expr.0 as usize].span;
         match self.modules[module].arena.exprs[usize::try_from(expr.0).expect("表达式下标")].kind
         {
             ExprKind::Literal(LitKind::Int { .. }) => Ok(Ty::int()),
@@ -403,7 +404,7 @@ impl Model<'_> {
                 let left = self.constant_type_inner(module, lhs, stack)?;
                 let right = self.constant_type_inner(module, rhs, stack)?;
                 if left != right {
-                    return Err(self.error(module, "常量操作数类型不一致"));
+                    return Err(self.error_at(span, "常量操作数类型不一致"));
                 }
                 Ok(
                     if matches!(
@@ -422,10 +423,14 @@ impl Model<'_> {
                     .and_then(|member| member.definition)
                 {
                     Some(def) => def,
-                    None => self.resolve(module, &self.path(module, path))?,
+                    None => self
+                        .resolve(module, &self.path(module, path))
+                        .map_err(|error| {
+                            Diagnostic::error(error.code(), error.message(), Some(span.clone()))
+                        })?,
                 };
                 if stack.contains(&def) {
-                    return Err(self.error(module, "常量类型推断形成循环"));
+                    return Err(self.error_at(span, "常量类型推断形成循环"));
                 }
                 match self.modules[def.module].arena.items
                     [usize::try_from(def.item.0).expect("项下标")]
@@ -442,7 +447,7 @@ impl Model<'_> {
                         stack.pop();
                         ty
                     }
-                    _ => Err(self.error(module, "端点不是常量")),
+                    _ => Err(self.error_at(span, "端点不是常量")),
                 }
             }
             ExprKind::Intrinsic {
@@ -454,12 +459,15 @@ impl Model<'_> {
             ExprKind::Array(elements) => {
                 let elements = elements.as_slice(&self.modules[module].arena.expr_ids);
                 let Some((&first, rest)) = elements.split_first() else {
-                    return Err(self.error(module, "无法推断空数组常量元素类型"));
+                    return Err(self.error_at(span, "无法推断空数组常量元素类型"));
                 };
                 let element = self.constant_type_inner(module, first, stack)?;
                 for &item in rest {
                     if self.constant_type_inner(module, item, stack)? != element {
-                        return Err(self.error(module, "常量数组元素类型不一致"));
+                        return Err(self.error_at(
+                            &self.modules[module].arena.exprs[item.0 as usize].span,
+                            "常量数组元素类型不一致",
+                        ));
                     }
                 }
                 Ok(Ty::Array(
@@ -484,12 +492,12 @@ impl Model<'_> {
                         }
                         let receiver = self.constant_type_inner(module, base, stack)?;
                         if receiver != Ty::TypeId {
-                            return Err(self.error(module, "无法形成常量调用类型"));
+                            return Err(self.error_at(span, "无法形成常量调用类型"));
                         }
                         match self.name(module, name) {
                             "name" => Ok(Ty::String),
                             "as_int" => Ok(Ty::int()),
-                            _ => Err(self.error(module, "未知 TypeId 方法")),
+                            _ => Err(self.error_at(span, "未知 TypeId 方法")),
                         }
                     }
                     ExprKind::Path(path) => {
@@ -505,18 +513,31 @@ impl Model<'_> {
                         {
                             return Ok(Ty::int());
                         }
-                        let def = self.resolve(module, &segments)?;
-                        let signature = self.value_type(def)?;
+                        let def = self.resolve(module, &segments).map_err(|error| {
+                            Diagnostic::error(
+                                error.code(),
+                                error.message(),
+                                Some(
+                                    self.modules[module].arena.paths[path.0 as usize]
+                                        .span
+                                        .clone(),
+                                ),
+                            )
+                        })?;
+                        let signature = self.value_type_at(
+                            def,
+                            &self.modules[module].arena.paths[path.0 as usize].span,
+                        )?;
                         Ok(signature
                             .signature()
-                            .ok_or_else(|| self.error(module, "常量函数没有签名"))?
+                            .ok_or_else(|| self.error_at(span, "常量函数没有签名"))?
                             .1
                             .clone())
                     }
-                    _ => Err(self.error(module, "无法形成常量调用类型")),
+                    _ => Err(self.error_at(span, "无法形成常量调用类型")),
                 }
             }
-            _ => Err(self.error(module, "无法形成常量类型")),
+            _ => Err(self.error_at(span, "无法形成常量类型")),
         }
     }
 
@@ -538,7 +559,10 @@ impl Model<'_> {
             const_stack,
         )? {
             ConstantValue::Int(value) => Ok(value),
-            _ => Err(self.error(module, "需要整数常量")),
+            _ => Err(self.error_at(
+                &self.modules[module].arena.exprs[expression.0 as usize].span,
+                "需要整数常量",
+            )),
         }
     }
 
@@ -740,7 +764,7 @@ impl Model<'_> {
                         Some(value) => self.value(module, value, state)?,
                         None => match state.lookup(&name, &span)? {
                             Some(value) => value,
-                            None => self.module_const(module, &[&name], state)?,
+                            None => self.module_const(module, &[&name], &field.span, state)?,
                         },
                     };
                     state.alloc(
@@ -1196,16 +1220,19 @@ impl Model<'_> {
         &self,
         module: usize,
         segments: &[&str],
+        span: &crate::Span,
         state: &mut EvalState,
     ) -> EvalResult<ConstantValue> {
         let def = self
             .resolve(module, segments)
-            .map_err(|_| self.error(module, "未解析的编译期名称"))?;
+            .map_err(|_| self.error_at(span, "未解析的编译期名称"))?;
         self.item_const_value(def, state)
     }
 
     fn item_const_value(&self, def: DefRef, state: &mut EvalState) -> EvalResult<ConstantValue> {
-        let span = self.modules[def.module].file.eof_span.clone();
+        let span = self.modules[def.module].arena.items[def.item.0 as usize]
+            .span
+            .clone();
         if state.const_stack.contains(&def) {
             return Err(Diagnostic::error(
                 DiagnosticCode::InvalidDeclaration,
@@ -1739,7 +1766,7 @@ impl Model<'_> {
             }
         }
         let result = self
-            .bind_parameters(def.module, function, arguments, state)
+            .bind_parameters(def.module, function, arguments, span, state)
             .map_err(EvalError::from)
             .and_then(|()| self.value(def.module, body, state));
         state.leave();
@@ -1754,6 +1781,7 @@ impl Model<'_> {
         module: usize,
         function: super::super::super::ast::FnId,
         arguments: &[ConstantValue],
+        span: &crate::Span,
         state: &mut EvalState,
     ) -> Result<(), Diagnostic> {
         let parsed = &self.modules[module];
@@ -1772,11 +1800,11 @@ impl Model<'_> {
                 continue;
             }
             let Some(value) = arguments.get(bound) else {
-                return Err(self.error(module, "comptime 调用实参数量不足"));
+                return Err(self.error_at(span, "comptime 调用实参数量不足"));
             };
             bound += 1;
             let Some(pat) = param.pat else {
-                return Err(self.error(module, "comptime 调用的参数缺少绑定模式"));
+                return Err(self.error_at(&param.span, "comptime 调用的参数缺少绑定模式"));
             };
             let start = state.frames.last().expect("函数参数帧").len();
             self.bind_pattern(module, pat, value, state)?;
@@ -1790,7 +1818,7 @@ impl Model<'_> {
             }
         }
         if bound != arguments.len() {
-            return Err(self.error(module, "comptime 调用实参数量不符"));
+            return Err(self.error_at(span, "comptime 调用实参数量不符"));
         }
         Ok(())
     }

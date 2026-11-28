@@ -45,7 +45,10 @@ impl Model<'_> {
             .find(|(_, n)| n.definition == def)
         {
             if nominal.params.len() != args.len() {
-                return Err(self.error(module, "关联路径的类型实参数量不符"));
+                return Err(self.error_at(
+                    &arena.paths[path.0 as usize].span,
+                    "关联路径的类型实参数量不符",
+                ));
             }
             return Ok(Some(Ty::Named(id, args)));
         }
@@ -57,7 +60,9 @@ impl Model<'_> {
             let mut bindings = BTreeMap::new();
             let generics = generics.as_slice(&self.modules[def.module].arena.generic_params);
             if generics.len() != args.len() {
-                return Err(self.error(module, "类型别名实参数量不符"));
+                return Err(
+                    self.error_at(&arena.paths[path.0 as usize].span, "类型别名实参数量不符")
+                );
             }
             for (generic, ty) in generics.iter().zip(args) {
                 if let GenericParamKind::Type { name, .. } = generic.kind {
@@ -106,7 +111,10 @@ impl Model<'_> {
             .map(|arg| self.form_arg(module, *arg, params, &mut Vec::new()))
             .collect::<Result<Vec<_>, _>>()?;
         if arguments.len() != interface.parameters.len() {
-            return Err(self.error(module, "关联路径的 trait 实参数量不符"));
+            return Err(self.error_at(
+                &arena.paths[path.0 as usize].span,
+                "关联路径的 trait 实参数量不符",
+            ));
         }
         let interface = TraitRef { id, arguments };
         let mut candidates: Vec<Ty> = assumptions
@@ -138,7 +146,10 @@ impl Model<'_> {
         candidates.dedup();
         match candidates.len() {
             1 => Ok(Some((candidates.pop().expect("唯一候选"), Some(interface)))),
-            _ => Err(self.error(module, "trait 限定关联项不能唯一确定 Self")),
+            _ => Err(self.error_at(
+                &arena.paths[path.0 as usize].span,
+                "trait 限定关联项不能唯一确定 Self",
+            )),
         }
     }
     pub(in super::super) fn projected_type(
@@ -231,20 +242,20 @@ impl Model<'_> {
                         &definition.members[name]
                     };
                 matched.insert("Self".into(), base.clone());
-                let projection = self.resolve_type_member(member, &matched, stack)?;
+                let projection = self.resolve_type_member(member, &matched, stack, &node.span)?;
                 candidates.push(projection);
             } else if member.definition.is_some() {
                 if qualified.is_some() {
                     continue;
                 }
                 bindings.insert("Self".into(), base.clone());
-                candidates.push(self.resolve_type_member(member, &bindings, stack)?);
+                candidates.push(self.resolve_type_member(member, &bindings, stack, &node.span)?);
             }
         }
         match candidates.len() {
             0 => Ok(None),
             1 => Ok(candidates.pop()),
-            _ => Err(self.error(module, "关联类型候选不唯一，需要 trait 约束消歧")),
+            _ => Err(self.error_at(&node.span, "关联类型候选不唯一，需要 trait 约束消歧")),
         }
     }
     fn resolve_type_member(
@@ -252,13 +263,14 @@ impl Model<'_> {
         member: &Member,
         bindings: &BTreeMap<String, Ty>,
         stack: &mut Vec<DefRef>,
+        span: &crate::Span,
     ) -> Result<Ty, Diagnostic> {
         if let MemberKind::Type(Some(ty)) = &member.kind {
             return Ok(substitute(ty, bindings));
         }
         let definition = member
             .definition
-            .ok_or_else(|| self.error(0, "关联类型缺少实现"))?;
+            .ok_or_else(|| self.error_at(span, "关联类型缺少实现"))?;
         if stack.contains(&definition) {
             return Err(self.trait_error(definition, "关联类型形成循环"));
         }
@@ -345,7 +357,7 @@ impl Model<'_> {
         match candidates.len() {
             0 => Ok(None),
             1 => Ok(candidates.pop()),
-            _ => Err(self.error(module, "关联常量候选不唯一")),
+            _ => Err(self.error_at(&node.span, "关联常量候选不唯一")),
         }
     }
 }

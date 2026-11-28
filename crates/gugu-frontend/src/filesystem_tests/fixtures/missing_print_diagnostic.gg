@@ -1,0 +1,6 @@
+use std.io.{println}
+struct Point { x: int }
+fn main() {
+    let value = Point { x: 1 }
+    println(value)
+}
