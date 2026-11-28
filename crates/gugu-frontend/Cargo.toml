@@ -9,6 +9,8 @@ description = "Gugu compiler frontend: snapshots, semantics, frozen HIR/GIR and 
 runtime-gc-probes = ["gugu-gir/runtime-gc-probes"]
 # 重负载/端到端用例的显式开关：默认关闭，避免默认套件编译和执行完整编译 fixture。
 slow-tests = ["gugu-runtime-abi/slow-tests", "gugu-gir/slow-tests"]
+# 上层 crate 的回归用例经 dev-dependency 复用分阶段编译入口。
+test-support = []
 
 [dependencies]
 bytes.workspace = true

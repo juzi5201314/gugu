@@ -145,7 +145,7 @@ lint 级别只由 `allow`、`warn`、`deny`、`forbid` 的参数列表决定。`
 
 例：`panic` 必须带此属性。用户写 `panic("x")` 时，`panic` 体内的 `caller()` 得到 `panic("x")` 这一行，而不是 `panic` 定义里的行。若 `foo` 也带 `#[track_caller]` 且体内直接调用 `panic`，则 `caller()` 再往外走到 `foo` 的调用者。`std.process.exit` 同样必须带此属性。
 
-`std.src.file()` / `line()` / `column()` 始终是**该调用表达式在源文件里的物理位置**（1 基；`column` 按该行的 Unicode 标量计），不受 `track_caller` 影响。这些查询按名称解析后的 `std.src` 项识别：直接路径、模块别名和项别名等价，包括常量初始化和源码宏中的早期求值；被本地绑定遮蔽的同名调用不是源位置查询。`caller()` 的执行域限制也不随导入形式改变。
+`std.src.file()` / `line()` / `column()` 始终是**该调用表达式在源文件里的物理位置**（1 基；`column` 按该行的 Unicode 标量计），不受 `track_caller` 影响。这些查询按名称解析后的 `std.src` 项识别：直接路径、模块别名和项别名等价，包括常量初始化和源码宏中的早期求值；被本地绑定遮蔽的同名调用不是源位置查询。同名局部值的读取也按局部绑定处理，不继承被遮蔽项的编译期能力限制。`caller()` 的执行域限制也不随导入形式改变。
 
 `caller()` 的返回类型是 `std.src.Location`：
 

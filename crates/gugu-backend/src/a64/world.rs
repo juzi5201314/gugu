@@ -169,6 +169,72 @@ fn data_pool(bodies: &[Body]) -> Result<BTreeMap<Vec<u8>, (String, u64)>, Error>
     Ok(pool)
 }
 
+fn vtable_definitions(
+    bodies: &[Body],
+    universe: Option<&crate::late::universe::TypeUniverse>,
+) -> Result<Vec<Definition>, Error> {
+    let mut referenced = BTreeSet::new();
+    for body in bodies {
+        for instruction in &body.instructions {
+            if let Op::SymbolAddr(Symbol::Vtable {
+                interface,
+                concrete,
+            }) = instruction.op
+            {
+                referenced.insert((interface, concrete));
+            }
+        }
+    }
+    let mut definitions = Vec::new();
+    for (interface, concrete) in referenced {
+        let universe = universe.ok_or_else(|| fail("A64 vtable requires a type universe"))?;
+        let vtable = universe
+            .vtables
+            .iter()
+            .find(|vtable| {
+                vtable.interface == interface
+                    && universe
+                        .records
+                        .get(vtable.concrete as usize)
+                        .is_some_and(|record| record.key == concrete)
+            })
+            .ok_or_else(|| fail("A64 vtable reference outside the frozen table"))?;
+        let bytes = vtable
+            .methods
+            .len()
+            .checked_mul(8)
+            .ok_or_else(|| fail("A64 vtable size overflow"))?;
+        let pointers = vtable
+            .methods
+            .iter()
+            .enumerate()
+            .map(|(slot, method)| {
+                let instance =
+                    crate::lir::vtable_shim::key(&interface, &concrete, &method.instance);
+                Pointer {
+                    offset: (slot * 8) as u64,
+                    target: super::abi::symbol(&instance),
+                    addend: 0,
+                }
+            })
+            .collect();
+        definitions.push(Definition {
+            symbol: mangle::mangle_symbol(&Symbol::Vtable {
+                interface,
+                concrete,
+            }),
+            align: 8,
+            // A64 ELF 的静态重定位槽目前必须是 file-backed RW data；mach-O 同样接受
+            // 该段。表内容由编译器独占写入，语言层没有可变别名。
+            segment: Segment::Data,
+            content: SectionContent::Data(vec![0; bytes.max(1)]),
+            relocations: vec![],
+            pointers,
+        });
+    }
+    Ok(definitions)
+}
+
 fn body_symbols(
     body: &Body,
     pool: &BTreeMap<Vec<u8>, (String, u64)>,
@@ -264,6 +330,9 @@ fn build_with_catalog(
     let mut definitions = BTreeMap::new();
     for definition in request.definitions {
         insert(&mut definitions, definition.clone())?;
+    }
+    for definition in vtable_definitions(request.bodies, request.universe)? {
+        insert(&mut definitions, definition)?;
     }
     for (bytes, (name, align)) in &pool {
         insert(

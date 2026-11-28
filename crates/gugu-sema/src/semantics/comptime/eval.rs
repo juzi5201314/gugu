@@ -1165,12 +1165,12 @@ impl Model<'_> {
         let span = self.modules[module].arena.exprs[expression.0 as usize]
             .span
             .clone();
-        self.check_capability(module, &segments, &span, state)?;
         if segments.len() == 1
             && let Some(value) = state.lookup(segments[0], &span)?
         {
             return Ok(value);
         }
+        self.check_capability(module, &segments, &span, state)?;
         if let Some(member) = self.constant_member(module, path)? {
             if let MemberKind::Const {
                 value: Some(value), ..

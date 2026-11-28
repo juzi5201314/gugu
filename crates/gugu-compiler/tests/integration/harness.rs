@@ -1,7 +1,9 @@
-use gugu_compiler::{CompileRequest, Compiler, EMBEDDED_ARTIFACTS, TargetName};
+use gugu_compiler::{
+    ActionKind, ActionStatus, CompileRequest, Compiler, EMBEDDED_ARTIFACTS, TargetName,
+};
 
-fn compile(request: CompileRequest) -> gugu_compiler::Compilation {
-    Compiler::with_artifacts(&EMBEDDED_ARTIFACTS).compile(request)
+fn compile_to_lir(request: CompileRequest) -> gugu_compiler::Compilation {
+    Compiler::with_artifacts(&EMBEDDED_ARTIFACTS).compile_to_lir(request)
 }
 
 fn generated(output: &gugu_compiler::Compilation, marker: &str) -> String {
@@ -36,11 +38,13 @@ fn names_table(manifest: &str) -> Vec<String> {
 
 #[test]
 fn test_domain_collects_sorts_and_wires_runner() {
-    let output = compile(CompileRequest::single_file_test(
-        "main.gg",
-        include_str!("fixtures/harness_tests.gg"),
-        TargetName::X86_64Linux,
-    ));
+    let output = Compiler::with_artifacts(&EMBEDDED_ARTIFACTS).compile_full_for_test(
+        CompileRequest::single_file_test(
+            "main.gg",
+            include_str!("../fixtures/harness_tests.gg"),
+            TargetName::X86_64Linux,
+        ),
+    );
     assert!(output.is_success(), "{:?}", output.diagnostics().items());
 
     let manifest = generated(&output, "__gugu_harness");
@@ -84,11 +88,13 @@ fn test_domain_collects_sorts_and_wires_runner() {
 
 #[test]
 fn bench_domain_collects_benches() {
-    let output = compile(CompileRequest::single_file_bench(
-        "bench.gg",
-        include_str!("fixtures/harness_bench.gg"),
-        TargetName::X86_64Linux,
-    ));
+    let output = Compiler::with_artifacts(&EMBEDDED_ARTIFACTS).compile_full_for_test(
+        CompileRequest::single_file_bench(
+            "bench.gg",
+            include_str!("../fixtures/harness_bench.gg"),
+            TargetName::X86_64Linux,
+        ),
+    );
     assert!(output.is_success(), "{:?}", output.diagnostics().items());
     let manifest = generated(&output, "__gugu_harness");
     assert!(manifest.contains("__gugu_bwrap_0"));
@@ -106,12 +112,13 @@ fn bench_domain_collects_benches() {
         "bench 域不得生成 __gugu_doctest_ 模块"
     );
     assert!(output.dump_lir().is_some());
+    assert!(output.image_plan().is_some());
 }
 
 #[test]
 fn non_test_domain_drops_marked_items() {
     // 非测试构建中 #[test]/#[bench] 项按 cfg 规则裁除：不收集、不生成 manifest。
-    let output = compile(CompileRequest::single_file(
+    let output = compile_to_lir(CompileRequest::single_file(
         "main.gg",
         "fn main() {}\n#[test]\nfn skipped() { panic(\"x\") }\n#[bench]\nfn b() {}\n",
         TargetName::X86_64Linux,
@@ -125,50 +132,56 @@ fn non_test_domain_drops_marked_items() {
             .any(|snapshot| snapshot.logical_path().contains("__gugu_")),
         "非 harness 域不得生成 __gugu_ 模块"
     );
+    let stages = output.action_graph().nodes();
+    let build_ir = stages
+        .iter()
+        .position(|stage| stage.kind() == ActionKind::BuildIr)
+        .expect("action graph 必须登记 BuildIr");
+    assert_eq!(stages[build_ir].status(), ActionStatus::Complete);
+    assert!(
+        stages[build_ir + 1..]
+            .iter()
+            .all(|stage| stage.status() == ActionStatus::Skipped)
+    );
+    assert!(output.image_plan().is_none());
+    assert!(output.action_key().is_none());
 }
 
 #[test]
-fn invalid_test_signature_is_a_compile_error() {
-    let output = compile(CompileRequest::single_file_test(
+fn harness_invalid_markers_and_signatures_fail_compile() {
+    let compiler = Compiler::with_artifacts(&EMBEDDED_ARTIFACTS);
+
+    let bad_test = compiler.compile_sema_for_test(CompileRequest::single_file_test(
         "main.gg",
         "#[test]\nfn bad(arg: int) {}\n",
         TargetName::X86_64Linux,
     ));
-    assert!(!output.is_success());
-    let text = format!("{:?}", output.diagnostics().items());
+    assert!(!bad_test.is_success());
+    let text = format!("{:?}", bad_test.diagnostics().items());
     assert!(text.contains("无参数"), "{text}");
-}
 
-#[test]
-fn duplicate_identity_is_a_compile_error() {
-    let output = compile(CompileRequest::single_file_test(
+    let dup = compiler.compile_sema_for_test(CompileRequest::single_file_test(
         "main.gg",
         "#[test]\nfn dup() {}\n#[test]\nfn dup() {}\n",
         TargetName::X86_64Linux,
     ));
-    assert!(!output.is_success());
-    let text = format!("{:?}", output.diagnostics().items());
+    assert!(!dup.is_success());
+    let text = format!("{:?}", dup.diagnostics().items());
     assert!(text.contains("重复的测试/benchmark 身份"), "{text}");
-}
 
-#[test]
-fn non_fn_test_marker_is_a_compile_error() {
-    let output = compile(CompileRequest::single_file_test(
+    let non_fn = compiler.compile_sema_for_test(CompileRequest::single_file_test(
         "main.gg",
         "#[test]\nstruct Marker { x: int }\n",
         TargetName::X86_64Linux,
     ));
-    assert!(!output.is_success());
-}
+    assert!(!non_fn.is_success());
 
-#[test]
-fn invalid_bench_signature_is_a_compile_error() {
-    let output = compile(CompileRequest::single_file_bench(
+    let bad_bench = compiler.compile_sema_for_test(CompileRequest::single_file_bench(
         "bench.gg",
         "#[bench]\nfn bad() {}\n",
         TargetName::X86_64Linux,
     ));
-    assert!(!output.is_success());
-    let text = format!("{:?}", output.diagnostics().items());
+    assert!(!bad_bench.is_success());
+    let text = format!("{:?}", bad_bench.diagnostics().items());
     assert!(text.contains("#[bench] 签名"), "{text}");
 }

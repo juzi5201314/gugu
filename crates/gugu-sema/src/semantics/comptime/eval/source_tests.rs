@@ -141,6 +141,33 @@ fn local_values_shadow_imported_source_queries_during_comptime() {
 }
 
 #[test]
+fn local_values_shadow_imported_caller_in_both_comptime_domains() {
+    with_model(
+        "use std.src.{caller}\nconst N: int = { let caller = 7\n caller }",
+        |model, modules| {
+            let expression = initializer(&modules[1], "N");
+            assert_eq!(
+                model.eval_early_const(1, expression, &Ty::int()).unwrap(),
+                ConstantValue::Int(7)
+            );
+            let queries = QueryEngine::new();
+            assert_eq!(
+                model
+                    .eval_source_macro(
+                        1,
+                        expression,
+                        SourceSlot::Expression,
+                        &ExpandHost { queries: &queries },
+                    )
+                    .unwrap()
+                    .value,
+                ConstantValue::Int(7)
+            );
+        },
+    );
+}
+
+#[test]
 fn imported_caller_keeps_the_same_comptime_capability_boundary() {
     for expression in ["std.src.caller()", "src.caller()", "caller()", "site()"] {
         let source = format!(

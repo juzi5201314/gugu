@@ -436,14 +436,44 @@ impl Builder<'_> {
                     return self.erase_function(value, source_ty, ty);
                 }
                 let source = self.computed_address(value)?;
+                let bytes = self
+                    .layout(source_ty)
+                    .layout
+                    .ok_or_else(|| invalid("dyn 擦除载荷没有具体布局"))?
+                    .size;
+                let payload = if bytes == 0 {
+                    // ZST 没有可观察载荷地址；fat pointer 仍需一个可管理的稳定指针身份。
+                    self.allocate(source_ty, 0, PlacementKind::LocalHeap, None)?
+                } else {
+                    self.allocate(source_ty, bytes, PlacementKind::LocalHeap, None)?
+                };
+                self.copy_memory(payload, source, source_ty)?;
                 let destination = self.temporary(ty)?;
-                let descriptor = self.descriptor(source_ty);
-                let target = self.descriptor(ty);
-                self.runtime(
-                    RuntimeCall::DynamicErase,
-                    &[destination, source, descriptor, target],
+                let concrete = self.layout(source_ty).key;
+                let object = self.layout(ty).key;
+                let root = self
+                    .mono
+                    .instances
+                    .iter()
+                    .flat_map(|instance| &instance.vtable_roots)
+                    .find(|root| {
+                        root.dyn_type == object
+                            && gugu_base::hash::hash_domain("gugu-mono-v1", &root.self_type)
+                                == concrete
+                    })
+                    .ok_or_else(|| invalid("dyn 擦除缺少 mono vtable root"))?;
+                let vtable = self.emit_one(
+                    Op::SymbolAddr(crate::body::Symbol::Vtable {
+                        interface: root.interface,
+                        concrete,
+                    }),
                     &[],
-                )?;
+                    ValueType::pointer(Provenance::Metadata),
+                    Origin::Symbol,
+                );
+                self.store(destination, payload, 8, false);
+                let slot = self.offset(destination, 8);
+                self.store(slot, vtable, 8, false);
                 Ok(Computed::Address {
                     ty,
                     address: destination,
