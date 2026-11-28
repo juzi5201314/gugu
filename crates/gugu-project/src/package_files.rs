@@ -121,10 +121,11 @@ fn collect_directory_files(
         } else if file_type.is_file() {
             let logical = relative
                 .to_str()
-                .ok_or_else(|| invalid_error(&path, "路径不是 UTF-8"))?;
-            validate_file_path(logical)?;
+                .ok_or_else(|| invalid_error(&path, "路径不是 UTF-8"))?
+                .replace(std::path::MAIN_SEPARATOR, "/");
+            validate_file_path(&logical)?;
             let bytes = fs::read(&path).map_err(|error| io_error(&path, error))?;
-            files.insert(logical.replace(std::path::MAIN_SEPARATOR, "/"), bytes);
+            files.insert(logical, bytes);
         } else {
             return Err(invalid_error(&path, "依赖输入包含非普通文件"));
         }
