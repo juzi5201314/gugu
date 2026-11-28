@@ -822,10 +822,10 @@ pub(crate) fn compile_package(
         );
         // test/bench 域覆盖：`gugu test --lib` / `gugu bench --lib` 在对应域下
         // 编译 lib 内部 #[test]/#[bench] 项；对已是该域的 target 是幂等的。
-        request = match domain {
-            RunDomain::Test => request.with_test_domain(),
-            RunDomain::Bench => request.with_bench_domain(),
-            RunDomain::Default => request,
+        request = match (domain, package_target.kind()) {
+            (RunDomain::Test, TargetKind::Lib | TargetKind::Test) => request.with_test_domain(),
+            (RunDomain::Bench, TargetKind::Lib | TargetKind::Test) => request.with_bench_domain(),
+            _ => request,
         };
         if let Some(output) = &build_output {
             request = request

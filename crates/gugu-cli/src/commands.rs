@@ -524,14 +524,14 @@ fn run_test_or_bench(test: bool, args: &[OsString], options: &GlobalArgs) -> i32
         } else if options.all_targets {
             (
                 TargetSelection::All,
-                RunDomain::Default,
-                vec![TargetKind::Test],
+                RunDomain::Test,
+                vec![TargetKind::Lib, TargetKind::Test],
             )
         } else {
             (
                 TargetSelection::Test(options.test.clone()),
-                RunDomain::Default,
-                vec![TargetKind::Test],
+                RunDomain::Test,
+                vec![TargetKind::Lib, TargetKind::Test],
             )
         }
     } else if options.lib {
@@ -543,14 +543,14 @@ fn run_test_or_bench(test: bool, args: &[OsString], options: &GlobalArgs) -> i32
     } else if options.all_targets {
         (
             TargetSelection::All,
-            RunDomain::Default,
-            vec![TargetKind::Bench],
+            RunDomain::Bench,
+            vec![TargetKind::Lib, TargetKind::Test, TargetKind::Bench],
         )
     } else {
         (
             TargetSelection::Bench(options.bench.clone()),
-            RunDomain::Default,
-            vec![TargetKind::Bench],
+            RunDomain::Bench,
+            vec![TargetKind::Lib, TargetKind::Test, TargetKind::Bench],
         )
     };
     compile_and_exec(

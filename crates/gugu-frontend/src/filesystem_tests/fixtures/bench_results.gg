@@ -1,0 +1,9 @@
+use std.test.{Bencher}
+
+#[bench]
+fn measured(b: &Bencher) {
+    let calls = 0
+    b.iter(fn() { calls = calls + 1 })
+    if calls != 2 { panic("固定时钟下每个样本应执行一次预热和一次测量") }
+    b.bytes(64)
+}

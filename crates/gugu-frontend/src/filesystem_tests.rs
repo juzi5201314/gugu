@@ -2,6 +2,7 @@
 mod a64_binding;
 mod a64_image;
 mod array_init;
+mod bench;
 mod collections;
 mod const_generics;
 mod copy;
@@ -202,9 +203,23 @@ fn execute(body: &Body, arguments: &[u64]) -> Vec<u8> {
 #[derive(Debug)]
 enum Boundary<'a> {
     Call(&'a crate::lir::body::CallTarget),
+    Indirect { code: usize },
     Machine(crate::runtime::RuntimeMachineOp),
     Platform(crate::runtime::platform_schema::PlatformOp),
     Storage(&'a Op),
+}
+
+fn call_boundary(call: &crate::lir::body::Call) -> Boundary<'_> {
+    if call.target == crate::lir::body::CallTarget::Indirect {
+        let code = call
+            .parameters
+            .iter()
+            .position(|parameter| parameter.provenance == Some(crate::lir::body::Provenance::Code))
+            .expect("间接调用具有代码车道");
+        Boundary::Indirect { code }
+    } else {
+        Boundary::Call(&call.target)
+    }
 }
 
 type CallHook<'a> = dyn FnMut(Boundary<'_>, &[u64], &mut Vec<u8>) -> Vec<u64> + 'a;
@@ -304,7 +319,7 @@ fn interpret_traced(
                 | Op::PromoteManaged { .. }
                 | Op::RegionTransfer { .. } => continue,
                 Op::Call(ref invoked) => {
-                    let returned = call(Boundary::Call(&invoked.target), &args, memory);
+                    let returned = call(call_boundary(invoked), &args, memory);
                     assert_eq!(returned.len(), instruction.results.len());
                     values[range(&instruction.results)].copy_from_slice(&returned);
                     continue;
@@ -510,7 +525,7 @@ fn interpret_traced(
                 );
                 let saved = memory.len();
                 let returned = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
-                    call(Boundary::Call(&invoked.target), &args, memory)
+                    call(call_boundary(invoked), &args, memory)
                 }));
                 match returned {
                     Ok(returned) => {

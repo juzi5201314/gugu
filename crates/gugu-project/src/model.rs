@@ -42,9 +42,9 @@ pub enum TargetSelection {
     Lib,
     /// 选择一个指定名称的 bin target。
     Bin(Option<String>),
-    /// 选择 test target，可选名称。
+    /// 指定名称时选择 test target，否则选择 lib 与全部 test target。
     Test(Option<String>),
-    /// 选择 bench target，可选名称。
+    /// 指定名称时选择 bench target，否则选择 lib、test 与全部 bench target。
     Bench(Option<String>),
     /// 选择 example target，可选名称。
     Example(Option<String>),
@@ -240,11 +240,21 @@ impl Package {
             TargetSelection::Bin(name) => {
                 self.named_targets(TargetKind::Bin, name.as_deref(), enabled_features)?
             }
-            TargetSelection::Test(name) => {
-                self.named_targets(TargetKind::Test, name.as_deref(), enabled_features)?
+            TargetSelection::Test(None) | TargetSelection::Bench(None) => self
+                .targets
+                .iter()
+                .filter(|target| {
+                    matches!(target.kind, TargetKind::Lib | TargetKind::Test)
+                        || (matches!(selection, TargetSelection::Bench(None))
+                            && target.kind == TargetKind::Bench)
+                })
+                .filter(|target| target.features_enabled(enabled_features))
+                .collect(),
+            TargetSelection::Test(Some(name)) => {
+                self.named_targets(TargetKind::Test, Some(name), enabled_features)?
             }
-            TargetSelection::Bench(name) => {
-                self.named_targets(TargetKind::Bench, name.as_deref(), enabled_features)?
+            TargetSelection::Bench(Some(name)) => {
+                self.named_targets(TargetKind::Bench, Some(name), enabled_features)?
             }
             TargetSelection::Example(name) => {
                 self.named_targets(TargetKind::Example, name.as_deref(), enabled_features)?

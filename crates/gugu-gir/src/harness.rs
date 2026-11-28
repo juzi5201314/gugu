@@ -111,7 +111,7 @@ pub fn apply(
     // 收集顺序确定：按身份排序后生成表。
     cases.sort_by(|left, right| left.identity.cmp(&right.identity));
     benches.sort_by(|left, right| left.identity.cmp(&right.identity));
-    let manifest = manifest_source(&cases, &benches);
+    let manifest = manifest_source(&cases, &benches, cfg.test());
     let module = push_generated(source_map, MANIFEST_PATH, &manifest, cfg)?;
     let entry = module.file.source;
     modules.push(module);
@@ -656,7 +656,7 @@ fn gugu_string(text: &str) -> String {
 }
 
 /// `__gugu_harness` 模块：use 别名 + per-case 包装 + 调度表 + `fn main`。
-fn manifest_source(cases: &[Case], benches: &[Case]) -> String {
+fn manifest_source(cases: &[Case], benches: &[Case], test: bool) -> String {
     let mut out = String::from(
         "//! 测试/bench harness 入口（生成）。\n#![allow(missing_docs)]\nuse std.test.{__run_tests, __run_bench, __synthetic_panic, __bench_run, __report_test_err, BenchSample}\n",
     );
@@ -685,7 +685,7 @@ fn manifest_source(cases: &[Case], benches: &[Case]) -> String {
     }
     for index in 0..benches.len() {
         out.push_str(&format!(
-            "fn __gugu_bwrap_{index}() Result[BenchSample, Panic] = Ok(__bench_run(__gugu_b_{index}))\n"
+            "fn __gugu_bwrap_{index}() &BenchSample {{\n    let sample = __bench_run(__gugu_b_{index})\n    &sample\n}}\n"
         ));
     }
     out.push_str(&format!(
@@ -721,22 +721,26 @@ fn manifest_source(cases: &[Case], benches: &[Case]) -> String {
         benches.len()
     ));
     out.push_str(
-        "pub fn __gugu_bench_spawn(index: uint) Join[Result[BenchSample, Panic]] {\n    match index {\n",
+        "pub fn __gugu_bench_spawn(index: uint) Join[&BenchSample] {\n    match index {\n",
     );
     for index in 0..benches.len() {
         out.push_str(&format!(
             "        {index} => async {{ __gugu_bwrap_{index}() }},\n"
         ));
     }
-    out.push_str("        _ => async { Err(__synthetic_panic()) },\n    }\n}\n");
+    out.push_str("        _ => panic(\"不存在的 benchmark 索引\"),\n    }\n}\n");
     emit_table(
         &mut out,
         "__gugu_bench_name",
         benches.iter().map(|case| case.identity.clone()),
     );
-    out.push_str(
-        "fn main() Result[(), uint] {\n    let failed = __run_tests(__gugu_test_count(), __gugu_test_spawn, __gugu_test_name, __gugu_test_flags, __gugu_test_expect) + __run_bench(__gugu_bench_count(), __gugu_bench_spawn, __gugu_bench_name)\n    if failed == 0 { Ok(()) } else { Err(failed) }\n}\n",
-    );
+    out.push_str("fn main() Result[(), uint] {\n    let failed = ");
+    out.push_str(if test {
+        "__run_tests(__gugu_test_count(), __gugu_test_spawn, __gugu_test_name, __gugu_test_flags, __gugu_test_expect)"
+    } else {
+        "__run_bench(__gugu_bench_count(), __gugu_bench_spawn, __gugu_bench_name)"
+    });
+    out.push_str("\n    if failed == 0 { Ok(()) } else { Err(failed) }\n}\n");
     out
 }
 

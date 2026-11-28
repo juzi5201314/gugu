@@ -49,6 +49,7 @@ pub(super) fn runtime_bodies_for(
 type ParkHook = fn(&mut Harness<'_>, &mut Vec<u8>);
 type NativeHook = fn(&mut Harness<'_>, u64, u64, &mut Vec<u8>);
 type BridgeHook = fn(&mut Harness<'_>, &[u64], &mut Vec<u8>) -> Vec<u64>;
+type CallHook = fn(&mut Harness<'_>, &CallTarget, &[u64], &mut Vec<u8>) -> Option<Vec<u64>>;
 type MachineHook =
     fn(&mut Harness<'_>, crate::runtime::RuntimeMachineOp, &[u64], &mut Vec<u8>) -> Vec<u64>;
 
@@ -60,6 +61,7 @@ pub(super) struct Harness<'a> {
     pub(super) bodies: HashMap<[u8; 32], &'a Body>,
     pub(super) heap: usize,
     sizes: HashMap<[u8; 32], u64>,
+    static_data: HashMap<([u8; 32], u32), u64>,
     pub(super) names: HashMap<[u8; 32], (&'a str, &'a str)>,
     pub(super) globals: HashMap<[u8; 32], u64>,
     pub(super) script: std::collections::VecDeque<(u64, u64, u64)>,
@@ -69,12 +71,14 @@ pub(super) struct Harness<'a> {
     pub(super) park_hook: Option<ParkHook>,
     pub(super) current: u64,
     pub(super) now: u64,
+    pub(super) clock_step: u64,
     pub(super) native_hook: Option<NativeHook>,
     pub(super) bridge_hook: Option<BridgeHook>,
+    pub(super) call_hook: Option<CallHook>,
     pub(super) allocations: HashMap<u64, u64>,
     pub(super) freed: Vec<(u64, u64)>,
     pub(super) machine_hook: Option<MachineHook>,
-    functions: Vec<([u8; 32], bool)>,
+    functions: Vec<[u8; 32]>,
     pub(super) metadata: Option<crate::frontend::gc::GcMetadataBundle>,
     type_section: u64,
     pub(super) type_pools: [u64; 2],
@@ -87,6 +91,7 @@ impl<'a> Harness<'a> {
         memory[..used].fill(0);
         self.heap = 4096;
         self.globals.clear();
+        self.static_data.clear();
         self.script.clear();
         self.calls.clear();
         self.woken.clear();
@@ -183,6 +188,7 @@ impl<'a> Harness<'a> {
                 })
                 .collect(),
             globals: HashMap::new(),
+            static_data: HashMap::new(),
             script: Default::default(),
             calls: vec![],
             woken: vec![],
@@ -190,8 +196,10 @@ impl<'a> Harness<'a> {
             park_hook: None,
             current: 128,
             now: 1000,
+            clock_step: 0,
             native_hook: None,
             bridge_hook: None,
+            call_hook: None,
             scheduled: Vec::new(),
             allocations: HashMap::new(),
             freed: Vec::new(),
@@ -273,307 +281,325 @@ impl<'a> Harness<'a> {
             body,
             args,
             memory,
-            &mut |target, args, memory| match target {
-                Boundary::Call(CallTarget::Instance(instance)) => {
-                    match self.names.get(instance).copied() {
-                        Some(("std/runtime/control.gg", "collect"))
-                            if self.collect_hook.is_some() =>
-                        {
-                            self.collect_hook.unwrap()(self, memory);
-                            return vec![];
-                        }
-                        Some(("std/runtime/roots.gg", "gc_types_section"))
-                            if self.metadata.is_some() =>
-                        {
-                            return vec![self.types(memory)];
-                        }
-                        Some((
-                            "std/runtime/fs_platform.gg",
-                            "raw_allocate" | "control_allocate",
-                        ))
-                        | Some(("std/runtime/native_memory.gg", "allocate")) => {
-                            let at = self.allocate(memory, usize::try_from(args[0]).unwrap());
-                            assert!(self.allocations.insert(at, args[0]).is_none());
-                            return vec![at];
-                        }
-                        Some(("std/runtime/fs_platform.gg", "raw_free" | "control_free"))
-                        | Some(("std/runtime/native_memory.gg", "release")) => {
-                            assert_eq!(self.allocations.remove(&args[0]), Some(args[1]));
-                            self.freed.push((args[0], args[1]));
-                            return vec![];
-                        }
-                        Some(("std/runtime/fs_platform.gg", "ensure_pool")) => return vec![],
-                        Some((
-                            "std/runtime/network_service.gg",
-                            "install" | "install_resolver" | "install_process",
-                        )) => return vec![],
-                        Some((
-                            "std/runtime/net_dispatch.gg",
-                            "install_transport" | "install_timer",
-                        )) => return vec![],
-                        Some(("std/runtime/fs_platform.gg", "await_close")) => {
-                            if word(memory, args[0] + 8) & 8 == 0 {
-                                self.park_hook.expect("关闭调度事件")(self, memory);
+            &mut |target, args, memory| {
+                if let Boundary::Call(call) = target
+                    && let Some(result) = self
+                        .call_hook
+                        .and_then(|hook| hook(self, call, args, memory))
+                {
+                    return result;
+                }
+                match target {
+                    Boundary::Call(CallTarget::Instance(instance)) => {
+                        match self.names.get(instance).copied() {
+                            Some(("std/runtime/control.gg", "collect"))
+                                if self.collect_hook.is_some() =>
+                            {
+                                self.collect_hook.unwrap()(self, memory);
+                                return vec![];
                             }
-                            assert_ne!(word(memory, args[0] + 8) & 8, 0);
-                            return vec![word(memory, args[0] + 88)];
+                            Some(("std/runtime/roots.gg", "gc_types_section"))
+                                if self.metadata.is_some() =>
+                            {
+                                return vec![self.types(memory)];
+                            }
+                            Some((
+                                "std/runtime/fs_platform.gg",
+                                "raw_allocate" | "control_allocate",
+                            ))
+                            | Some(("std/runtime/native_memory.gg", "allocate")) => {
+                                let at = self.allocate(memory, usize::try_from(args[0]).unwrap());
+                                assert!(self.allocations.insert(at, args[0]).is_none());
+                                return vec![at];
+                            }
+                            Some(("std/runtime/fs_platform.gg", "raw_free" | "control_free"))
+                            | Some(("std/runtime/native_memory.gg", "release")) => {
+                                assert_eq!(self.allocations.remove(&args[0]), Some(args[1]));
+                                self.freed.push((args[0], args[1]));
+                                return vec![];
+                            }
+                            Some(("std/runtime/fs_platform.gg", "ensure_pool")) => return vec![],
+                            Some((
+                                "std/runtime/network_service.gg",
+                                "install" | "install_resolver" | "install_process",
+                            )) => return vec![],
+                            Some((
+                                "std/runtime/net_dispatch.gg",
+                                "install_transport" | "install_timer",
+                            )) => return vec![],
+                            Some(("std/runtime/fs_platform.gg", "await_close")) => {
+                                if word(memory, args[0] + 8) & 8 == 0 {
+                                    self.park_hook.expect("关闭调度事件")(self, memory);
+                                }
+                                assert_ne!(word(memory, args[0] + 8) & 8, 0);
+                                return vec![word(memory, args[0] + 88)];
+                            }
+                            Some(("std/runtime/scheduler.gg", "park_current")) => {
+                                self.park_hook.expect("固定调度事件")(self, memory);
+                                return vec![];
+                            }
+                            Some(("std/runtime/scheduler.gg", "ready_hot")) => {
+                                self.woken.push(args[0]);
+                                return vec![];
+                            }
+                            Some(("std/runtime/fs_platform.gg", "enqueue_close")) => {
+                                self.close_requests.push(args.to_vec());
+                                return vec![];
+                            }
+                            Some(("std/runtime/fs_platform.gg", "native_call")) => {
+                                return self.bridge_hook.expect("原生 worker 脚本")(
+                                    self, args, memory,
+                                );
+                            }
+                            _ => {}
                         }
-                        Some(("std/runtime/scheduler.gg", "park_current")) => {
-                            self.park_hook.expect("固定调度事件")(self, memory);
-                            return vec![];
-                        }
-                        Some(("std/runtime/scheduler.gg", "ready_hot")) => {
-                            self.woken.push(args[0]);
-                            return vec![];
-                        }
-                        Some(("std/runtime/fs_platform.gg", "enqueue_close")) => {
-                            self.close_requests.push(args.to_vec());
-                            return vec![];
-                        }
-                        Some(("std/runtime/fs_platform.gg", "native_call")) => {
-                            return self.bridge_hook.expect("原生 worker 脚本")(
-                                self, args, memory,
-                            );
-                        }
-                        _ => {}
+                        let next = self.bodies[instance];
+                        self.run(next, args, memory)
                     }
-                    let next = self.bodies[instance];
-                    self.run(next, args, memory)
-                }
-                Boundary::Machine(crate::runtime::RuntimeMachineOp::CurrentSlot) => {
-                    vec![self.current]
-                }
-                Boundary::Machine(crate::runtime::RuntimeMachineOp::MonotonicNanos) => {
-                    vec![self.now]
-                }
-                Boundary::Machine(crate::runtime::RuntimeMachineOp::ResolverSymbol) => {
-                    vec![args[0] + 100]
-                }
-                Boundary::Machine(
-                    crate::runtime::RuntimeMachineOp::NetCall
-                    | crate::runtime::RuntimeMachineOp::ProcessCall,
-                ) => {
-                    let (op, result, error) = self.script.pop_front().expect("固定平台脚本外调用");
-                    assert_eq!(args[0], op);
-                    let request = args[1];
-                    self.calls.push((
-                        op,
-                        (0..9)
-                            .map(|index| word(memory, request + index * 8))
-                            .collect(),
-                    ));
-                    put(memory, request + 72, result);
-                    put(memory, request + 80, error);
-                    if let Some(hook) = self.native_hook {
-                        hook(self, op, request, memory);
+                    Boundary::Machine(crate::runtime::RuntimeMachineOp::CurrentSlot) => {
+                        vec![self.current]
                     }
-                    vec![result]
-                }
-                Boundary::Storage(Op::SymbolAddr(Symbol::Global { key, bytes, .. })) => {
-                    let heap = &mut self.heap;
-                    let at = *self.globals.entry(*key).or_insert_with(|| {
-                        let at = *heap;
-                        *heap = (at + *bytes as usize + 8).next_multiple_of(16);
-                        assert!(*heap < memory.len());
-                        memory[at..*heap].fill(0);
-                        at as u64
-                    });
-                    vec![at]
-                }
-                Boundary::Storage(Op::SymbolAddr(
-                    symbol @ (Symbol::Instance(_) | Symbol::FunctionAdapter { .. }),
-                )) => {
-                    let entry = match symbol {
-                        Symbol::Instance(key) => (*key, true),
-                        Symbol::FunctionAdapter {
-                            target,
-                            has_environment,
-                        } => (*target, *has_environment),
-                        _ => unreachable!(),
-                    };
-                    let index = self
-                        .functions
-                        .iter()
-                        .position(|value| *value == entry)
-                        .unwrap_or_else(|| {
-                            self.functions.push(entry);
-                            self.functions.len() - 1
+                    Boundary::Machine(crate::runtime::RuntimeMachineOp::MonotonicNanos) => {
+                        let now = self.now;
+                        self.now += self.clock_step;
+                        vec![now]
+                    }
+                    Boundary::Machine(crate::runtime::RuntimeMachineOp::ResolverSymbol) => {
+                        vec![args[0] + 100]
+                    }
+                    Boundary::Machine(
+                        crate::runtime::RuntimeMachineOp::NetCall
+                        | crate::runtime::RuntimeMachineOp::ProcessCall,
+                    ) => {
+                        let (op, result, error) =
+                            self.script.pop_front().expect("固定平台脚本外调用");
+                        assert_eq!(args[0], op);
+                        let request = args[1];
+                        self.calls.push((
+                            op,
+                            (0..9)
+                                .map(|index| word(memory, request + index * 8))
+                                .collect(),
+                        ));
+                        put(memory, request + 72, result);
+                        put(memory, request + 80, error);
+                        if let Some(hook) = self.native_hook {
+                            hook(self, op, request, memory);
+                        }
+                        vec![result]
+                    }
+                    Boundary::Storage(Op::SymbolAddr(Symbol::Global { key, bytes, .. })) => {
+                        let heap = &mut self.heap;
+                        let at = *self.globals.entry(*key).or_insert_with(|| {
+                            let at = *heap;
+                            *heap = (at + *bytes as usize + 8).next_multiple_of(16);
+                            assert!(*heap < memory.len());
+                            memory[at..*heap].fill(0);
+                            at as u64
                         });
-                    vec![u64::try_from(index + 1).unwrap()]
-                }
-                Boundary::Call(CallTarget::Indirect) => {
-                    let (key, environment) = self.functions[usize::try_from(args[0] - 1).unwrap()];
-                    self.run(
-                        self.bodies[&key],
-                        &args[if environment { 1 } else { 2 }..],
-                        memory,
-                    )
-                }
-                Boundary::Call(CallTarget::Runtime(RuntimeCall::Spawn)) => {
-                    let (key, _) = self.functions[usize::try_from(args[0] - 1).unwrap()];
-                    let body = self.bodies[&key];
-                    assert!(body.signature.sret.is_none());
-                    let count = body.params(body.entry).len() - 1;
-                    let lanes = (0..count)
-                        .map(|index| word(memory, args[1] + u64::try_from(index).unwrap() * 8))
-                        .collect();
-                    self.scheduled.push(Some((key, lanes)));
-                    vec![u64::try_from(self.scheduled.len()).unwrap()]
-                }
-                Boundary::Call(CallTarget::Runtime(RuntimeCall::JoinWait)) => {
-                    assert_eq!(args[1], 0, "单位返回没有载荷槽");
-                    let index = usize::try_from(args[0] - 1).unwrap();
-                    if self.scheduled[index].is_some() {
-                        self.run_scheduled(index, memory);
+                        vec![at]
                     }
-                    vec![1]
-                }
-                // `JoinWait` 完成后编译器无条件调用 `join_panic`；解释器调度的协程
-                // 不会 panic（panic 传播即测试失败），因此固定返回 0。
-                Boundary::Call(CallTarget::Runtime(RuntimeCall::JoinPanic)) => vec![0],
-                Boundary::Call(CallTarget::Runtime(RuntimeCall::Panic)) => {
-                    if self.root_frames.is_some() {
-                        std::panic::panic_any(root_trace::InterpretedPanic);
+                    Boundary::Storage(Op::SymbolAddr(
+                        symbol @ (Symbol::Instance(_) | Symbol::FunctionAdapter { .. }),
+                    )) => {
+                        let entry = match symbol {
+                            Symbol::Instance(key) => *key,
+                            Symbol::FunctionAdapter {
+                                target,
+                                has_environment,
+                            } => crate::lir::function_adapter::key(target, *has_environment),
+                            _ => unreachable!(),
+                        };
+                        let index = self
+                            .functions
+                            .iter()
+                            .position(|value| *value == entry)
+                            .unwrap_or_else(|| {
+                                self.functions.push(entry);
+                                self.functions.len() - 1
+                            });
+                        vec![u64::try_from(index + 1).unwrap()]
                     }
-                    let start = usize::try_from(args[0]).unwrap();
-                    let length = usize::try_from(args[1]).unwrap();
-                    let message = String::from_utf8_lossy(&memory[start..start + length]);
-                    panic!(
-                        "Runtime(Panic): {message} ({}:{})",
-                        args[args.len() - 2],
-                        args[args.len() - 1]
-                    );
-                }
-                Boundary::Call(CallTarget::Runtime(RuntimeCall::StringCompare)) => {
-                    self.invoke("std/text.gg", "string_compare", args, memory)
-                }
-                Boundary::Call(CallTarget::Runtime(RuntimeCall::Concat)) => {
-                    let result = self.invoke("std/text.gg", "concat", &args[1..], memory);
-                    for (index, value) in result.into_iter().enumerate() {
-                        put(memory, args[0] + index as u64 * 8, value);
+                    Boundary::Indirect { code } => {
+                        let key = self.functions[usize::try_from(args[code] - 1).unwrap()];
+                        let arguments: Vec<_> = args
+                            .iter()
+                            .enumerate()
+                            .filter_map(|(index, &value)| (index != code).then_some(value))
+                            .collect();
+                        self.run(self.bodies[&key], &arguments, memory)
                     }
-                    vec![]
-                }
-                Boundary::Call(CallTarget::Runtime(RuntimeCall::Utf8Boundary)) => {
-                    self.invoke("std/text.gg", "utf8_boundary", args, memory)
-                }
-                Boundary::Call(CallTarget::Runtime(call))
-                    if self.metadata.is_some()
-                        && matches!(
-                            call,
-                            RuntimeCall::ResourceAcquire
-                                | RuntimeCall::ResourceRelease
-                                | RuntimeCall::ResourceTransfer
-                                | RuntimeCall::ResourceFinalize
-                                | RuntimeCall::ValueCopy
-                                | RuntimeCall::ValuePublish
-                                | RuntimeCall::ValueDrop
-                                | RuntimeCall::ValueForget
-                                | RuntimeCall::ValueTransfer
-                                | RuntimeCall::CowSnapshot
-                        ) =>
-                {
-                    let name = match call {
-                        RuntimeCall::ResourceAcquire => "resource_acquire",
-                        RuntimeCall::ResourceRelease => "resource_release",
-                        RuntimeCall::ResourceTransfer => "resource_transfer",
-                        RuntimeCall::ResourceFinalize => "resource_finalize",
-                        RuntimeCall::ValueCopy => "value_copy",
-                        RuntimeCall::ValuePublish => "value_publish",
-                        RuntimeCall::ValueDrop => "value_drop",
-                        RuntimeCall::ValueForget => "value_forget",
-                        RuntimeCall::ValueTransfer => "value_transfer",
-                        RuntimeCall::CowSnapshot => "cow_snapshot",
-                        _ => unreachable!(),
-                    };
-                    self.invoke("std/runtime/value.gg", name, args, memory)
-                }
-                Boundary::Call(CallTarget::Runtime(
-                    RuntimeCall::ValueTransfer | RuntimeCall::CowSnapshot,
-                )) => {
-                    memory.copy_within(
-                        args[1] as usize..(args[1] + args[2]) as usize,
-                        args[0] as usize,
-                    );
-                    vec![]
-                }
-                Boundary::Call(CallTarget::Runtime(RuntimeCall::ValueRepeat))
-                    if self.metadata.is_some() =>
-                {
-                    self.invoke("std/runtime/heap.gg", "value_repeat", args, memory)
-                }
-                Boundary::Call(CallTarget::Runtime(RuntimeCall::ValueRepeat)) => {
-                    let stride = args[3] / args[2];
-                    for index in 0..args[2] {
-                        memory.copy_within(
-                            args[1] as usize..(args[1] + stride) as usize,
-                            (args[0] + index * stride) as usize,
+                    Boundary::Call(CallTarget::Runtime(RuntimeCall::Spawn)) => {
+                        let key = self.functions[usize::try_from(args[0] - 1).unwrap()];
+                        let body = self.bodies[&key];
+                        assert!(body.signature.sret.is_none());
+                        let count = body.params(body.entry).len() - 1;
+                        let lanes = (0..count)
+                            .map(|index| word(memory, args[1] + u64::try_from(index).unwrap() * 8))
+                            .collect();
+                        self.scheduled.push(Some((key, lanes)));
+                        vec![u64::try_from(self.scheduled.len()).unwrap()]
+                    }
+                    Boundary::Call(CallTarget::Runtime(RuntimeCall::JoinWait)) => {
+                        assert_eq!(args[1], 0, "单位返回没有载荷槽");
+                        let index = usize::try_from(args[0] - 1).unwrap();
+                        if self.scheduled[index].is_some() {
+                            self.run_scheduled(index, memory);
+                        }
+                        vec![1]
+                    }
+                    // `JoinWait` 完成后编译器无条件调用 `join_panic`；解释器调度的协程
+                    // 不会 panic（panic 传播即测试失败），因此固定返回 0。
+                    Boundary::Call(CallTarget::Runtime(RuntimeCall::JoinPanic)) => vec![0],
+                    Boundary::Call(CallTarget::Runtime(RuntimeCall::Panic)) => {
+                        if self.root_frames.is_some() {
+                            std::panic::panic_any(root_trace::InterpretedPanic);
+                        }
+                        let start = usize::try_from(args[0]).unwrap();
+                        let length = usize::try_from(args[1]).unwrap();
+                        let message = String::from_utf8_lossy(&memory[start..start + length]);
+                        panic!(
+                            "Runtime(Panic): {message} ({}:{})",
+                            args[args.len() - 2],
+                            args[args.len() - 1]
                         );
                     }
-                    vec![]
-                }
-                Boundary::Call(CallTarget::Runtime(
-                    RuntimeCall::ValueCopy
-                    | RuntimeCall::ValuePublish
-                    | RuntimeCall::ValueDrop
-                    | RuntimeCall::ValueForget,
-                )) => vec![],
-                Boundary::Storage(Op::SymbolAddr(Symbol::TypeRecords)) => {
-                    vec![self.type_pools[0]]
-                }
-                Boundary::Storage(Op::SymbolAddr(Symbol::TypeNames)) => {
-                    vec![self.type_pools[1]]
-                }
-                Boundary::Storage(Op::SymbolAddr(Symbol::TypeDescriptor(key))) => {
-                    if self.metadata.is_some() {
-                        let base = self.types(memory);
-                        let index = self
-                            .metadata
-                            .as_ref()
-                            .unwrap()
-                            .world
-                            .types
-                            .iter()
-                            .position(|entry| entry.type_key == *key)
-                            .expect("类型已冻结");
-                        vec![
-                            base + crate::runtime::gc_metadata_section::descriptor_offset(
-                                u32::try_from(index).unwrap(),
-                            ),
-                        ]
-                    } else {
-                        vec![self.sizes[key]]
+                    Boundary::Call(CallTarget::Runtime(RuntimeCall::StringCompare)) => {
+                        self.invoke("std/text.gg", "string_compare", args, memory)
                     }
-                }
-                Boundary::Storage(Op::GcAlloc {
-                    descriptor,
-                    placement,
-                    ..
-                }) => {
-                    let at = self.allocate(memory, usize::try_from(args[0]).unwrap());
-                    if self.root_frames.is_some() {
-                        self.gc_objects.insert(at, args[0] as usize);
-                        self.gc_descriptors.insert(at, *descriptor);
+                    Boundary::Call(CallTarget::Runtime(RuntimeCall::Concat)) => {
+                        let result = self.invoke("std/text.gg", "concat", &args[1..], memory);
+                        for (index, value) in result.into_iter().enumerate() {
+                            put(memory, args[0] + index as u64 * 8, value);
+                        }
+                        vec![]
                     }
-                    if *placement == crate::frontend::gir::placement::PlacementKind::Resource {
-                        self.resources.push((at, *descriptor));
+                    Boundary::Call(CallTarget::Runtime(RuntimeCall::Utf8Boundary)) => {
+                        self.invoke("std/text.gg", "utf8_boundary", args, memory)
                     }
-                    vec![at]
+                    Boundary::Call(CallTarget::Runtime(call))
+                        if self.metadata.is_some()
+                            && matches!(
+                                call,
+                                RuntimeCall::ResourceAcquire
+                                    | RuntimeCall::ResourceRelease
+                                    | RuntimeCall::ResourceTransfer
+                                    | RuntimeCall::ResourceFinalize
+                                    | RuntimeCall::ValueCopy
+                                    | RuntimeCall::ValuePublish
+                                    | RuntimeCall::ValueDrop
+                                    | RuntimeCall::ValueForget
+                                    | RuntimeCall::ValueTransfer
+                                    | RuntimeCall::CowSnapshot
+                            ) =>
+                    {
+                        let name = match call {
+                            RuntimeCall::ResourceAcquire => "resource_acquire",
+                            RuntimeCall::ResourceRelease => "resource_release",
+                            RuntimeCall::ResourceTransfer => "resource_transfer",
+                            RuntimeCall::ResourceFinalize => "resource_finalize",
+                            RuntimeCall::ValueCopy => "value_copy",
+                            RuntimeCall::ValuePublish => "value_publish",
+                            RuntimeCall::ValueDrop => "value_drop",
+                            RuntimeCall::ValueForget => "value_forget",
+                            RuntimeCall::ValueTransfer => "value_transfer",
+                            RuntimeCall::CowSnapshot => "cow_snapshot",
+                            _ => unreachable!(),
+                        };
+                        self.invoke("std/runtime/value.gg", name, args, memory)
+                    }
+                    Boundary::Call(CallTarget::Runtime(
+                        RuntimeCall::ValueTransfer | RuntimeCall::CowSnapshot,
+                    )) => {
+                        memory.copy_within(
+                            args[1] as usize..(args[1] + args[2]) as usize,
+                            args[0] as usize,
+                        );
+                        vec![]
+                    }
+                    Boundary::Call(CallTarget::Runtime(RuntimeCall::ValueRepeat))
+                        if self.metadata.is_some() =>
+                    {
+                        self.invoke("std/runtime/heap.gg", "value_repeat", args, memory)
+                    }
+                    Boundary::Call(CallTarget::Runtime(RuntimeCall::ValueRepeat)) => {
+                        let stride = args[3] / args[2];
+                        for index in 0..args[2] {
+                            memory.copy_within(
+                                args[1] as usize..(args[1] + stride) as usize,
+                                (args[0] + index * stride) as usize,
+                            );
+                        }
+                        vec![]
+                    }
+                    Boundary::Call(CallTarget::Runtime(
+                        RuntimeCall::ValueCopy
+                        | RuntimeCall::ValuePublish
+                        | RuntimeCall::ValueDrop
+                        | RuntimeCall::ValueForget,
+                    )) => vec![],
+                    Boundary::Storage(Op::SymbolAddr(Symbol::TypeRecords)) => {
+                        vec![self.type_pools[0]]
+                    }
+                    Boundary::Storage(Op::SymbolAddr(Symbol::TypeNames)) => {
+                        vec![self.type_pools[1]]
+                    }
+                    Boundary::Storage(Op::SymbolAddr(Symbol::TypeDescriptor(key))) => {
+                        if self.metadata.is_some() {
+                            let base = self.types(memory);
+                            let index = self
+                                .metadata
+                                .as_ref()
+                                .unwrap()
+                                .world
+                                .types
+                                .iter()
+                                .position(|entry| entry.type_key == *key)
+                                .expect("类型已冻结");
+                            vec![
+                                base + crate::runtime::gc_metadata_section::descriptor_offset(
+                                    u32::try_from(index).unwrap(),
+                                ),
+                            ]
+                        } else {
+                            vec![self.sizes[key]]
+                        }
+                    }
+                    Boundary::Storage(Op::GcAlloc {
+                        descriptor,
+                        placement,
+                        ..
+                    }) => {
+                        let at = self.allocate(memory, usize::try_from(args[0]).unwrap());
+                        if self.root_frames.is_some() {
+                            self.gc_objects.insert(at, args[0] as usize);
+                            self.gc_descriptors.insert(at, *descriptor);
+                        }
+                        if *placement == crate::frontend::gir::placement::PlacementKind::Resource {
+                            self.resources.push((at, *descriptor));
+                        }
+                        vec![at]
+                    }
+                    Boundary::Storage(Op::RegionAlloc { .. }) => {
+                        vec![self.allocate(memory, usize::try_from(args[0]).unwrap())]
+                    }
+                    Boundary::Storage(Op::GcWriteBarrier { .. }) => vec![],
+                    Boundary::Storage(Op::SymbolAddr(Symbol::Data(index))) => {
+                        let key = (body.instance, *index);
+                        if let Some(&at) = self.static_data.get(&key) {
+                            return vec![at];
+                        }
+                        let data = &body.data[*index as usize].bytes;
+                        let at = self.allocate(memory, data.len()) as usize;
+                        memory[at..at + data.len()].copy_from_slice(data);
+                        self.static_data.insert(key, at as u64);
+                        vec![at as u64]
+                    }
+                    Boundary::Machine(op) => {
+                        self.machine_hook.expect("固定机器边界脚本")(self, op, args, memory)
+                    }
+                    other => panic!("地址函数不应跨越未登记边界 {other:?}"),
                 }
-                Boundary::Storage(Op::RegionAlloc { .. }) => {
-                    vec![self.allocate(memory, usize::try_from(args[0]).unwrap())]
-                }
-                Boundary::Storage(Op::GcWriteBarrier { .. }) => vec![],
-                Boundary::Storage(Op::SymbolAddr(Symbol::Data(index))) => {
-                    let data = &body.data[*index as usize].bytes;
-                    let at = self.allocate(memory, data.len()) as usize;
-                    memory[at..at + data.len()].copy_from_slice(data);
-                    vec![at as u64]
-                }
-                Boundary::Machine(op) => {
-                    self.machine_hook.expect("固定机器边界脚本")(self, op, args, memory)
-                }
-                other => panic!("地址函数不应跨越未登记边界 {other:?}"),
             },
             8192,
             frames,
@@ -587,6 +613,7 @@ impl<'a> Harness<'a> {
         memory: &mut Vec<u8>,
     ) -> Vec<u64> {
         self.heap = 4096;
+        self.static_data.clear();
         memory[128..128 + text.len()].copy_from_slice(text.as_bytes());
         memory[64..72].copy_from_slice(&128u64.to_le_bytes());
         memory[72..80].copy_from_slice(&(text.len() as u64).to_le_bytes());

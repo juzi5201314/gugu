@@ -406,7 +406,7 @@ pub fn __run_tests(
 
 fn string_len(value: string) int = sb(value).len()
 
-fn report_bench(nm: string, sample: BenchSample) {
+fn report_bench(nm: string, sample: &BenchSample) {
     write_str(1, "bench ")
     write_str(1, nm)
     write_str(1, " ... samples=")
@@ -434,7 +434,7 @@ fn report_bench(nm: string, sample: BenchSample) {
 /// 成功行只在用例确认无失败归属后打印，不会出现成功与 FAILED 同时输出。
 pub fn __run_bench(
     count: uint,
-    spawn: fn(uint) Join[Result[BenchSample, Panic]],
+    spawn: fn(uint) Join[&BenchSample],
     name: fn(uint) string,
 ) uint {
     let failures: uint = uint(0)
@@ -447,14 +447,10 @@ pub fn __run_bench(
         let join = spawn(id)
         subtree_group_attach(uint(0))
         let panicked = false
-        let returned_err = false
         let panic_handle: uint = uint(0)
-        let got: Option[BenchSample] = None
+        let got: Option[&BenchSample] = None
         match join.wait() {
-            Ok(inner) => match inner {
-                Ok(sample) => { got = Some(sample) },
-                Err(_) => { returned_err = true },
-            },
+            Ok(sample) => { got = Some(sample) },
             Err(p) => {
                 panicked = true
                 panic_handle = unsafe { std.mem.transmute[Panic, uint](p) }
@@ -476,7 +472,6 @@ pub fn __run_bench(
             write_str(1, nm)
             write_str(1, " ... FAILED\n")
             if panicked { panic_message(panic_handle) }
-            if returned_err { write_str(1, "    returned Err\n") }
             if descendants != uint(0) {
                 write_str(1, "    未处理的分离协程 panic: ")
                 write_uint(1, descendants)

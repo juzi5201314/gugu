@@ -114,11 +114,11 @@ runtime 契约签名的记录目录不计入 executable mono/GIR/LIR body 数量
 
 ### `gugu test`
 
-编译并运行 test target。默认收集全部 test target；`--test <name>` 只运行该 target；`--lib` 在 test 域下编译 lib target（`cfg(test)` 生效、生成测试 harness 入口）并运行其内部测试；`--all-targets` 编译所有 target 但只执行 test 产物。`-- <args>` 传给测试 harness。可执行镜像只能在宿主目标上运行，`--target` 非宿主时按用法错误拒绝。
+编译并运行测试。默认在 test 域下收集 lib 与全部 test target；`--test <name>` 只运行该 test target；`--lib` 只编译并运行库内测试。`cfg(test)` 生效，编译器生成测试 harness 入口，库源码不要求 `main`。`--all-targets` 编译所有 target，但只执行 lib 与 test 的测试产物。`-- <args>` 传给测试 harness。可执行镜像只能在宿主目标上运行，`--target` 非宿主时按用法错误拒绝。
 
 ### `gugu bench`
 
-编译并运行 bench target。target 选择规则同 `test`：`--bench <name>` 选择单个 bench target，`--lib` 在 bench 域下编译 lib target，`--all-targets` 只执行 bench 产物。
+编译并运行 benchmark。默认在 bench 域下收集 lib、test 与 bench target 的 `#[bench]`；`--bench <name>` 选择单个 bench target，`--lib` 只编译并运行库内 benchmark，`--all-targets` 编译所有 target，但只执行 lib、test 与 bench 的 benchmark 产物。bench 域不运行 `#[test]` 或文档测试。`harness = false` 的 bench 保留普通 `main` 入口。
 
 ### `gugu fmt`
 

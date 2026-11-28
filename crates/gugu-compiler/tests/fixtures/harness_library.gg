@@ -1,0 +1,10 @@
+use std.test.{Bencher}
+
+/// 库函数不提供用户 main。
+pub fn answer() int = 42
+
+#[test]
+fn library_test() { std.test.assert(answer() == 42) }
+
+#[bench]
+fn library_bench(b: &Bencher) { b.iter(fn() { _ = answer() }) }

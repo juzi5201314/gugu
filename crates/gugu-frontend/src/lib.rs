@@ -149,8 +149,16 @@ impl CompileRequest {
     /// 用于 `gugu test --lib`：lib target 自身不是 `[[test]]`，但可以在 test 域下
     /// 编译其内部 `#[test]` 项并生成可执行测试镜像。对非 project 输入无作用。
     pub fn with_test_domain(mut self) -> Self {
-        if let CompileInput::Project { test, .. } = &mut self.input {
+        if let CompileInput::Project {
+            test,
+            bench,
+            require_main,
+            ..
+        } = &mut self.input
+        {
             *test = true;
+            *bench = false;
+            *require_main = false;
         }
         self
     }
@@ -159,13 +167,16 @@ impl CompileRequest {
     /// 用于 `gugu bench --lib`；对非 project 输入无作用。
     pub fn with_bench_domain(mut self) -> Self {
         if let CompileInput::Project {
+            test,
             bench,
             bench_harness,
+            require_main,
             ..
         } = &mut self.input
         {
+            *test = false;
             *bench = true;
-            *bench_harness = true;
+            *require_main = !*bench_harness;
         }
         self
     }

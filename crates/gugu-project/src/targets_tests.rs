@@ -61,6 +61,29 @@ fn discovers_single_package_targets() {
             .iter()
             .all(|target| { matches!(target.kind(), TargetKind::Lib | TargetKind::Bin) })
     );
+    for (selection, expected) in [
+        (
+            TargetSelection::Test(None),
+            vec![TargetKind::Lib, TargetKind::Test],
+        ),
+        (
+            TargetSelection::Bench(None),
+            vec![TargetKind::Lib, TargetKind::Test, TargetKind::Bench],
+        ),
+        (
+            TargetSelection::Bench(Some("perf".to_owned())),
+            vec![TargetKind::Bench],
+        ),
+    ] {
+        let selected = current.select_targets(&selection).unwrap();
+        assert_eq!(
+            selected
+                .iter()
+                .map(|target| target.kind())
+                .collect::<Vec<_>>(),
+            expected
+        );
+    }
 }
 
 #[test]

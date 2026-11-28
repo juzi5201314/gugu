@@ -65,7 +65,7 @@ fn test_domain_collects_sorts_and_wires_runner() {
     assert!(manifest.contains("__gugu_test_expect"));
     assert!(manifest.contains("__synthetic_panic"));
     assert!(manifest.contains("__run_tests"));
-    assert!(manifest.contains("__run_bench"));
+    assert!(!manifest.contains("+ __run_bench("));
 
     // doctest 模块生成：gugu 围栏包装为测试，独立程序围栏保留 fn main 重命名。
     let doctest = generated(&output, "__gugu_doctest_");
@@ -101,6 +101,8 @@ fn bench_domain_collects_benches() {
     assert!(manifest.contains("__gugu_bwrap_1"));
     assert!(manifest.contains("__bench_run"));
     assert!(manifest.contains("__gugu_bench_spawn"));
+    assert!(manifest.contains("let failed = __run_bench("));
+    assert!(!manifest.contains("let failed = __run_tests("));
     // bench 域不生成 doctest 模块：fixture 带 gugu 围栏时 `#[test]` 项会被裁除，
     // manifest 继续引用它们就会构建失败（回归）。
     assert!(
@@ -113,6 +115,63 @@ fn bench_domain_collects_benches() {
     );
     assert!(output.dump_lir().is_some());
     assert!(output.image_plan().is_some());
+}
+
+#[test]
+fn project_library_and_test_targets_use_the_requested_harness_domain() {
+    use gugu_compiler::{Package, Target, TargetKind};
+
+    let directory =
+        std::env::temp_dir().join(format!("gugu-harness-domains-{}", std::process::id()));
+    std::fs::create_dir_all(&directory).unwrap();
+    let root = directory.as_path();
+    let entry = root.join("lib.gg");
+    std::fs::write(&entry, include_str!("../fixtures/harness_library.gg")).unwrap();
+    let package = Package::new(
+        root.to_path_buf(),
+        root.join("gugu.toml"),
+        None,
+        "library".to_owned(),
+        "0.1.0".to_owned(),
+        vec![],
+        vec![],
+    );
+    let compiler = Compiler::with_artifacts(&EMBEDDED_ARTIFACTS);
+    for (kind, test) in [
+        (TargetKind::Lib, true),
+        (TargetKind::Lib, false),
+        (TargetKind::Test, false),
+    ] {
+        let target = Target::new(
+            kind,
+            "library".to_owned(),
+            entry.clone(),
+            root.to_path_buf(),
+            vec![],
+            true,
+        );
+        let request = CompileRequest::project_target(
+            &package,
+            &target,
+            "library",
+            TargetName::X86_64Linux,
+            vec![],
+            Default::default(),
+        );
+        let request = if test {
+            request.with_test_domain()
+        } else {
+            request.with_bench_domain()
+        };
+        let output = compiler.compile_sema_for_test(request);
+        assert!(output.is_success(), "{:?}", output.diagnostics().items());
+        let manifest = generated(&output, "__gugu_harness");
+        assert_eq!(manifest.contains("library_test as"), test);
+        assert_eq!(manifest.contains("library_bench as"), !test);
+        assert_eq!(manifest.contains("let failed = __run_tests("), test);
+        assert_eq!(manifest.contains("let failed = __run_bench("), !test);
+    }
+    std::fs::remove_dir_all(directory).unwrap();
 }
 
 #[test]
