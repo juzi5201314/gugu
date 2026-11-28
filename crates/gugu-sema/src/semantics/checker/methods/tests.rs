@@ -83,6 +83,30 @@ fn explicit_constructor_rejects_missing_or_extra_generic_arguments() {
 }
 
 #[test]
+fn qualified_result_variant_names_keep_their_enum_identity() {
+    let errors = check(
+        "enum Res { Ok(int), Err(string) }\n\
+         fn main() { let r = Res::Ok(1)\n let e = Res::Err(\"bad\")\n\
+         let result: Result[int, string] = Result::Ok(2)\n\
+         match r { Res::Ok(value) => { let n: int = value }, Res::Err(error) => {} }\n\
+         _ = e\n _ = result }",
+    );
+    assert!(errors.is_empty(), "{errors:?}");
+    let source = "enum Res { Ok(int), Err(string) }\nfn main() { _ = Res::Ok(\"bad\") }";
+    let errors = check(source);
+    let error = errors
+        .iter()
+        .find(|error| error.code() == DiagnosticCode::InvalidExpression)
+        .unwrap_or_else(|| panic!("{errors:?}"));
+    assert_eq!(error.message(), "类型不一致：string 与 int");
+    let span = error.span().expect("错误构造参数必须有源码范围");
+    let argument = "\"bad\"";
+    let start = source.find(argument).unwrap();
+    assert_eq!(span.start() as usize, start);
+    assert_eq!(span.end() as usize, start + argument.len());
+}
+
+#[test]
 fn inferred_inherent_impl_bounds_are_checked_after_receiver_inference() {
     let declaration = "trait Key {}\nimpl Key for int {}\n\
         struct Map[K, V] {}\nimpl[K: Key, V] Map[K, V] {\n\
