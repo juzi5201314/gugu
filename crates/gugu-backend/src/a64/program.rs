@@ -5,10 +5,10 @@
 //! Mach-O `link_entry` 或 ELF `link_entry(_dynamic)` 出完整镜像。
 
 use super::{
-    definitions::{runtime_definitions, runtime_imports},
+    definitions::{linux_import_definition, runtime_definitions, runtime_imports},
     elf::{self, DynamicLink, Import, LinuxEntry, LinuxRuntime},
     foreign::Platform,
-    fragments::linux_import_slot_symbol,
+    fragments::{linux_import_slot_symbol, linux_import_stub_symbol},
     glue::{ForeignBindings, RuntimeBindings},
     macho::{self, DarwinEntry, DarwinRuntime},
     runtime::Catalog,
@@ -122,7 +122,7 @@ fn bindings() -> RuntimeBindings {
 }
 
 fn assemble(request: &ProgramRequest<'_>) -> Result<World, Error> {
-    let definitions = runtime_definitions(request.platform)
+    let mut definitions = runtime_definitions(request.platform)
         .into_iter()
         .chain(storage(request.cage_bytes))
         .collect::<Vec<_>>();
@@ -132,6 +132,21 @@ fn assemble(request: &ProgramRequest<'_>) -> Result<World, Error> {
     for import in request.imports {
         if !imports.iter().any(|known| known.name == import.name) {
             imports.push(import.clone());
+        }
+    }
+    if request.platform == Platform::Linux {
+        for import in &imports {
+            if import.kind != crate::NativeImportKind::Function {
+                continue;
+            }
+            let stub = linux_import_stub_symbol(&import.name);
+            if definitions
+                .iter()
+                .any(|definition| definition.symbol == stub)
+            {
+                continue;
+            }
+            definitions.extend(linux_import_definition(&import.name));
         }
     }
     let mut world = build_runtime(
@@ -246,9 +261,15 @@ pub fn build(request: &ProgramRequest<'_>) -> Result<Program, Error> {
 
 fn linux_image(world: &World, request: &ProgramRequest<'_>) -> Result<Vec<u8>, Error> {
     let mut imports = vec![];
-    for native in runtime_imports(Platform::Linux) {
+    for native in &world.imports {
+        if native.kind != crate::NativeImportKind::Function {
+            continue;
+        }
         let slot = symbol(world, &linux_import_slot_symbol(&native.name))?;
-        imports.push(Import { native, slot });
+        imports.push(Import {
+            native: native.clone(),
+            slot,
+        });
     }
     let dynamic = DynamicLink {
         interpreter: request.interpreter.into(),

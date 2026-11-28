@@ -45,6 +45,7 @@ pub use linux_resolver::{
     linux_resolver_symbol,
 };
 pub use linux_signal::linux_signal_dispatch;
+pub(crate) use linux_vm::{LINUX_RESERVE_CURSOR, LINUX_RESERVE_START};
 pub use linux_vm::{linux_page_size, linux_vm};
 pub use native::{
     cage_control, callback_file_worker, darwin_environment_symbol, darwin_fs_poll, darwin_fs_start,

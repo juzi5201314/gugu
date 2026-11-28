@@ -554,6 +554,8 @@ slab以 64 KiB页按 64、128、256、512、1024、2048、4096 byte class管理�
 
 地址到 arena descriptor 使用四级 radix page map，按低 48-bit canonical地址的 4 KiB page number每 9 bit索引一层；节点是 512 个原子指针的 4 KiB页并按需分配。managed heap mapping必须满足 `base + len <= 0x0000_8000_0000_0000`；LA57宿主也只能接受该范围，OS返回更高地址时 unmap并重试，耗尽后进入 `OutOfMemory`。managed/interior-pointer热路径固定做四次稠密索引，不使用全局 `HashMap` 或区间树。独立 large/pinned mapping的叶项直接指向唯一 descriptor。
 
+AArch64 Linux 的 VM 预约复用 `CAGE_CANONICAL_LIMIT` 作为上界：平台数据段中的一个 8 字节原子游标从 4 GiB 起分配 mmap hint，步长为原始预约长度向 64 KiB 上取整，以覆盖 4/16/64 KiB 原生页；跨过上界时回绕到起点。hint 用 relaxed 独占读写推进，不承担映射所有权或其他数据发布。实际所有权仍由普通 mmap 返回值决定，禁止 MAP_FIXED；原始范围通过非零与完整上界检查后才修剪。超界回包每次释放后重试，单次预约最多选择 16 次候选地址，独占存储竞争失败也消耗此预算；耗尽返回 -ENOMEM，系统调用错误原样返回。回绕允许重新利用已经释放的低地址，不引入永久占用的虚址池。
+
 解析 `HeapInterior` 时先通过 radix map找 descriptor；独立 large/pinned mapping直接用其 payload起点验证。普通 arena在当前 4 KiB页的 start-bitmap范围向前找最近 start bit；本页没有或该对象未覆盖目标地址时使用 `page_covering_object`。找到 header后 checked验证 `payload <= ptr < payload + payload_size`。一页只有 256 个 granule、4 个 `u64` bitmap word，因此最多扫描 4 个 word。
 
 每个 logical processor从全局 nursery一次取得 8 个 block组成的 256 KiB本地 span，但 bump cursor/limit始终只覆盖当前可用 line run；对象不得越过 block。run耗尽时先在本地 span的 line表推进，无需全局同步；8 个 block用完才 refill。old allocation同样从 line表选择连续空 line，不能退化为不看 Immix line的整段 bump。含 resource、需要 pin、独立 large或高对齐请求绕过 nursery。2 MiB/32 KiB/128 byte/16 byte与 8-block span的关系写入同一 `HeapLayout`常量并逐项断言。

@@ -36,6 +36,34 @@ fn dynamic_tags(image: &[u8], offset: usize, bytes: usize) -> BTreeMap<u64, u64>
     tags
 }
 
+fn dynamic_string(image: &[u8], strings: u64, offset: u64) -> &str {
+    let start = (strings + offset) as usize;
+    let end = image[start..].iter().position(|byte| *byte == 0).unwrap();
+    std::str::from_utf8(&image[start..start + end]).unwrap()
+}
+
+fn linux_function_imports<'a>(
+    image: &'a [u8],
+    tags: &BTreeMap<u64, u64>,
+) -> BTreeMap<&'a str, u64> {
+    assert_eq!(tags[&9], 24);
+    assert_eq!(tags[&11], 24);
+    let mut imports = BTreeMap::new();
+    for at in (tags[&7]..tags[&7] + tags[&8]).step_by(24) {
+        let info = u64_at(image, at as usize + 8);
+        if info as u32 != 1025 {
+            continue;
+        }
+        let symbol = (tags[&6] + (info >> 32) * 24) as usize;
+        assert_eq!(image[symbol + 4], 0x12, "GLOBAL/FUNC 导入");
+        let name = u32::from_le_bytes(image[symbol..symbol + 4].try_into().unwrap());
+        let name = dynamic_string(image, tags[&5], u64::from(name));
+        assert!(imports.insert(name, u64_at(image, at as usize)).is_none());
+        assert_eq!(u64_at(image, at as usize + 16), 0);
+    }
+    imports
+}
+
 /// rt0 参数块以字 0（BIAS_BASELINE）自指、字 `PAYLOAD_LEN` 记载荷长度——据此定位。
 fn linux_params(image: &[u8]) -> usize {
     (0..image.len() - rt0_params::WORDS * 8)
@@ -359,4 +387,52 @@ fn linux_program_image_links_the_full_startup_contract() {
         payload_field(image, payload, offset_of!(Rt0Payload, stackmap_len)),
         stackmap.content.size() - world.maps.offset
     );
+}
+
+#[test]
+fn linux_function_imports_relocate_user_slots_and_preserve_libraries() {
+    let (bodies, catalog) = fixture("aarch64-linux");
+    let imports = [
+        crate::NativeImport::function("libc.so.6", "getpid"),
+        crate::NativeImport::function("libprobe.so", "probe_leaf"),
+        crate::NativeImport::function("libc.so.6", "getaddrinfo"),
+    ];
+    let program = program::build(&program::ProgramRequest {
+        bodies,
+        entry: ENTRY,
+        platform: foreign::Platform::Linux,
+        catalog: &catalog,
+        gc_types: &[],
+        gc_meta: &[],
+        interpreter: "/lib/ld-linux-aarch64.so.1",
+        cage_bytes: 0,
+        identifier: "",
+        universe: None,
+        imports: &imports,
+    })
+    .unwrap();
+    let image = &program.image;
+    let (_, dynamic, bytes) = phdrs(image)
+        .into_iter()
+        .find(|header| header.0 == 2)
+        .unwrap();
+    let tags = dynamic_tags(image, dynamic as usize, bytes as usize);
+    let observed = linux_function_imports(image, &tags);
+    assert_eq!(observed.len(), program.world.imports.len());
+    let payload = program.world.symbols[program::PAYLOAD];
+    let payload_va = u64_at(image, linux_params(image) + rt0_params::PAYLOAD_VA * 8);
+    for import in &imports {
+        let slot = program.world.symbols[&fragments::linux_import_slot_symbol(&import.name)];
+        assert_eq!(slot.section, payload.section);
+        assert_eq!(
+            observed[import.name.as_str()],
+            payload_va - payload.offset + slot.offset
+        );
+    }
+    let libraries = (dynamic..dynamic + bytes)
+        .step_by(16)
+        .filter(|at| u64_at(image, *at as usize) == 1)
+        .map(|at| dynamic_string(image, tags[&5], u64_at(image, at as usize + 8)))
+        .collect::<Vec<_>>();
+    assert_eq!(libraries, ["libc.so.6", "libprobe.so"]);
 }

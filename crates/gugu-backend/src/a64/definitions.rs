@@ -145,6 +145,16 @@ pub fn runtime_definitions(platform: Platform) -> Vec<Definition> {
     match platform {
         Platform::Linux => definitions.extend(
             [
+                Definition {
+                    symbol: fragments::LINUX_RESERVE_CURSOR.into(),
+                    align: 8,
+                    segment: Segment::Data,
+                    content: SectionContent::Data(
+                        fragments::LINUX_RESERVE_START.to_le_bytes().to_vec(),
+                    ),
+                    relocations: vec![],
+                    pointers: vec![],
+                },
                 Definition::fragment(rt("fs_native_worker"), fragments::linux_fd_dispatch(true)),
                 Definition::fragment(rt("fd_dispatch"), fragments::linux_fd_dispatch(false)),
                 Definition::fragment(rt("net_call"), fragments::linux_net_dispatch()),
@@ -202,23 +212,26 @@ pub fn runtime_definitions(platform: Platform) -> Vec<Definition> {
 pub fn linux_import_definitions() -> Vec<Definition> {
     LINUX_C_IMPORTS
         .into_iter()
-        .flat_map(|name| {
-            [
-                Definition::fragment(
-                    fragments::linux_import_stub_symbol(name),
-                    fragments::linux_import_stub(name),
-                ),
-                Definition {
-                    symbol: fragments::linux_import_slot_symbol(name),
-                    align: 8,
-                    segment: Segment::Data,
-                    content: SectionContent::Data(vec![0; 8]),
-                    relocations: vec![],
-                    pointers: vec![],
-                },
-            ]
-        })
+        .flat_map(linux_import_definition)
         .collect()
+}
+
+/// 内建与用户函数导入共用同一份 GOT 槽和调用桩布局。
+pub(crate) fn linux_import_definition(name: &str) -> [Definition; 2] {
+    [
+        Definition::fragment(
+            fragments::linux_import_stub_symbol(name),
+            fragments::linux_import_stub(name),
+        ),
+        Definition {
+            symbol: fragments::linux_import_slot_symbol(name),
+            align: 8,
+            segment: Segment::Data,
+            content: SectionContent::Data(vec![0; 8]),
+            relocations: vec![],
+            pointers: vec![],
+        },
+    ]
 }
 
 /// 片段声明的原生导入；Darwin 全部经 libSystem（去重），Linux 是 resolver/工作线程的 libc 面。

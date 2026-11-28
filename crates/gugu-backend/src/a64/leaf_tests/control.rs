@@ -221,11 +221,12 @@ fn invoke_unwind_landing_enters_edge_copy_block() {
             machine::Item::Call { landing, .. } => *landing,
             _ => None,
         });
-    assert_eq!(landing.map(|(target, _)| target), Some(unwind_edge_block));
+    assert_eq!(landing, Some((unwind_edge_block, unwind_target as u32)));
     assert!(
         function.blocks[unwind_edge_block as usize]
             .items
             .iter()
-            .any(|site| matches!(site.item, machine::Item::Copies(_)))
+            .any(|site| matches!(&site.item, machine::Item::Copies(pairs)
+                if pairs == &[(machine::MReg::Virtual(value.0), machine::MReg::Virtual(f.param(unwind_target, 0).0))]))
     );
 }
