@@ -26,7 +26,11 @@ net_call 和 resolver_symbol 机器片段独立按实际机器重定位的可达
 
 进程私有机器目录为 StartupCall(op,request)、EnvironmentSymbol(op)、ProcessCall(op,request) 与 ProcessWorker()，全部要求 runtime 注入源身份及 unsafe。ProcessRequest 为 88 字节、8 字节对齐，字段依次是 operation、八个 arguments、value、error；SpawnPacket 为十个机器字、80 字节。process_schema=1 将操作目录和 Child/pipe 控制记录纳入 RuntimeRaw=47 的指纹与恢复验证；冻结 HIR/具体 GIR 对照 repr(C) 与 offset_of 逐字段验证。Child/pipe 扩展从资源控制页 +200 开始，不覆盖资源 header、关闭队列和 registry。LIR world/body 为 19/20，x64 lowering 为 21；旧缓存不回退。
 
+A64 的 StartupCall 在入口帧保存 x19、x20、FP、LR，并以 x19 保留请求地址；x1 装入 getcwd 的长度后不再承担请求指针。Linux syscall 与 Darwin libSystem 成功、错误及未支持操作共用同一写回出口；Darwin 的 errno helper 使用入口帧预留的 16 字节 scratch。确定性片段测试在 libSystem 回调后污染 caller-saved 寄存器，验证请求写回、errno、调用方栈和非易失寄存器恢复。
+
 Rt0Payload revision=5、144 字节；Linux 独立寄存器保存初始 argc/argv，Windows 获取 GetCommandLineW 原始地址，分别写偏移 128/136，不重定位。Gugu process_context 在 boot/gc_boot 之后、main 之前复制 raw argv/cwd，创建专用进程锁，退出时在 mapping.verify_drained 前归还。三个镜像布局消费者统一用 fs_native.required 按重定位可达性选择网络、环境与进程片段，不能把可选进程或 Winsock 放进启动地板集。
+
+`native_memory.reserve_native` 在调用 Unix 平台预约入口前按 `NATIVE_PAGE_BYTES` 舍入长度，平台入口与 provider 账本消费同一个长度；arena 侧元数据等非整页请求不能直接作为尾部 `munmap` 的起始偏移。rt0 的配置、processor 与 A64 控制页统一使用实际 OS 页大小预约及提交；`adopt_boot` 计入主栈与两个基础页，A64 再计入独立控制页。
 
 原生导入明确分 Function/Data。ELF 为每项提供 `__gugu_got_<name>` 槽符号，Data 的 dynsym 为 STT_OBJECT、重定位为 GLOB_DAT，不生成 PLT；environ 操作加载槽中的变量地址，再由 Gugu 读取当前 char**。导入 environ 时，rt0 使用参数块 reserved_14 定位 GOT，仅在变量为 NULL 时以启动 envp 初始化，保留 loader/构造器修改。没有此数据导入便不发射初始化代码。PE 使用 IAT 槽，普通 C 外调只接受 Function。
 

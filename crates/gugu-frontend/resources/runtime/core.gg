@@ -354,10 +354,11 @@ pub fn rt0_start(params: *Rt0Params, bias: uint) uint {
             os_page
         }
         #[cfg(not(all(os = "linux", arch = "aarch64")))]
-        let startup_align: uint = 4096
-        let startup_page = std.platform.reserve_aligned(uint(4096), startup_align)
+        let startup_align = mapping.os_page_bytes()
+        let startup_bytes = mapping.page_bytes(4096)
+        let startup_page = std.platform.reserve_aligned(startup_bytes, startup_align)
         if startup_page == 0 { fatal_configuration() }
-        let startup_range = StackRangeDescriptor { base: startup_page, bytes: 4096 }
+        let startup_range = StackRangeDescriptor { base: startup_page, bytes: startup_bytes }
         if std.platform.commit(std.mem.transmute[*StackRangeDescriptor, uint](std.ptr.addr_of(startup_range))) != 0 {
             fatal_configuration()
         }
@@ -383,11 +384,11 @@ pub fn rt0_start(params: *Rt0Params, bias: uint) uint {
         let cold = state + 128
         store_word(state + 0, slot)
         #[cfg(arch = "aarch64")]
-        let a64_block = std.platform.reserve_aligned(uint(4096), startup_align)
+        let a64_block = std.platform.reserve_aligned(startup_bytes, startup_align)
         #[cfg(arch = "aarch64")]
         {
             if a64_block == 0 { fatal_runtime() }
-            let a64_range = StackRangeDescriptor { base: a64_block, bytes: 4096 }
+            let a64_range = StackRangeDescriptor { base: a64_block, bytes: startup_bytes }
             if std.platform.commit(std.mem.transmute[*StackRangeDescriptor, uint](std.ptr.addr_of(a64_range))) != 0 {
                 fatal_runtime()
             }
@@ -409,9 +410,9 @@ pub fn rt0_start(params: *Rt0Params, bias: uint) uint {
             store_word(state + 32, cold)
             store_word(state + 88, 0)
         }
-        let processor_page = std.platform.reserve_aligned(uint(4096), startup_align)
+        let processor_page = std.platform.reserve_aligned(startup_bytes, startup_align)
         if processor_page == 0 { fatal_runtime() }
-        let processor_range = StackRangeDescriptor { base: processor_page, bytes: 4096 }
+        let processor_range = StackRangeDescriptor { base: processor_page, bytes: startup_bytes }
         if std.platform.commit(std.mem.transmute[*StackRangeDescriptor, uint](std.ptr.addr_of(processor_range))) != 0 {
             fatal_runtime()
         }
