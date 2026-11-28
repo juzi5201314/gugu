@@ -377,6 +377,10 @@ type section 的版本 3 把记录固定为 80 byte：`size u64`、`align u32`�
 
 `Symbol::TypeDescriptor(key)` 与 `type section` 是同一条记录：符号地址等于 section 起点加 `records_offset` 再加 `type_id * 80`，记录本身就是描述符。编译器不再为每个类型另写一份只含 `size`/`align` 的副本，运行期按该地址读到的字节与 verifier 校验过的记录逐字节相同。`TypeId` 是真空编号（`spec/types.md`）：`type_id[T]()` 在 LIR 期就物化为 `u32` 常量，`as_int()` 之后可作数组下标，不依赖任何链接期地址。
 
+运行时 `TypeId.name()` 引用的 `Symbol::TypeRecords` 与 `Symbol::TypeNames` 分别绑定到
+同一类型段的 `records_offset` 与 `name_pool_offset`。x86_64 的 ELF、PE 和 Mach-O
+writer 共用类型符号解析；缺少类型段时拒绝链接，不能把数据地址解析为退出桩。
+
 ### compiler-storage 类型
 
 闭包环境与 spawn 参数包不是语言类型，但它们是真实分配出去的 managed 对象，因此有 `TypeId`：

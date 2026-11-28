@@ -242,14 +242,8 @@ impl WorldImage {
             self.define(symbol.into(), at)?;
         }
         let types_at = self.addr(TYPES)?;
-        for (name, offset) in &world.type_descriptors {
-            self.define(
-                name.clone(),
-                Location {
-                    offset: *offset,
-                    ..types_at
-                },
-            )?;
+        for (name, offset) in world.type_symbols(types)? {
+            self.define(name, Location { offset, ..types_at })?;
         }
         let const_at = self.section(
             "__const",

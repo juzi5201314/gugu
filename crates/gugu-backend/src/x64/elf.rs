@@ -107,7 +107,7 @@ pub fn link_world(
         interpreter: native_link.interpreter.clone(),
         archive: Vec::new(),
         bound_glues: world.glues().bound_symbols(),
-        type_descriptors: world.type_descriptors.iter().cloned().collect(),
+        type_descriptors: world.type_symbols(types)?,
         globals: world.globals.iter().cloned().collect(),
         blob_relocations: world.blob_relocations.clone(),
     })

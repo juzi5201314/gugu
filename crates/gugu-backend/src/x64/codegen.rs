@@ -540,6 +540,37 @@ pub struct X64World {
 }
 
 impl X64World {
+    /// 将类型描述符和被引用的类型池符号绑定到同一份镜像类型段。
+    pub fn type_symbols(
+        &self,
+        types: &[u8],
+    ) -> Result<std::collections::BTreeMap<String, u64>, String> {
+        let mut symbols: std::collections::BTreeMap<_, _> =
+            self.type_descriptors.iter().cloned().collect();
+        for (symbol, header_offset) in [
+            (lir::body::Symbol::TypeRecords, 24),
+            (lir::body::Symbol::TypeNames, 64),
+        ] {
+            if !self.fragments.iter().any(|fragment| {
+                fragment
+                    .relocations
+                    .iter()
+                    .any(|relocation| relocation.target == RelocTarget::Lir(symbol.clone()))
+            }) {
+                continue;
+            }
+            let offset = types
+                .get(header_offset..header_offset + 8)
+                .ok_or_else(|| format!("类型池 {symbol:?} 缺少类型段头"))?;
+            let offset = u64::from_le_bytes(offset.try_into().expect("类型池偏移为 u64"));
+            if offset > types.len() as u64 {
+                return Err(format!("类型池 {symbol:?} 超出类型段"));
+            }
+            symbols.insert(super::mangle::mangle_symbol(&symbol), offset);
+        }
+        Ok(symbols)
+    }
+
     /// 世界指纹。
     pub const fn fingerprint(&self) -> [u8; 32] {
         self.fingerprint

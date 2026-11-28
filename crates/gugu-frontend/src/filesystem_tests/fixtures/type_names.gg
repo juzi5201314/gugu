@@ -1,0 +1,15 @@
+type Number = int
+struct Point { x: int, y: int }
+
+fn named(id: TypeId) string { id.name() }
+
+fn check() bool {
+    let ids = [type_id[int](), type_id[string](), type_id[Point]()]
+    named(ids[0]) == "int" &&
+        named(ids[1]) == "string" &&
+        named(ids[2]) == "Point" &&
+        named(type_id[Number]()) == "int" &&
+        type_id[int]().name() == "int"
+}
+
+fn main() { _ = check() }

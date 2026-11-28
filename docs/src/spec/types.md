@@ -335,6 +335,9 @@ fn name(self) string         // 规范类型名；comptime TypeId 可早期求�
 布局、不能当求值入口。规范名优先日常名字：`int` 不是 `i64`，`uint` 不是 `u64`，
 `byte` 不是 `u8`，`float` 不是 `f64`。
 
+`name()` 同样支持运行时保存、传参或从数组中读取的 `TypeId`；其结果与直接对
+`type_id[T]()` 查询一致。返回的 UTF-8 字符串在镜像存活期间有效，可以直接打印。
+
 ### `Any` 与 downcast
 
 `Any` 是 lang trait（编译器按名字挂钩的 trait，见 [概述 · 术语](overview.md#terminology)），**不能有泛型方法**（否则不能 `dyn`）。用户不能声明、不能手写 `impl Any`，也不能 `impl !Any` 挖掉语言生成的肯定 impl。语言自己写：

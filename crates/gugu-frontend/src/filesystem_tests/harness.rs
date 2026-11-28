@@ -77,6 +77,7 @@ pub(super) struct Harness<'a> {
     functions: Vec<([u8; 32], bool)>,
     pub(super) metadata: Option<crate::frontend::gc::GcMetadataBundle>,
     type_section: u64,
+    pub(super) type_pools: [u64; 2],
     resources: Vec<(u64, [u8; 32])>,
     scheduled: Vec<Option<([u8; 32], Vec<u64>)>>,
 }
@@ -94,6 +95,7 @@ impl<'a> Harness<'a> {
         self.freed.clear();
         self.functions.clear();
         self.type_section = 0;
+        self.type_pools = [0; 2];
         self.resources.clear();
         self.scheduled.clear();
     }
@@ -196,6 +198,7 @@ impl<'a> Harness<'a> {
             machine_hook: None,
             metadata: None,
             type_section: 0,
+            type_pools: [0; 2],
             resources: Vec::new(),
             functions: Vec::new(),
             bodies: bodies.iter().map(|b| (b.instance, b)).collect(),
@@ -515,6 +518,12 @@ impl<'a> Harness<'a> {
                     | RuntimeCall::ValueDrop
                     | RuntimeCall::ValueForget,
                 )) => vec![],
+                Boundary::Storage(Op::SymbolAddr(Symbol::TypeRecords)) => {
+                    vec![self.type_pools[0]]
+                }
+                Boundary::Storage(Op::SymbolAddr(Symbol::TypeNames)) => {
+                    vec![self.type_pools[1]]
+                }
                 Boundary::Storage(Op::SymbolAddr(Symbol::TypeDescriptor(key))) => {
                     if self.metadata.is_some() {
                         let base = self.types(memory);
