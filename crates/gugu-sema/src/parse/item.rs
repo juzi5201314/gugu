@@ -302,6 +302,7 @@ impl Parser<'_> {
                 ty,
             };
             self.expect(TokenKind::RParen, "newtype 结构体需要 `)`");
+            self.consume_decl_terminator();
             StructBody::Newtype(field)
         } else {
             self.expect(TokenKind::LBrace, "结构体需要 `{`");

@@ -1,0 +1,13 @@
+use std.io.println;
+const N: int = 1; type Alias = int;
+static FLAG: bool = false;
+fn value() int = 1;
+struct Wrapped(int); const NEXT: int = 2;
+trait Example {
+    type Item;
+    const LIMIT: int;
+    fn run(self: &Self);
+}
+extern "C" { fn foreign() int; }
+global_asm("nop");
+struct Final(int);

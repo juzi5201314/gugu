@@ -1,0 +1,29 @@
+fn main() {
+    let x = 1;
+    println(x); // 分号后允许行注释。
+}
+
+fn same_line() { let x = 1; println(x); }
+
+fn statements() int {
+    let x: int;
+    let Some(value) = option else { return 0; };
+    static FLAG: bool = false;
+    defer cleanup();
+    defer ret { cleanup(); };
+    yield;
+    comptime source { generate() };
+    x = 1; x += 2; x -= 1; x *= 3; x /= 2; x %= 4;
+    x &= 3; x |= 4; x ^= 1; x <<= 1; x >>= 1;
+    x
+}
+
+fn value() int {
+    let x = 40;
+    let y = 2
+    x + y
+}
+
+fn discarded() {
+    42;
+}

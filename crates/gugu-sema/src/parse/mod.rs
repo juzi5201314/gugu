@@ -6,6 +6,8 @@ mod expr;
 mod item;
 mod lit;
 mod pat;
+#[cfg(test)]
+mod tests;
 mod ty;
 
 use crate::diagnostics::{Diagnostic, DiagnosticCode};

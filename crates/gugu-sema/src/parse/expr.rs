@@ -109,11 +109,13 @@ impl Parser<'_> {
             let attrs = self.parse_outer_attributes();
             if self.is_stmt_start() {
                 stmts.push(self.parse_stmt(mark, attrs));
+                self.eat(TokenKind::Semi);
                 continue;
             }
             let expr = self.parse_expr_with_outer_attrs(attrs);
             if self.is_assign_op() {
                 stmts.push(self.finish_assign(expr));
+                self.eat(TokenKind::Semi);
                 continue;
             }
             let discarded = self.eat(TokenKind::Semi);

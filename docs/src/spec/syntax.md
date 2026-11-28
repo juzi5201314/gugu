@@ -92,7 +92,7 @@ extern_item         ::= attribute* "fn" IDENT "(" parameter_list? ")" return_typ
 global_asm_declaration ::= "global_asm" "(" STRING ")" terminator ;
 ```
 
-模块顶层的可见性、`extern`、属性适用范围、`type = impl Trait` 的不透明身份以及各声明的静态约束见[声明与模块](declarations.md)、[类型系统](types.md)和[unsafe 与 intrinsic](unsafe.md)。`field_separator`、`variant_separator`和`terminator`可以是逗号或规范允许的换行；字段和变体的尾逗号合法，顶层声明不能靠逗号分隔。
+模块顶层的可见性、`extern`、属性适用范围、`type = impl Trait` 的不透明身份以及各声明的静态约束见[声明与模块](declarations.md)、[类型系统](types.md)和[unsafe 与 intrinsic](unsafe.md)。`field_separator` 和 `variant_separator` 可以是逗号或规范允许的换行；字段和变体的尾逗号合法。`terminator` 可以是分号或规范允许的换行，顶层声明不能靠逗号分隔。
 
 ## 泛型、参数与类型
 
@@ -165,7 +165,7 @@ variant_separator   ::= "," | NEWLINE ;
 place               ::= postfix_expression ;
 ```
 
-`let`带初始化器时的模式必须可判定；先声明后赋值只允许简单标识符。`expression terminator`中的分号仅表示丢弃该表达式的值；没有分号的最后表达式是块值。块为空时值为 `()`。赋值不是表达式，因此不能嵌套在调用参数、运算符或条件中。
+`let`带初始化器时的模式必须可判定；先声明后赋值只允许简单标识符。分号可以终止声明、赋值、`defer`、`yield`、源码宏语句和表达式语句，同一行的多条语句可以用分号分隔；单独的分号不是空语句。`expression terminator` 中的分号还会丢弃该表达式的值；没有分号的最后表达式是块值。块为空时值为 `()`。赋值不是表达式，因此不能嵌套在调用参数、运算符或条件中。
 
 ```ebnf
 expression          ::= attribute* expression_core ;
