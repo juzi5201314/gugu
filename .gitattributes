@@ -1,3 +1,4 @@
 /ci/e2e/fixtures/NormalizationTest.*.utf8 binary
 /ci/e2e/fixtures/*.stdout text eol=lf
+/crates/gugu-frontend/src/filesystem_tests/fixtures/derive.stdout text eol=lf
 /crates/gugu-frontend/resources/std/text/normalization_tables.gg linguist-generated=true
