@@ -92,8 +92,8 @@ fn compile_target(
     let selected = Target::new(
         kind,
         "app".into(),
-        root.path().join("src/main.gg"),
-        root.path().join("src"),
+        package.root().join("src/main.gg"),
+        package.root().join("src"),
         Vec::new(),
         true,
     );
