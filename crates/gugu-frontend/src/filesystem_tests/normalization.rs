@@ -4,7 +4,7 @@ const VECTORS: &[u8] = include_bytes!("../../../../ci/e2e/fixtures/Normalization
 
 #[test]
 fn string_normalization_in_lir() {
-    let output = Compiler::shared().compile(CompileRequest::single_file(
+    let output = Compiler::shared().compile_to_lir(CompileRequest::single_file(
         "main.gg",
         r#"use std.text.{NormalizationForm}
 fn normalize_probe(input: &string, form: int) string {

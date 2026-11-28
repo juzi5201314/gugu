@@ -467,7 +467,7 @@ trait 方法的返回 `impl Trait` 是 RPITIT；每个实现可以选择不同�
 
 ## `dyn Trait` 与方法解析
 
-`dyn Trait` 只能由满足该 trait 的具体值显式擦除得到。擦除产生数据指针和 vtable 句柄；vtable 固定该具体类型的最具体肯定 impl。`dyn Trait` 的复制只复制胖指针，不复制载荷；若 trait 没有适用 impl 或存在无法比较具体性的 impl，程序在编译期失败。
+`dyn Trait` 只能由满足该 trait 的具体值显式擦除得到。擦除产生数据指针和 vtable 句柄；vtable 固定该具体类型的最具体肯定 impl。擦除容器拥有载荷；只要任一胖指针副本存活，载荷就保持有效。`dyn Trait` 的复制只复制胖指针，不复制载荷；若 trait 没有适用 impl 或存在无法比较具体性的 impl，程序在编译期失败。
 
 可对象化 trait 除已有规则外，还必须满足：除接收者外的方法参数和返回类型不能出现 `Self`；方法不能要求按值返回未知大小的 `Self`；不能有泛型方法、关联类型、关联常量或 RPITIT。`self` 和 `self: &Self` 是允许的接收者；`self: &Self` 的调用不移动对象。违反任一条件的 trait 仍可用于泛型约束，但不能写 `dyn Trait`。
 

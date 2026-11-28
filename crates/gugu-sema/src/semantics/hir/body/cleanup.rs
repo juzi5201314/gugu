@@ -92,10 +92,11 @@ impl BodyBuilder<'_, '_, '_, '_> {
                 self.push_function_actions(plan.registered, has_chain);
             }
             let end = checked_id(self.output.cleanup_actions.len())?;
+            let destination = self.plan_destination(plan.exit);
             self.output.cleanup_plans.push(hir::CleanupPlan {
                 exit: plan.exit,
                 actions: start..end,
-                destination: self.plan_destination(plan.exit),
+                destination,
             });
         }
         Ok(())

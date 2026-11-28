@@ -80,12 +80,14 @@ fn mangle_vtable(interface: [u8; 32], concrete: [u8; 32]) -> String {
 }
 
 fn mangle(kind: &str, key: &[u8; 32]) -> String {
-    let mut out = String::with_capacity(8 + kind.len() + 1 + 64);
+    const HEX: &[u8; 16] = b"0123456789abcdef";
+    let mut out = String::with_capacity(7 + kind.len() + 1 + 64);
     out.push_str("__gugu_");
     out.push_str(kind);
     out.push('_');
     for byte in key {
-        let _ = core::fmt::Write::write_fmt(&mut out, format_args!("{byte:02x}"));
+        out.push(char::from(HEX[usize::from(byte >> 4)]));
+        out.push(char::from(HEX[usize::from(byte & 15)]));
     }
     out
 }
@@ -113,7 +115,6 @@ pub fn runtime_call_name(call: RuntimeCall) -> &'static str {
         RuntimeCall::ResourceRelease => "resource_release",
         RuntimeCall::ResourceTransfer => "resource_transfer",
         RuntimeCall::ResourceFinalize => "resource_finalize",
-        RuntimeCall::DynamicErase => "dynamic_erase",
         RuntimeCall::TypeIs => "type_is",
         RuntimeCall::Downcast => "downcast",
         RuntimeCall::DowncastCopy => "downcast_copy",
@@ -141,5 +142,21 @@ pub fn runtime_call_name(call: RuntimeCall) -> &'static str {
         RuntimeCall::ArenaNew => "gc_arena_new",
         RuntimeCall::ArenaAlloc => "gc_arena_alloc",
         RuntimeCall::ArenaAllocSync => "gc_arena_alloc_sync",
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    #[test]
+    fn instance_symbols_preserve_leading_zeroes_and_both_hex_nibbles() {
+        let key = std::array::from_fn(|index| [0x00, 0x0f, 0x10, 0xff][index % 4]);
+        assert_eq!(
+            super::mangle_instance(&key),
+            concat!(
+                "__gugu_fn_",
+                "000f10ff000f10ff000f10ff000f10ff",
+                "000f10ff000f10ff000f10ff000f10ff"
+            )
+        );
     }
 }

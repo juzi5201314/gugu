@@ -300,13 +300,12 @@ accept_cases! {
         "impl Print for int { fn print(self: &Self, out: &Formatter) {} }\nfn main() {}";
 }
 
-/// 编译一份 `main.gg`：lint 类用例只关心诊断与是否产出镜像。
+fn request(source: &str) -> crate::CompileRequest {
+    crate::CompileRequest::single_file("main.gg", source, crate::TargetName::X86_64Linux)
+}
+
 fn compile(source: &str) -> crate::Compilation {
-    crate::Compiler::shared().compile(crate::CompileRequest::single_file(
-        "main.gg",
-        source,
-        crate::TargetName::X86_64Linux,
-    ))
+    crate::Compiler::shared().compile_to_lir(request(source))
 }
 
 /// 该源码是否报告了指定诊断代码。
@@ -342,7 +341,8 @@ fn unused_must_use_is_absent_when_the_value_is_kept() {
 
 #[test]
 fn denied_unused_must_use_fails_without_an_image_plan() {
-    let denied = compile("#![deny(unused_must_use)]\nfn main() { Some(1); }");
+    let denied = crate::Compiler::shared()
+        .compile_full_for_test(request("#![deny(unused_must_use)]\nfn main() { Some(1); }"));
     assert!(!denied.is_success());
     assert!(denied.image_plan().is_none());
 }

@@ -109,7 +109,9 @@ pub fn canonicalize(editor: &mut Editor) -> Result<bool, Diagnostic> {
             continue;
         }
         if outside.len() == 1
-            && editor.successors(editor.edge(outside[0]).expect("活跃边").from) == [header]
+            && editor
+                .successors(editor.edge(outside[0]).expect("活跃边").from)
+                .eq([header])
         {
             // 唯一外部前驱且它只跳到这里：直接复用。
             continue;

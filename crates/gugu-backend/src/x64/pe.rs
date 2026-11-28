@@ -4,7 +4,7 @@
 //! `kernel32.dll` 与 `ntdll.dll`。绝对地址进入 `IMAGE_REL_BASED_DIR64`；
 //! PC 相对在写出前修完。rt0 在调用前留出 32 字节 shadow space。
 
-use super::codegen::{BlobRelocation, FragmentPayload, X64World};
+use super::codegen::{BlobRelocation, BlobRelocationKind, FragmentPayload, X64World};
 use super::fragments;
 use super::inst::{RelocKind, RelocTarget};
 use super::mangle;
@@ -152,7 +152,7 @@ pub struct PeRequest {
     pub type_descriptors: std::collections::BTreeMap<String, u64>,
     /// 静态存储块：符号名 → 块字节数（`initialized` 字 + 值槽），按符号名升序。
     pub globals: std::collections::BTreeMap<String, u64>,
-    /// `.ggmeta` 内待回填的符号 RVA：`(blob 内偏移, 符号名)`，按偏移升序。
+    /// 只读 blob 内待回填的符号引用；`kind` 决定写 RVA 还是重定位后虚拟地址。
     pub blob_relocations: Vec<BlobRelocation>,
 }
 
@@ -469,7 +469,17 @@ fn link_inner(request: &PeRequest) -> Result<(PeImage, BTreeMap<String, u64>), S
         }
     }
     defined.insert("__gugu_fragments_base".to_owned(), fragment_rva);
-    apply_blob_relocations(request, &mut sections, &defined)?;
+    // 独立命名只读节本身也是可重定位 blob 目标；节名就是符号名。
+    for (name, bytes) in &request.readonly {
+        if bytes.is_empty() {
+            continue;
+        }
+        let rva = rva_of(&sections, name)?;
+        if defined.insert(name.clone(), rva).is_some() {
+            return Err(format!("只读 blob {name} 与已有符号重名"));
+        }
+    }
+    let blob_abs64 = apply_blob_relocations(request, &mut sections, &defined)?;
     fill_imports(&mut sections, rdata_rva, data_rva, import_at, &imports)?;
     patch_rip(
         &mut sections,
@@ -481,7 +491,7 @@ fn link_inner(request: &PeRequest) -> Result<(PeImage, BTreeMap<String, u64>), S
         &sites,
         &imports,
     )?;
-    let abs64 = patch_fragments(
+    let mut abs64 = patch_fragments(
         request,
         &mut sections,
         text_rva,
@@ -489,6 +499,7 @@ fn link_inner(request: &PeRequest) -> Result<(PeImage, BTreeMap<String, u64>), S
         &defined,
         &imports,
     )?;
+    abs64.extend(blob_abs64);
     let reloc = reloc_bytes(&abs64)?;
     if let Some(section) = sections.iter_mut().find(|item| item.name == ".reloc") {
         section.bytes = reloc;
@@ -744,34 +755,90 @@ struct ReservedData {
     blocks: std::collections::BTreeMap<String, u64>,
 }
 
-/// 把 `.ggmeta` 内的符号引用回填成 RVA；PE 的镜像内地址就是 RVA，不再叠加加载基址。
+/// 回填只读 blob 内的符号引用。`Rva` 写镜像 RVA；`Absolute` 写 `IMAGE_BASE + RVA`
+/// 并把槽登记进 `.reloc`，使 Windows 重定位后仍是可解引用的代码/数据地址。
 fn apply_blob_relocations(
     request: &PeRequest,
     sections: &mut [Section],
     defined: &std::collections::BTreeMap<String, u64>,
-) -> Result<(), String> {
+) -> Result<Vec<u64>, String> {
     if request.blob_relocations.is_empty() {
-        return Ok(());
+        return Ok(Vec::new());
     }
-    let metadata = sections
-        .iter_mut()
-        .find(|section| section.name == ".ggmeta")
-        .ok_or_else(|| "元数据重定位缺少 .ggmeta 段".to_owned())?;
+    let text_rva = rva_of(sections, ".text")?;
+    let type_section_rva = if request.type_descriptors.is_empty() {
+        0
+    } else {
+        rva_of(sections, TYPE_SECTION_NAME)?
+    };
+    let mailbox = mangle::mangle_runtime("morestack_mailbox");
+    let data_symbols: BTreeSet<&str> = request
+        .constants
+        .iter()
+        .map(|(name, _)| name.as_str())
+        .chain(request.globals.keys().map(String::as_str))
+        .chain(
+            request
+                .readonly
+                .iter()
+                .filter(|(_, bytes)| !bytes.is_empty())
+                .map(|(name, _)| name.as_str()),
+        )
+        .chain([
+            "__gugu_cage_control",
+            "__gugu_initial_slot",
+            "__gugu_runtime_state",
+            "__gugu_rt0_payload",
+            "__gugu_callback_control",
+            mailbox.as_str(),
+        ])
+        .collect();
+    let mut abs64 = Vec::new();
     for relocation in &request.blob_relocations {
         if !relocation.offset.is_multiple_of(8) {
-            return Err("元数据重定位偏移未对齐到 8 字节".to_owned());
+            return Err("blob 重定位偏移未对齐到 8 字节".to_owned());
         }
-        let at = usize::try_from(relocation.offset).map_err(|_| "元数据偏移超出宿主")?;
-        let slot = metadata
-            .bytes
-            .get_mut(at..at + 8)
-            .ok_or_else(|| "元数据重定位偏移越过 blob".to_owned())?;
-        let address = *defined
-            .get(&relocation.symbol)
-            .ok_or_else(|| format!("元数据重定位符号 {} 没有地址", relocation.symbol))?;
-        slot.copy_from_slice(&address.to_le_bytes());
+        let target_rva =
+            if let Some(offset) = request.type_descriptors.get(relocation.symbol.as_str()) {
+                type_section_rva + offset
+            } else {
+                let target = *defined
+                    .get(&relocation.symbol)
+                    .ok_or_else(|| format!("blob 重定位符号 {} 没有地址", relocation.symbol))?;
+                if data_symbols.contains(relocation.symbol.as_str()) {
+                    target
+                } else {
+                    text_rva + target
+                }
+            };
+        let base = *defined
+            .get(&relocation.blob)
+            .ok_or_else(|| format!("blob 重定位缺少 {} 地址", relocation.blob))?;
+        let at = base
+            .checked_add(relocation.offset)
+            .ok_or_else(|| "blob 重定位地址溢出".to_owned())?;
+        let mut patched = false;
+        for section in sections.iter_mut() {
+            if at < section.rva || at + 8 > section.rva + section.bytes.len() as u64 {
+                continue;
+            }
+            let offset = usize::try_from(at - section.rva).map_err(|_| "blob 偏移超出宿主")?;
+            let value = match relocation.kind {
+                BlobRelocationKind::Rva => target_rva,
+                BlobRelocationKind::Absolute => IMAGE_BASE.wrapping_add(target_rva),
+            };
+            section.bytes[offset..offset + 8].copy_from_slice(&value.to_le_bytes());
+            if relocation.kind == BlobRelocationKind::Absolute {
+                abs64.push(at);
+            }
+            patched = true;
+            break;
+        }
+        if !patched {
+            return Err(format!("blob 重定位 {} 越过已布局节", relocation.blob));
+        }
     }
-    Ok(())
+    Ok(abs64)
 }
 
 /// `.data` 内容：IAT 之后是按 64/8 对齐的保留可写区（初始槽、runtime 状态区、启动载荷、静态块），

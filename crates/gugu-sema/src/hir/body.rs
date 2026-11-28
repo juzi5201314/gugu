@@ -1,42 +1,194 @@
 use super::{DefId, ExprId, LocalId, Location, PatternId, ScopeId, StmtId, TraitRef, TypeId};
-use serde::{Deserialize, Serialize};
+use serde::{Deserialize, Deserializer, Serialize, Serializer};
+use std::fmt;
 use std::ops::Range;
+use std::ops::{Deref, DerefMut};
+use std::sync::Arc;
+
+/// Owner 的体表在 lowering 期间保持 Vec 可变，物化 HIR 通过 verifier 后再共享底层分配。
+/// 序列化仍按 Vec 的顺序序列写出，以保持 HIR canonical bytes 稳定。
+#[derive(Clone)]
+pub struct SharedBodyVec<T>(BodyVecStorage<T>);
+
+#[derive(Clone)]
+enum BodyVecStorage<T> {
+    Mutable(Vec<T>),
+    Shared(Arc<Vec<T>>),
+}
+
+impl<T> SharedBodyVec<T> {
+    pub fn share(&mut self) {
+        let storage = std::mem::replace(&mut self.0, BodyVecStorage::Mutable(Vec::new()));
+        self.0 = match storage {
+            BodyVecStorage::Mutable(values) if values.is_empty() => BodyVecStorage::Mutable(values),
+            BodyVecStorage::Mutable(values) => BodyVecStorage::Shared(Arc::new(values)),
+            shared @ BodyVecStorage::Shared(_) => shared,
+        };
+    }
+}
+
+impl<T> Default for SharedBodyVec<T> {
+    fn default() -> Self {
+        Self(BodyVecStorage::Mutable(Vec::new()))
+    }
+}
+
+impl<T> From<Vec<T>> for SharedBodyVec<T> {
+    fn from(values: Vec<T>) -> Self {
+        Self(BodyVecStorage::Mutable(values))
+    }
+}
+
+impl<T> FromIterator<T> for SharedBodyVec<T> {
+    fn from_iter<I: IntoIterator<Item = T>>(iter: I) -> Self {
+        Self::from(iter.into_iter().collect::<Vec<_>>())
+    }
+}
+
+impl<T> Deref for SharedBodyVec<T> {
+    type Target = Vec<T>;
+
+    fn deref(&self) -> &Self::Target {
+        match &self.0 {
+            BodyVecStorage::Mutable(values) => values,
+            BodyVecStorage::Shared(values) => values,
+        }
+    }
+}
+
+impl<T: fmt::Debug> fmt::Debug for SharedBodyVec<T> {
+    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+        self.deref().fmt(formatter)
+    }
+}
+
+impl<T: Clone> DerefMut for SharedBodyVec<T> {
+    fn deref_mut(&mut self) -> &mut Self::Target {
+        match &mut self.0 {
+            BodyVecStorage::Mutable(values) => values,
+            BodyVecStorage::Shared(values) => Arc::make_mut(values),
+        }
+    }
+}
+
+impl<T: Clone> IntoIterator for SharedBodyVec<T> {
+    type Item = T;
+    type IntoIter = std::vec::IntoIter<T>;
+
+    fn into_iter(self) -> Self::IntoIter {
+        match self.0 {
+            BodyVecStorage::Mutable(values) => values.into_iter(),
+            BodyVecStorage::Shared(values) => Arc::unwrap_or_clone(values).into_iter(),
+        }
+    }
+}
+
+impl<T: PartialEq> PartialEq for SharedBodyVec<T> {
+    fn eq(&self, other: &Self) -> bool {
+        self.deref() == other.deref()
+    }
+}
+
+impl<T: Eq> Eq for SharedBodyVec<T> {}
+
+impl<'a, T> IntoIterator for &'a SharedBodyVec<T> {
+    type Item = &'a T;
+    type IntoIter = std::slice::Iter<'a, T>;
+
+    fn into_iter(self) -> Self::IntoIter {
+        self.iter()
+    }
+}
+
+impl<'a, T: Clone> IntoIterator for &'a mut SharedBodyVec<T> {
+    type Item = &'a mut T;
+    type IntoIter = std::slice::IterMut<'a, T>;
+
+    fn into_iter(self) -> Self::IntoIter {
+        self.iter_mut()
+    }
+}
+
+impl<T: Serialize> Serialize for SharedBodyVec<T> {
+    fn serialize<S: Serializer>(&self, serializer: S) -> Result<S::Ok, S::Error> {
+        self.deref().serialize(serializer)
+    }
+}
+
+impl<'de, T: Deserialize<'de>> Deserialize<'de> for SharedBodyVec<T> {
+    fn deserialize<D: Deserializer<'de>>(deserializer: D) -> Result<Self, D::Error> {
+        Vec::deserialize(deserializer).map(Self::from)
+    }
+}
 
 #[derive(Clone, Debug, Eq, PartialEq, Serialize, Deserialize)]
 pub struct Owner {
     pub definition: DefId,
-    pub parameters: Vec<PatternId>,
+    pub parameters: SharedBodyVec<PatternId>,
     pub body: ExprId,
-    pub expressions: Vec<Expression>,
-    pub expression_types: Vec<TypeId>,
-    pub expression_inputs: Vec<TypeId>,
-    pub statements: Vec<Statement>,
-    pub patterns: Vec<Pattern>,
-    pub locals: Vec<Local>,
-    pub scopes: Vec<Scope>,
-    pub expression_ids: Vec<ExprId>,
-    pub statement_ids: Vec<StmtId>,
-    pub pattern_ids: Vec<PatternId>,
-    pub scope_ids: Vec<ScopeId>,
-    pub arms: Vec<MatchArm>,
-    pub select_arms: Vec<SelectArm>,
-    pub fields: Vec<FieldValue>,
-    pub pattern_fields: Vec<PatternField>,
-    pub string_parts: Vec<StringPart>,
-    pub dispatches: Vec<Dispatch>,
-    pub adjustments: Vec<Adjustment>,
-    pub checks: Vec<RuntimeCheck>,
-    pub captures: Vec<Capture>,
-    pub variadic_calls: Vec<VariadicCall>,
-    pub borrow_constraints: Vec<BorrowConstraint>,
-    pub foreign_calls: Vec<ForeignCall>,
-    pub cleanup: Vec<Cleanup>,
-    pub cleanup_plans: Vec<CleanupPlan>,
-    pub cleanup_actions: Vec<CleanupAction>,
+    pub expressions: SharedBodyVec<Expression>,
+    pub expression_types: SharedBodyVec<TypeId>,
+    pub expression_inputs: SharedBodyVec<TypeId>,
+    pub statements: SharedBodyVec<Statement>,
+    pub patterns: SharedBodyVec<Pattern>,
+    pub locals: SharedBodyVec<Local>,
+    pub scopes: SharedBodyVec<Scope>,
+    pub expression_ids: SharedBodyVec<ExprId>,
+    pub statement_ids: SharedBodyVec<StmtId>,
+    pub pattern_ids: SharedBodyVec<PatternId>,
+    pub scope_ids: SharedBodyVec<ScopeId>,
+    pub arms: SharedBodyVec<MatchArm>,
+    pub select_arms: SharedBodyVec<SelectArm>,
+    pub fields: SharedBodyVec<FieldValue>,
+    pub pattern_fields: SharedBodyVec<PatternField>,
+    pub string_parts: SharedBodyVec<StringPart>,
+    pub dispatches: SharedBodyVec<Dispatch>,
+    pub adjustments: SharedBodyVec<Adjustment>,
+    pub checks: SharedBodyVec<RuntimeCheck>,
+    pub captures: SharedBodyVec<Capture>,
+    pub variadic_calls: SharedBodyVec<VariadicCall>,
+    pub borrow_constraints: SharedBodyVec<BorrowConstraint>,
+    pub foreign_calls: SharedBodyVec<ForeignCall>,
+    pub cleanup: SharedBodyVec<Cleanup>,
+    pub cleanup_plans: SharedBodyVec<CleanupPlan>,
+    pub cleanup_actions: SharedBodyVec<CleanupAction>,
     /// 函数体正常完成后的 `Return` 计划（覆盖全部已注册 action）。
     pub return_plan: u32,
-    pub assembly: Vec<Assembly>,
+    pub assembly: SharedBodyVec<Assembly>,
     pub input_fingerprint: [u8; 32],
+}
+
+impl Owner {
+    pub(crate) fn share(&mut self) {
+        self.parameters.share();
+        self.expressions.share();
+        self.expression_types.share();
+        self.expression_inputs.share();
+        self.statements.share();
+        self.patterns.share();
+        self.locals.share();
+        self.scopes.share();
+        self.expression_ids.share();
+        self.statement_ids.share();
+        self.pattern_ids.share();
+        self.scope_ids.share();
+        self.arms.share();
+        self.select_arms.share();
+        self.fields.share();
+        self.pattern_fields.share();
+        self.string_parts.share();
+        self.dispatches.share();
+        self.adjustments.share();
+        self.checks.share();
+        self.captures.share();
+        self.variadic_calls.share();
+        self.borrow_constraints.share();
+        self.foreign_calls.share();
+        self.cleanup.share();
+        self.cleanup_plans.share();
+        self.cleanup_actions.share();
+        self.assembly.share();
+    }
 }
 
 #[derive(Clone, Debug, Eq, PartialEq, Serialize, Deserialize)]
@@ -565,4 +717,40 @@ pub struct AssemblyOperand {
     pub register: super::super::semantics::assembly::Register,
     pub direction: super::super::semantics::assembly::Direction,
     pub value: ExprId,
+}
+
+#[cfg(test)]
+mod shared_body_vec_tests {
+    use super::SharedBodyVec;
+    use crate::canonical;
+
+    #[test]
+    fn sharing_keeps_vec_encoding_and_equality() {
+        let values = vec![3_u32, 5, 8];
+        let mut shared = SharedBodyVec::from(values.clone());
+        shared.share();
+
+        assert_eq!(
+            canonical::to_vec(&shared).unwrap(),
+            canonical::to_vec(&values).unwrap()
+        );
+        assert_eq!(shared, SharedBodyVec::from(values.clone()));
+        assert_eq!(
+            canonical::from_slice::<SharedBodyVec<u32>>(&canonical::to_vec(&values).unwrap())
+                .unwrap(),
+            SharedBodyVec::from(values)
+        );
+    }
+
+    #[test]
+    fn cloning_a_shared_body_preserves_its_allocation() {
+        let mut base = SharedBodyVec::from(vec![3_u32, 5, 8]);
+        base.share();
+        let mut session = base.clone();
+        assert_eq!(base.as_ptr(), session.as_ptr());
+
+        session.push(13);
+        assert_eq!(&**base, &[3, 5, 8]);
+        assert_eq!(&**session, &[3, 5, 8, 13]);
+    }
 }

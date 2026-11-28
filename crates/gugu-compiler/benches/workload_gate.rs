@@ -54,6 +54,10 @@ fn compile_metrics(target: TargetName) {
                 .map(|name| NativeImport::function("libc.so.6", name)),
         );
     }
+    #[expect(
+        clippy::disallowed_methods,
+        reason = "workload bench 测量完整编译与镜像统计"
+    )]
     let output = Compiler::with_artifacts(&EMBEDDED_ARTIFACTS).compile(
         CompileRequest::single_file("workload.gg", WORKLOAD, target).with_native_link(NativeLink {
             imports,

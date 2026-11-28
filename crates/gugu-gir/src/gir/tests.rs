@@ -158,19 +158,19 @@ fn match_for_select_and_suspend_lower() {
 #[test]
 #[ignore = "slow full compilation"]
 fn verifier_rejects_mismatched_cleanup() {
-    let (hir, mut gir) = compile_gir("fn helper() {}\nfn main() { defer helper() }");
-    let body = gir.bodies.first_mut().unwrap();
+    let (hir, gir) = compile_gir("fn helper() {}\nfn main() { defer helper() }");
+    let mut body = gir.bodies[0].clone();
     if let Some(record) = body.exit_records.first_mut() {
         record.plan = u32::MAX;
     }
-    assert!(verify(hir.module(), body).is_err());
+    assert!(verify(hir.module(), &body).is_err());
 }
 
 #[test]
 #[ignore = "slow full compilation"]
 fn verifier_rejects_send_without_cancelled() {
-    let (hir, mut gir) = compile_gir("fn main() { _ = 0 }");
-    let body = gir.bodies.first_mut().unwrap();
+    let (hir, gir) = compile_gir("fn main() { _ = 0 }");
+    let mut body = gir.bodies[0].clone();
     body.safepoints.push(body::Safepoint {
         kind: body::SafepointKind::Suspend,
         location: hir.module().owners[0].scopes[0].location.clone(),
@@ -195,7 +195,7 @@ fn verifier_rejects_send_without_cancelled() {
             .unwrap_or(crate::hir::TypeId(0)),
         value: body::ConstValue::Unit,
     });
-    assert!(verify(hir.module(), body).is_err());
+    assert!(verify(hir.module(), &body).is_err());
 }
 
 #[test]

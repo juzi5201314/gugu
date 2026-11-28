@@ -45,15 +45,15 @@ fn windows_entry(name: &str, attributes: u32) -> Vec<u8> {
     bytes
 }
 
-#[test]
-fn linux_directory_retries_same_record_and_copies_names_before_refill() {
-    let output = compile(TargetName::X86_64Linux);
+pub(super) fn linux_directory_retries_same_record_and_copies_names_before_refill(
+    output: &Compilation,
+) {
     let first = linux_entry(b"one", 8);
     let mut batch = first.clone();
     batch.extend(linux_entry(&[0xff, b'x'], 10));
     let refill = linux_entry(b"dir", 4);
     let mut adapter = Adapter::new(
-        &output,
+        output,
         vec![
             Reply::new(217, batch.len() as u64, 0)
                 .argument(1, 77)
@@ -153,13 +153,11 @@ fn linux_directory_retries_same_record_and_copies_names_before_refill() {
     assert!(adapter.replies.is_empty() && adapter.live.is_empty());
 }
 
-#[test]
-fn windows_directory_keeps_unconsumed_entry_after_small_buffer() {
-    let output = compile(TargetName::X86_64Windows);
+pub(super) fn windows_directory_keeps_unconsumed_entry_after_small_buffer(output: &Compilation) {
     let first = windows_entry("one", 0);
     let second = windows_entry("目录", 1024 | 16);
     let mut adapter = Adapter::new(
-        &output,
+        output,
         vec![
             Reply::new(10, 1, 0).argument(1, 77).write(2, second),
             Reply::new(10, 0, 5),

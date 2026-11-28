@@ -18,6 +18,7 @@ use crate::ast::{ExprId, ExprKind, ItemId, ItemKind, PatKind, TyId};
 use crate::cfg::CfgContext;
 use crate::query::{DependencyFingerprint, QueryEngine, QueryKey, QueryKind};
 use crate::{Diagnostic, DiagnosticCode, SourceMap};
+use gugu_base::SharedTable;
 
 use super::comptime::eval::ConstantValue;
 
@@ -65,7 +66,7 @@ pub struct EarlyConstant {
 pub struct EarlyConstTable {
     pub registry_revision: u32,
     pub registry_summary: [u8; 32],
-    pub constants: Vec<EarlyConstant>,
+    pub constants: SharedTable<EarlyConstant>,
 }
 
 impl Default for EarlyConstTable {
@@ -73,7 +74,7 @@ impl Default for EarlyConstTable {
         Self {
             registry_revision: registry::REGISTRY_REVISION,
             registry_summary: registry::summary(),
-            constants: Vec::new(),
+            constants: SharedTable::default(),
         }
     }
 }
