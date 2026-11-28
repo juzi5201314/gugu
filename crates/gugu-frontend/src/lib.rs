@@ -1671,10 +1671,11 @@ fn load_input(input: CompileInput, target: TargetName) -> Result<LoadedInput, Lo
                 error,
             })?;
             let logical = logical_path.unwrap_or_else(|| logical_input_path(&path));
-            // 输入根即文件所在目录：相对路径在目录内解析，不得越出目录。
+            // 输入根即文件所在目录；裸文件名的空父路径表示当前目录。
             let root = path
                 .parent()
-                .unwrap_or_else(|| Path::new(""))
+                .filter(|parent| !parent.as_os_str().is_empty())
+                .unwrap_or_else(|| Path::new("."))
                 .canonicalize()
                 .map_err(|error| LoadInputError::Read {
                     path: path.clone(),
@@ -3901,6 +3902,70 @@ mod tests {
             "src/main.gg",
         );
         assert!(compilation.image_plan().is_some());
+    }
+
+    #[test]
+    fn single_file_paths_resolve_from_current_directory() {
+        // 加载层不解析语法，复用 crate 根的 UTF-8 文件以免修改进程工作目录。
+        let source = include_str!("../Cargo.toml");
+        let current = std::env::current_dir().expect("读取工作目录");
+        for path in [
+            PathBuf::from("./Cargo.toml"),
+            current.join("Cargo.toml"),
+            PathBuf::from("Cargo.toml"),
+        ] {
+            let request = CompileRequest::single_file_path(&path, TargetName::X86_64Linux);
+            let loaded = super::load_input(request.input, request.target)
+                .unwrap_or_else(|error| panic!("加载 {} 失败：{error:?}", path.display()));
+            let snapshot = &loaded.source_map.snapshots()[0];
+            assert_eq!(snapshot.logical_path(), "Cargo.toml");
+            assert_eq!(snapshot.content(), source);
+            assert_eq!(
+                loaded.plan.as_ref().expect("单文件计划").entry,
+                "Cargo.toml"
+            );
+            let embed = loaded.embed.expect("文件系统输入根");
+            assert_eq!(
+                embed
+                    .resolve(Path::new(""), "Cargo.toml")
+                    .expect("嵌入同目录文件"),
+                source.as_bytes()
+            );
+            assert!(
+                embed
+                    .resolve(Path::new(""), "../gugu-project/Cargo.toml")
+                    .expect_err("拒绝越出输入根")
+                    .contains("越出编译输入根")
+            );
+        }
+    }
+
+    #[test]
+    fn single_file_subdirectory_paths_keep_the_source_directory_as_embed_root() {
+        let path = Path::new("src/frontend/fixtures/literals.gg");
+        let source = include_bytes!("frontend/fixtures/literals.gg");
+        let current = std::env::current_dir().expect("读取工作目录");
+        for path in [path.to_path_buf(), current.join(path)] {
+            let request = CompileRequest::single_file_path(&path, TargetName::X86_64Linux);
+            let loaded = super::load_input(request.input, request.target).expect("加载子目录源码");
+            let snapshot = &loaded.source_map.snapshots()[0];
+            assert_eq!(snapshot.logical_path(), "src/frontend/fixtures/literals.gg");
+            assert_eq!(snapshot.bytes(), source);
+            let caller_dir = snapshot.path().parent().expect("逻辑父目录");
+            let embed = loaded.embed.expect("文件系统输入根");
+            assert_eq!(
+                embed
+                    .resolve(caller_dir, "literals.gg")
+                    .expect("嵌入同目录文件"),
+                source
+            );
+            assert!(
+                embed
+                    .resolve(caller_dir, "../../../Cargo.toml")
+                    .expect_err("拒绝越出源码目录")
+                    .contains("越出编译输入根")
+            );
+        }
     }
 
     /// `embed_file` 按调用源文件目录解析，内容折叠为 `[byte; N]` 早期常量。

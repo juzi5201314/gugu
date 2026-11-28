@@ -294,7 +294,7 @@ GC metadata 和 runtime raw 契约，然后进入机器码生成与镜像规划�
 
 - `empty_package`：没有用户源文件，前端和 IR 成功完成，但没有 executable entry，后端之后的节点跳过，不产生 image plan；
 - `single_file`：调用者提供逻辑路径和内存源码，适合确定性测试与编辑器；
-- `single_file_path`：compiler 在 `load-sources` action 内读取指定 `.gg` 文件，逻辑路径按输入路径推导；读取或快照失败形成 `E0001`~`E0008` 并停止后续 action；
+- `single_file_path`：compiler 在 `load-sources` action 内读取指定 `.gg` 文件，相对路径从当前工作目录解析，逻辑路径按输入路径推导。为 `embed_file` 建立物理输入根时，裸文件名的空父路径按 `.` 解析，再规范化为文件所在目录；逻辑父目录仍可为空。读取或快照失败形成 `E0001`~`E0008` 并停止后续 action；
 - `project_entry`：CLI 从清单发现的 target 入口，逻辑路径由 package root 推导，与工作目录无关；bin/example 与 `harness = false` 的 bench 要求合法 main，lib/test 与默认 bench 走库检查，不产生 executable entry。target 源码树的结构违规（例如符号链接）在输入校验中报告 `E0003`；CLI 路径通常在项目发现阶段就先拒绝符号链接。
 
 空 package 没有内建 runtime 源图，不执行依赖源图的跨语言 record 校验，也不形成可执行入口；固定 machine layout 与契约 verifier 仍照常校验。非空输入一旦装入 runtime 源，就必须形成完整 record 集合，不能把缺失字段当作空 package 处理。

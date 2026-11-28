@@ -199,6 +199,7 @@ runtime 契约签名的记录目录不计入 executable mono/GIR/LIR body 数量
 
 `gugu build <file.gg>` 与 `gugu check <file.gg>` 进入单文件模式：
 
+- 输入可使用绝对路径或相对于当前工作目录的路径；`hello.gg` 与 `./hello.gg` 等价，不要求显式写出 `./`。
 - 文件必须是合法模块根，可以引用同目录或子目录的其它 `.gg` 文件，形成闭世界。
 - 不读取 `gugu.toml`，不解析依赖，不启用 feature，不执行 build.gg。
 - 输出到当前目录或 `--target-dir` 指定目录。
