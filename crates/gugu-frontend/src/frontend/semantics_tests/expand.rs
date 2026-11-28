@@ -439,6 +439,35 @@ fn cfg_deleted_source_slots_never_execute() {
 }
 
 #[test]
+fn source_macros_reject_float_remainder() {
+    reject_float_remainder_macro("float", "let rem = A % B");
+}
+
+#[test]
+fn source_macros_reject_f32_remainder() {
+    reject_float_remainder_macro("f32", "let rem = A % B");
+}
+
+#[test]
+fn source_macros_reject_float_remainder_assignment() {
+    reject_float_remainder_macro("float", "let rem = A\n rem %= B");
+}
+
+#[test]
+fn source_macros_reject_f32_remainder_assignment() {
+    reject_float_remainder_macro("f32", "let rem = A\n rem %= B");
+}
+
+fn reject_float_remainder_macro(ty: &str, operation: &str) {
+    rejects_with(
+        &format!(
+            "const A: {ty} = 7.5\nconst B: {ty} = 2.0\nfn main() {{\n let value = comptime source {{\n {operation}\n std.syntax.parse_expr(\"1\")\n }}\n _ = value\n}}"
+        ),
+        DiagnosticCode::InvalidExpression,
+    );
+}
+
+#[test]
 fn generated_inner_expansion_attributes_are_validated() {
     rejects_with(
         "comptime source { std.syntax.parse_items(\"#![comptime(expansion_limit = 0)]\\nfn generated() {}\") }\nfn main() {}",
