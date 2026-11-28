@@ -17,7 +17,7 @@ fn check(source: &str) -> Vec<Diagnostic> {
     .unwrap();
     let paths = Default::default();
     let model = Model::new(&modules, &names, &paths).unwrap();
-    super::super::check(&model, &EarlyConstTable::default(), None)
+    super::super::check(&model, &EarlyConstTable::default(), None, cfg.target())
         .err()
         .unwrap_or_default()
 }

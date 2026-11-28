@@ -259,7 +259,7 @@ fn target_dir_name(kind: TargetKind) -> &'static str {
     }
 }
 
-fn image_bytes(target: TargetName, plan: &gugu_compiler::ImagePlan) -> &[u8] {
+pub(crate) fn image_bytes(target: TargetName, plan: &gugu_compiler::ImagePlan) -> &[u8] {
     match target {
         TargetName::X86_64Linux | TargetName::Aarch64Linux => plan.linux_image(),
         TargetName::X86_64Windows => plan.windows_image(),

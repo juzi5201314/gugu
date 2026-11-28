@@ -53,3 +53,43 @@ fn a64_catalog_uses_canonical_frozen_runtime_definitions_not_names_or_aliases() 
     .unwrap_err();
     assert!(error.to_string().contains("frozen body differ"));
 }
+
+#[test]
+fn aarch64_asm_reports_target_unsupported_before_x86_register_validation() {
+    use crate::{CompileRequest, Compiler, DiagnosticCode, TargetName};
+    let source = r#"
+        global_asm("add x0, x0, x0")
+        fn main() {
+            let x = 5
+            let y: int
+            unsafe { asm("add x0, x0, x0", in("x0") x, lateout("x0") y) }
+        }
+    "#;
+    for target in [TargetName::Aarch64Linux, TargetName::Aarch64Macos] {
+        let result = Compiler::shared()
+            .compile_sema_for_test(CompileRequest::single_file("main.gg", source, target));
+        assert!(!result.is_success());
+        let diagnostics = result.diagnostics().items();
+        assert!(
+            diagnostics
+                .iter()
+                .any(|error| error.code() == DiagnosticCode::InvalidExpression
+                    && error.message() == format!("目标 {target} 暂不支持 asm")),
+            "{diagnostics:?}"
+        );
+        assert!(
+            diagnostics
+                .iter()
+                .any(|error| error.code() == DiagnosticCode::InvalidExpression
+                    && error.message() == format!("目标 {target} 暂不支持 global_asm")),
+            "{diagnostics:?}"
+        );
+        assert!(
+            diagnostics
+                .iter()
+                .all(|error| !error.message().contains("x86-64-v1")
+                    && !error.message().contains("LIR pass")),
+            "{diagnostics:?}"
+        );
+    }
+}
