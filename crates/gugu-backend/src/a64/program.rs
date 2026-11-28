@@ -182,11 +182,13 @@ fn assemble(request: &ProgramRequest<'_>) -> Result<World, Error> {
 }
 
 fn linux_features(request: &ProgramRequest<'_>) -> LinuxFeatures {
-    let mut features = LinuxFeatures::default();
-    features.foreign = request
-        .catalog
-        .bindings()
-        .any(|(name, _)| matches!(name, "foreign_dispatch" | "foreign_dirty_dispatch"));
+    let mut features = LinuxFeatures {
+        foreign: request
+            .catalog
+            .bindings()
+            .any(|(name, _)| matches!(name, "foreign_dispatch" | "foreign_dirty_dispatch")),
+        ..LinuxFeatures::default()
+    };
     for instruction in request.bodies.iter().flat_map(|body| &body.instructions) {
         match instruction.op {
             Op::RuntimeMachineCall(RuntimeMachineOp::ResolverSymbol) => features.resolver = true,
