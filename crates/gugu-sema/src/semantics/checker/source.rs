@@ -14,9 +14,8 @@ impl Checker<'_, '_> {
         {
             return None;
         }
-        let path = self
-            .model
-            .external_path(self.module, &self.model.path(self.module, path))?;
+        let source_path = self.model.path(self.module, path);
+        let path = self.model.canonical_item_path(self.module, &source_path)?;
         let kind = match path.as_str() {
             "std.src.file" => SourceField::File,
             "std.src.line" => SourceField::Line,
