@@ -9,7 +9,7 @@ use crate::{ast, hir};
 use serde::{Deserialize, Serialize};
 use std::collections::{BTreeMap, BTreeSet};
 
-pub const INSTANCE_SCHEMA: u32 = 11;
+pub const INSTANCE_SCHEMA: u32 = 12;
 
 /// 调用位点使用 owner 内的确定性编号，不把定义级 callee 当作实例身份。
 #[derive(Clone, Copy, Debug, Eq, PartialEq, Ord, PartialOrd, Serialize, Deserialize)]
@@ -487,6 +487,7 @@ fn resolve_dispatch(
                 context.model.traits.interfaces[interface.id].name.as_str(),
                 &self_ty,
             ) {
+                ("Clone", _) => Some(("std/mem.gg", "clone_value")),
                 ("Hash", Ty::Tuple(_)) => Some(("std/hash.gg", "hash_tuple")),
                 ("Print" | "Debug", Ty::Tuple(_)) => Some(("std/fmt.gg", "format_tuple")),
                 ("Print" | "Debug", Ty::Array(..)) => Some(("std/fmt.gg", "format_array")),

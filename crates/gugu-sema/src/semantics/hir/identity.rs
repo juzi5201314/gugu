@@ -461,6 +461,8 @@ fn assign_lexical_parents(candidates: &mut [Candidate]) -> Result<(), Diagnostic
         let span = candidate.span.as_ref().expect("body owner 有源码位置");
         (
             candidate.module,
+            span.file(),
+            span.expansion(),
             span.start(),
             std::cmp::Reverse(span.end()),
         )
@@ -472,10 +474,7 @@ fn assign_lexical_parents(candidates: &mut [Candidate]) -> Result<(), Diagnostic
         while let Some(&parent) = stack.last() {
             let enclosing = &candidates[parent];
             let enclosing_span = enclosing.span.as_ref().expect("源码 body");
-            if current.module == enclosing.module
-                && span.start() >= enclosing_span.start()
-                && span.end() <= enclosing_span.end()
-            {
+            if current.module == enclosing.module && enclosing_span.contains(span) {
                 break;
             }
             stack.pop();

@@ -127,6 +127,7 @@ pub fn parse_module_in_expansion(
         arena: parsed.arena,
         tokens,
         configured,
+        derived_impls: Vec::new(),
         builtin,
     })
 }

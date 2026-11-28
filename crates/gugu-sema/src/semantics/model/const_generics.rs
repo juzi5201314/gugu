@@ -51,9 +51,12 @@ impl Model<'_> {
     ) -> Option<Ty> {
         let arena = &self.modules[module].arena;
         // parser 先分配内层 FnDecl，顺序遍历即由内到外；首个命中即 `parameters_at` 的胜出项。
-        for (index, owner) in arena.fns.iter().enumerate().filter(|(_, function)| {
-            function.span.start() <= span.start() && function.span.end() >= span.end()
-        }) {
+        for (index, owner) in arena
+            .fns
+            .iter()
+            .enumerate()
+            .filter(|(_, function)| function.span.contains(span))
+        {
             // 按名字先过滤：仅当 fn 有同名 comptime 参数才跑 `value_const_parameters`，
             // 避免对每个包含 span 的 owner 都执行 `mentions` 全模块扫描。
             let gated = owner
@@ -104,12 +107,12 @@ impl Model<'_> {
             let name = self.name(id.module, symbol);
             let mentions = |expression: ExprId| {
                 let span = &arena.exprs[expression.0 as usize].span;
-                span.start() >= function.span.start() && span.end() <= function.span.end()
-                    && arena.exprs.iter().any(|expr| expr.span.start() >= span.start() && expr.span.end() <= span.end()
+                function.span.contains(span)
+                    && arena.exprs.iter().any(|expr| span.contains(&expr.span)
                         && matches!(expr.kind, ExprKind::Path(path) if self.path(id.module, path) == [name]))
             };
             let used = arena.tys.iter().any(|ty| matches!(ty.kind, TyKind::Array { len, .. } if mentions(len))
-                || ty.span.start() >= function.span.start() && ty.span.end() <= function.span.end()
+                || function.span.contains(&ty.span)
                     && matches!(ty.kind, TyKind::Path(path) if self.path(id.module, path) == [name]))
                 || arena.exprs.iter().any(|expr| matches!(expr.kind, ExprKind::Repeat { count, .. } if mentions(count)));
             used.then(|| (index, name.to_owned(), format!("$value-const:{}:{}:{index}", id.module, id.function)))
@@ -270,8 +273,7 @@ impl Model<'_> {
         let arena = &self.modules[module].arena;
         let span = &arena.exprs[expression.0 as usize].span;
         arena.exprs.iter().any(|expr| {
-            expr.span.start() >= span.start()
-                && expr.span.end() <= span.end()
+            span.contains(&expr.span)
                 && matches!(expr.kind, ExprKind::Path(path)
                     if matches!(self.path(module, path).as_slice(), [name]
                         if matches!(params.get(*name), Some(Ty::Const(_)))))

@@ -465,6 +465,14 @@ impl Span {
         self.end
     }
 
+    /// 同一源码与展开上下文中的范围包含；不同生成文件的字节偏移不能互相覆盖。
+    pub fn contains(&self, other: &Self) -> bool {
+        self.file == other.file
+            && self.expansion == other.expansion
+            && self.start <= other.start
+            && self.end >= other.end
+    }
+
     /// 返回源码宏展开上下文。
     pub fn expansion(&self) -> ExpansionId {
         self.expansion

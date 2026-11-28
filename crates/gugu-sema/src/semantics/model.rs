@@ -9,6 +9,7 @@ use crate::{Diagnostic, DiagnosticCode};
 use std::collections::BTreeMap;
 mod attributes;
 mod const_generics;
+mod derive;
 pub use crate::array_length::ArrayLength;
 pub use attributes::Representation;
 mod lang;
@@ -94,6 +95,15 @@ impl<'a> Model<'a> {
                 )
                 .as_bytes(),
             );
+        }
+        for module in self.modules {
+            hash.update(&(module.path.len() as u64).to_le_bytes());
+            hash.update(module.path.as_bytes());
+            hash.update(&(module.derived_impls.len() as u64).to_le_bytes());
+            for (implementation, declaration) in &module.derived_impls {
+                hash.update(&implementation.0.to_le_bytes());
+                hash.update(&declaration.0.to_le_bytes());
+            }
         }
         *hash.finalize().as_bytes()
     }
@@ -394,6 +404,10 @@ impl<'a> Model<'a> {
                 }
             }
         }
+        model
+            .collect_derive_obligations()
+            .map_err(|error| vec![error])?;
+        model.validate_derives().map_err(|error| vec![error])?;
         model.validate_traits().map_err(|error| vec![error])?;
         model
             .validate_const_generics()
@@ -506,9 +520,12 @@ impl<'a> Model<'a> {
         let arena = &self.modules[module].arena;
         let mut params = self.associated_scope(module, span);
         // parser 先分配内层 FnDecl，逆序遍历使内层同名参数覆盖外层。
-        let owners = arena.fns.iter().enumerate().rev().filter(|(_, function)| {
-            function.span.start() <= span.start() && function.span.end() >= span.end()
-        });
+        let owners = arena
+            .fns
+            .iter()
+            .enumerate()
+            .rev()
+            .filter(|(_, function)| function.span.contains(span));
         for (index, owner) in owners {
             for id in self.apits(CallableId {
                 module,

@@ -1,6 +1,9 @@
 use std.runtime.pinning.{pin_prepare, pin_acquire, pin_release}
 use std.runtime.heap.{gc_arena_local_reset, gc_arena_local_destroy, gc_arena_shared_reset, gc_arena_shared_destroy}
 
+// 单态化选中内建 Clone 后复用普通取值，按具体类型完成语义复制和 COW 封存。
+fn clone_value[T](value: &T) T = *value
+
 /// 把输入根内的文件内容按 `[byte; N]` 编译期常量嵌入；路径相对调用
 /// 源文件目录解析，越出编译输入根或读失败都是编译错误。函数体与返回
 /// 类型只作声明占位：真实长度随文件字节数由 comptime evaluator 直接

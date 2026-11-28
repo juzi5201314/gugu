@@ -258,7 +258,7 @@ impl Model<'_> {
             .items
             .iter()
             .enumerate()
-            .filter(|(_, item)| item.span.start() <= span.start() && item.span.end() >= span.end())
+            .filter(|(_, item)| item.span.contains(span))
             .find_map(|(index, _)| {
                 self.traits
                     .owners
@@ -320,7 +320,7 @@ impl Model<'_> {
         let mut result = Vec::new();
         let params = self.parameters_at(module, span);
         for (index, item) in arena.items.iter().enumerate() {
-            if item.span.start() > span.start() || item.span.end() < span.end() {
+            if !item.span.contains(span) {
                 continue;
             }
             match self.traits.owners[module][index] {
@@ -358,7 +358,7 @@ impl Model<'_> {
             }
         }
         for (index, function) in arena.fns.iter().enumerate() {
-            if function.span.start() <= span.start() && function.span.end() >= span.end() {
+            if function.span.contains(span) {
                 result.extend(self.generic_obligations(module, function.generics, &params)?);
                 for id in self.apits(CallableId {
                     module,

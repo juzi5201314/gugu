@@ -23,6 +23,8 @@ use super::parse::{FragmentAst, FragmentKind, parse_fragment};
 use super::semantics::comptime::eval::{ConstantValue, ExpandHost};
 use super::{ParsedModule, cfg, names, semantics};
 
+pub(crate) mod derive;
+
 /// `ExpandSourceMacro` query 的 schema 版本。
 const EXPAND_SCHEMA_VERSION: u32 = 2;
 
@@ -173,6 +175,8 @@ pub fn run(
     let mut inputs = ExpansionInputs::default();
     let mut round = 0_u32;
     let mut generated = 0_u32;
+    // ItemId 在各模块内稠密且只追加；游标保证每个声明只展开一次。
+    let mut derived = vec![0; modules.len()];
     // 模块级 expansion_limit 属性无论是否存在宏都必须通过校验。
     for (module, parsed) in modules.iter().enumerate() {
         expansion_limit_attribute(
@@ -183,6 +187,15 @@ pub fn run(
         )?;
     }
     loop {
+        for (index, module) in modules.iter_mut().enumerate() {
+            derive::run(
+                module,
+                sources,
+                cfg,
+                &mut token_files[index],
+                &mut derived[index],
+            )?;
+        }
         let calls = collect(modules);
         if calls.is_empty() {
             break;

@@ -184,7 +184,7 @@ impl Model<'_> {
             Origin::Parameter(_) => false,
             Origin::Return(owner) => {
                 let function = &self.modules[module].arena.fns[owner.function as usize];
-                function.span.start() <= span.start() && function.span.end() >= span.end()
+                function.span.contains(span)
             }
         }
     }

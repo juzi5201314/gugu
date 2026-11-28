@@ -42,6 +42,8 @@ pub struct ParsedModule {
     pub arena: ast::AstArena,
     pub tokens: token::TokenBuffer,
     pub configured: cfg::ConfiguredAst,
+    /// 派生 impl 与原名义声明的模块内 ItemId；随 AST 展开构造，不是跨会话状态。
+    pub derived_impls: Vec<(ast::ItemId, ast::ItemId)>,
     /// 该模块来自 compiler 内建的源树登记，而不是用户源码。
     ///
     /// `std.option`、`std.runtime` 等公开标准库模块是 package API。`std.prelude`、`std.runtime.*` 与

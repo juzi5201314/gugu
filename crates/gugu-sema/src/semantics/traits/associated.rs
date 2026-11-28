@@ -168,8 +168,7 @@ impl Model<'_> {
         let name = self.name(module, segments.last().expect("非空路径").name);
         let mut assumptions = Vec::new();
         for function in &arena.fns {
-            if function.span.start() <= node.span.start() && function.span.end() >= node.span.end()
-            {
+            if function.span.contains(&node.span) {
                 assumptions.extend(self.generic_obligations(module, function.generics, params)?);
             }
         }

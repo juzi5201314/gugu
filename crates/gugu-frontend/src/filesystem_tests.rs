@@ -7,6 +7,7 @@ mod collections;
 mod const_generics;
 mod copy;
 mod debug_builders;
+mod derive;
 mod docs_examples;
 mod dyn_erasure;
 mod float_formatting;

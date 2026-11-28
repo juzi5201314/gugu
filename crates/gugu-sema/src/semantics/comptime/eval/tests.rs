@@ -27,6 +27,7 @@ fn evaluate_last_constant(source: &str) -> Result<ConstantValue, Diagnostic> {
         arena: parsed.arena,
         tokens: lexed.buffer,
         configured,
+        derived_impls: Vec::new(),
         builtin: false,
     }];
     let names = crate::names::analyze_with_prefix(

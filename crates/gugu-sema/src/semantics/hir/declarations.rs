@@ -320,9 +320,20 @@ impl Builder<'_, '_> {
                 parameters.entry(name).or_insert(ty);
             }
         }
-        let obligations = self
-            .model
-            .generic_obligations(module, generics, &parameters)?;
+        let obligations = if let Origin::Named(index) = origin
+            && let Some(definition) = self.identities.named_items[index]
+            && matches!(
+                self.model.modules[module].arena.items[definition.item.0 as usize].kind,
+                ast::ItemKind::Impl { .. }
+            )
+            && let Some(traits::Owner::Implementation(index)) =
+                self.model.traits.owners[module][definition.item.0 as usize]
+        {
+            self.model.traits.implementations[index].obligations.clone()
+        } else {
+            self.model
+                .generic_obligations(module, generics, &parameters)?
+        };
         for obligation in obligations {
             let bound = hir::Obligation::Trait {
                 ty: self.type_id(&obligation.ty, owner)?,

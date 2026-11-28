@@ -1,0 +1,8 @@
+true/true/Pair { a: 1, b: x }
+Wrapped(7)
+true/true/Value(3)/Named { value: 4 }/Empty
+true/4/Nested { value: custom }
+4
+Empty { }/Configured { value: 9 }/Generated { value: 2 }
+true/Phantom { }
+Wrapper { value: Some(debug) }/Outcome { value: Err(debug) }

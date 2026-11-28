@@ -45,6 +45,7 @@ fn with_model(source: &str, test: impl FnOnce(&Model<'_>, &[ParsedModule])) {
                 arena: parsed.arena,
                 tokens: lexed.buffer,
                 configured,
+                derived_impls: Vec::new(),
                 builtin: *path != "main.gg",
             }
         })

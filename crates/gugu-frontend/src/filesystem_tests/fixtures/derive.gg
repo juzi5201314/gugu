@@ -1,0 +1,66 @@
+use std.io.{println}
+
+#[derive(Eq, Clone, Print)]
+struct Pair { pub a: int, pub b: string }
+
+#[derive(Eq, Clone, Print)]
+struct Wrapped(int)
+
+#[derive(Eq, Clone, Print)]
+enum Choice[T] { Empty, Value(T), Named { value: T } }
+
+struct Custom { value: int }
+impl Clone for Custom { fn clone(self: &Self) Self = Custom { value: self.value + 1 } }
+impl Eq for Custom { fn eq(self: &Self, other: &Self) bool = self.value % 2 == other.value % 2 }
+impl Print for Custom { fn print(self: &Self, out: &Formatter) { out.write_str("custom") } }
+
+#[derive(Eq, Clone, Print)]
+struct Nested { value: Custom }
+
+#[derive(Eq, Clone, Print)]
+struct Empty {}
+
+struct Excluded {}
+
+#[derive(Eq, Clone, Print)]
+struct Phantom[T] {}
+
+struct OnlyDebug {}
+impl Debug for OnlyDebug { fn debug(self: &Self, out: &Formatter) { out.write_str("debug") } }
+
+#[derive(Print)]
+struct Wrapper[T] { value: Option[T] }
+
+#[derive(Print)]
+struct Outcome[T, E] { value: Result[T, E] }
+
+#[derive(Eq, Clone, Print)]
+struct Configured {
+    value: int,
+    #[cfg(false)] excluded: Excluded,
+}
+
+comptime source {
+    std.syntax.parse_items("#[derive(Eq, Clone, Print)]\nstruct Generated { value: int }")
+}
+
+fn main() {
+    let p = Pair { a: 1, b: "x" }
+    let q = p.clone()
+    println(p == q, "/", p != Pair { a: 2, b: "x" }, "/", q)
+    println(Wrapped(7).clone())
+    let value: Choice[int] = Choice::Value(3)
+    let named: Choice[int] = Choice::Named { value: 4 }
+    let empty: Choice[int] = Choice[int]::Empty
+    println(value == value.clone(), "/", value != named, "/", value, "/", named, "/", empty)
+    let nested = Nested { value: Custom { value: 3 } }
+    println(nested == Nested { value: Custom { value: 5 } }, "/", nested.clone().value.value, "/", nested)
+    let custom: Choice[Custom] = Choice::Value(Custom { value: 3 })
+    match custom.clone() { Choice::Value(value) => println(value.value), _ => panic("wrong variant") }
+    println(Empty {}.clone(), "/", Configured { value: 9 }.clone(), "/", Generated { value: 2 }.clone())
+    let phantom: Phantom[Excluded] = Phantom[Excluded] {}
+    println(phantom == phantom.clone(), "/", phantom)
+    let wrapper: Wrapper[OnlyDebug] = Wrapper { value: Some(OnlyDebug {}) }
+    let outcome: Outcome[OnlyDebug, OnlyDebug] = Outcome { value: Err(OnlyDebug {}) }
+    println(wrapper, "/", outcome)
+}

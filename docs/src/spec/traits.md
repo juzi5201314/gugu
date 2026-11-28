@@ -152,6 +152,8 @@ trait Default {
 
 `==` `!=` 对用户类型走 `Eq`；`<` 等走 `Ord`。`#[derive(Clone)]` / `#[derive(Eq)]` / `#[derive(Ord)]` / `#[derive(Hash)]` / `#[derive(Print)]` 要求所有参与字段都实现对应 trait；稳定键 marker 的额外派生约束见上。`Ord` 必须是全序，Hash 必须与 Eq 一致。`float` 的比较是内置 IEEE，语言不提供 `Ord`、`Hash` 或稳定键 marker；用户也不能给 `float` 写固有 impl（固有 impl 只能写在该类型的定义模块）。含浮点字段不能派生 Eq、Ord、Hash 或稳定键 marker。`TypeId` 的比较由编译器按编号直接做，并提供 Eq、Ord、Hash、StableHash 与 StableOrd。数组与元组：编译器生成适用的 Clone、Eq、Ord、Hash、StableHash、StableOrd、Print 与 Debug（元素满足约束时）；元素都有 `Default` 时也生成 `Default`。`Clone` 见 [传递](passing.md)。
 
+派生 `Eq` 按声明顺序比较全部有效字段；枚举先区分变体，不同变体不相等。派生 `Clone` 逐字段调用对应实现并重建同一类型、同一变体，不能以普通值复制替代字段的自定义 clone。派生 `Print` 逐字段调用 Print；newtype 与元组变体使用 `Name(...)`，具名字段使用 `Name { field: ... }`，无载荷变体只输出变体名。`cfg` 排除的字段和变体不参与派生。泛型派生保留声明已有约束，并要求实际参与字段的类型实现所派生的接口；约束只作用于该 impl，不限制类型自身的构造。未用于有效字段的类型参数不增加约束；例如 `Option[T]` 字段的 `Print` 约束按该类型的实现要求 `T: Debug`。字段不满足派生约束时，诊断必须标出字段声明、字段名及缺失的接口。派生实现与显式实现遵守相同的重叠检查规则。
+
 ### `Any`
 
 <!-- docs-example: parse -->
