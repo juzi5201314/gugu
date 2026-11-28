@@ -307,6 +307,30 @@ fn collections_aggregate_keys_and_structural_comparisons() {
 }
 
 #[test]
+fn struct_patterns_with_rest_use_declared_field_positions() {
+    assert_eq!(
+        printed(
+            r#"
+            use std.io.{println}
+            struct P { x: int, y: int, z: int }
+            enum E { Record { x: int, y: int, z: int }, Other }
+            fn main() {
+                let p = P { x: 1, y: 2, z: 3 }
+                println(match p { P { z: 3, .. } => true, _ => false })
+                println(match p { P { z, .. } => z, _ => 0 })
+                println(match p { P { y, .. } => y, _ => 0 })
+                println(match p { P { z, y, .. } => z * 10 + y, _ => 0 })
+                let e = E::Record { x: 1, y: 2, z: 3 }
+                println(match e { E::Record { z: 3, .. } => true, _ => false })
+                println(match e { E::Record { z, y, .. } => z * 10 + y, _ => 0 })
+            }
+            "#,
+        ),
+        "true\n3\n2\n32\ntrue\n32\n"
+    );
+}
+
+#[test]
 fn collections_maps_sets_and_scoped_views() {
     let map_operations = r#"
         let missing = 99
