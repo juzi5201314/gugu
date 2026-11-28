@@ -108,9 +108,9 @@ runtime 契约签名的记录目录不计入 executable mono/GIR/LIR body 数量
 
 等待 runtime 计划在 `wait-runtime` 中报告内联 select case 上限、scratch/wait-node class、源种类与 node 字段目录，以及来自优化后 LIR 的 channel/Join/select 需求计数。`wait-contract-fingerprint` 是该对象的 32 字节内容身份；这些内部字段不构成跨镜像稳定 ABI。
 
-### `gugu run [target] [args...]`
+### `gugu run [target] [-- args...]`
 
-编译并运行 bin target；`--example <name>` 改为编译并运行指定 example target。无 target 时按 `default-run` 或唯一 bin 选择；多个 bin 且无 `default-run` 是错误。位置 target 与 `--example` 不能同时使用。`--` 之后的参数原样传给程序。可执行镜像只能在宿主目标上运行：`--target` 不是宿主目标时按用法错误拒绝，退出码 `2`。进程透传子镜像的退出码。
+编译并运行 bin target；`--example <name>` 改为编译并运行指定 example target。无 target 时按 `default-run` 或唯一 bin 选择；多个 bin 且无 `default-run` 是错误。位置 target 与 `--example` 不能同时使用。程序实参必须放在 `--` 后：`gugu run -- a1 a2` 向默认 target 传递两个实参，`gugu run app -- a1 a2` 显式选择 `app`。分隔符之后的值全部原样传给程序，包括形如工具链选项的值与非 UTF-8 OS 字符串，不再用于 target 选择或工具链选项解析。可执行镜像只能在宿主目标上运行：`--target` 不是宿主目标时按用法错误拒绝，退出码 `2`。进程透传子镜像的退出码。
 
 ### `gugu test`
 

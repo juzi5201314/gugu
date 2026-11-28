@@ -308,13 +308,6 @@ fn spawn_image(path: &Path, args: &[OsString], format: OutputFormat) -> i32 {
     }
 }
 
-fn passthrough_args(args: &[OsString]) -> &[OsString] {
-    match args.first().and_then(|arg| arg.to_str()) {
-        Some("--") => &args[1..],
-        _ => args,
-    }
-}
-
 /// 编译选定 target 集并逐个执行产物；返回最大退出码。
 #[expect(clippy::too_many_arguments, reason = "编排需要完整的编译与执行上下文")]
 fn compile_and_exec(
@@ -399,7 +392,7 @@ fn compile_and_exec(
                     format!("期望的可执行产物不存在：`{}`", path.display()),
                 );
             }
-            let child = spawn_image(&path, passthrough_args(args), format);
+            let child = spawn_image(&path, args, format);
             exit_code = exit_code.max(child);
         }
     }
@@ -560,8 +553,6 @@ fn run_test_or_bench(test: bool, args: &[OsString], options: &GlobalArgs) -> i32
 
 #[cfg(test)]
 mod tests {
-    use std::ffi::OsString;
-
     use super::*;
 
     #[test]
@@ -616,17 +607,6 @@ mod tests {
                 .unwrap_err()
                 .contains("不能同时使用")
         );
-    }
-
-    #[test]
-    fn passthrough_strips_leading_separator() {
-        let args: Vec<OsString> = ["--", "-v", "x"].iter().map(OsString::from).collect();
-        assert_eq!(
-            passthrough_args(&args),
-            [OsString::from("-v"), OsString::from("x")]
-        );
-        let bare: Vec<OsString> = ["x"].iter().map(OsString::from).collect();
-        assert_eq!(passthrough_args(&bare), [OsString::from("x")]);
     }
 
     #[test]

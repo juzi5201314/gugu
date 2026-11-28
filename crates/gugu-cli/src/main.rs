@@ -13,6 +13,9 @@ mod output;
 mod package_cmds;
 mod registry_cmds;
 
+#[cfg(test)]
+mod args_tests;
+
 #[cfg(all(test, feature = "slow-tests"))]
 #[path = "main_tests.rs"]
 mod tests;
@@ -222,10 +225,11 @@ pub(crate) enum Command {
     /// 执行编译检查但不准备镜像计划。
     Check { file: Option<PathBuf> },
     /// 编译并运行 bin target。
-    #[command(trailing_var_arg = true)]
     Run {
         #[arg(value_name = "target")]
         target_name: Option<String>,
+        /// `--` 后原样传给程序的实参。
+        #[arg(last = true)]
         args: Vec<OsString>,
     },
     /// 编译并运行 test target。
