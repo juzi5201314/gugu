@@ -39,6 +39,6 @@ threads-required = 6
 # a64 整程序装配用例每次编译一到两个完整程序（闭世界 LIR + 平台片段 + 镜像），
 # 占六槽并放宽单项时限：并行负载下两次顺序装配可超过默认 3 秒。
 [[profile.default.overrides]]
-filter = 'test(/^filesystem_tests::a64_image::/)'
+filter = 'test(/^filesystem_tests::a64_image::/) | test(/^output::tests::image_len_includes_macho_bytes$/)'
 threads-required = 6
 slow-timeout = { period = "10s", terminate-after = 1, grace-period = "1s", on-timeout = "fail" }
