@@ -104,7 +104,7 @@ fn native_file_errors_preserve_categories_and_unknown_codes() {
             ][..],
         ),
     ] {
-        let output = Compiler::shared().compile(CompileRequest::single_file(
+        let output = Compiler::shared().compile_to_lir(CompileRequest::single_file(
             "main.gg",
             "use std.io as io\nfn main() { _ = io.from_native_error(13) }",
             target,
@@ -124,7 +124,7 @@ fn native_file_errors_preserve_categories_and_unknown_codes() {
 
 #[test]
 fn file_options_validate_every_combination_before_native_open() {
-    let output = Compiler::shared().compile(CompileRequest::single_file(
+    let output = Compiler::shared().compile_to_lir(CompileRequest::single_file(
         "main.gg", "use std.fs as fs\nuse std.path.{Path}\nfn main() { _ = fs.open(Path::from_string(\"unused\"), fs.OpenOptions::new()) }", TargetName::X86_64Linux,
     ));
     assert!(output.is_success(), "{:?}", output.diagnostics().items());
@@ -156,7 +156,7 @@ fn file_options_validate_every_combination_before_native_open() {
 
 #[test]
 fn windows_nofollow_defers_truncation_until_handle_validation() {
-    let output = Compiler::shared().compile(CompileRequest::single_file(
+    let output = Compiler::shared().compile_to_lir(CompileRequest::single_file(
         "main.gg", "use std.fs as fs\nuse std.path.{Path}\nfn main() { _ = fs.open(Path::from_string(\"unused\"), fs.OpenOptions::new()) }", TargetName::X86_64Windows,
     ));
     assert!(output.is_success(), "{:?}", output.diagnostics().items());
@@ -249,25 +249,21 @@ fn interpret_traced(
             base
         })
         .collect();
-    let root_bases: Vec<_> = body
-        .stack_slots
-        .iter()
-        .enumerate()
-        .map(|(index, slot)| {
-            if body
-                .instructions
-                .iter()
-                .any(|inst| matches!(inst.op, Op::RootInitAddr(id) if id.index() == index))
+    let mut root_bases = vec![None; body.stack_slots.len()];
+    if !body.stack_slots.is_empty() {
+        for instruction in &body.instructions {
+            if let Op::RootInitAddr(id) = instruction.op
+                && root_bases[id.index()].is_none()
             {
                 let base = memory.len() as u64;
-                memory.resize(memory.len() + slot.roots.len(), 0);
-                Some(base)
-            } else {
-                None
+                memory.resize(memory.len() + body.stack_slots[id.index()].roots.len(), 0);
+                root_bases[id.index()] = Some(base);
             }
-        })
-        .collect();
+        }
+    }
     let mut values = vec![0u64; body.values.len()];
+    let mut args = Vec::new();
+    let mut incoming = Vec::new();
     let mut block = body.entry;
     assert_eq!(body.params(block).len() - 1, arguments.len());
     for (parameter, value) in body.params(block).iter().skip(1).zip(arguments) {
@@ -293,7 +289,8 @@ fn interpret_traced(
                 );
             }
             let operands = body.args(&instruction.arguments);
-            let args: Vec<_> = operands.iter().map(|value| values[value.index()]).collect();
+            args.clear();
+            args.extend(operands.iter().map(|value| values[value.index()]));
             let value = match instruction.op {
                 Op::StackCheck
                 | Op::ScopedViewBegin { .. }
@@ -502,11 +499,12 @@ fn interpret_traced(
                 unwind,
                 ..
             } => {
-                let args: Vec<_> = body
-                    .args(arguments)
-                    .iter()
-                    .map(|value| values[value.index()])
-                    .collect();
+                args.clear();
+                args.extend(
+                    body.args(arguments)
+                        .iter()
+                        .map(|value| values[value.index()]),
+                );
                 let saved = memory.len();
                 let returned = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
                     call(Boundary::Call(&invoked.target), &args, memory)
@@ -559,12 +557,13 @@ fn interpret_traced(
             other => panic!("纯函数解释器遇到未登记终结符：{}: {other:?}", body.name),
         };
         let edge = &body.edges[edge.index()];
-        let incoming: Vec<_> = body
-            .args(&edge.arguments)
-            .iter()
-            .map(|value| values[value.index()])
-            .collect();
-        for (parameter, value) in body.params(edge.to).iter().zip(incoming) {
+        incoming.clear();
+        incoming.extend(
+            body.args(&edge.arguments)
+                .iter()
+                .map(|value| values[value.index()]),
+        );
+        for (parameter, &value) in body.params(edge.to).iter().zip(&incoming) {
             values[parameter.value.index()] = value;
         }
         block = edge.to;

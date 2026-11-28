@@ -1,4 +1,4 @@
-use super::codegen::BlobRelocation;
+use super::codegen::{BlobRelocation, BlobRelocationKind};
 use super::pe::{
     ObjectReloc, ObjectSymbol, PeRequest, RelocKindCode, extract_coff_archive, link,
     link_with_layout, pack_coff_archive, reject_writable_executable,
@@ -37,13 +37,15 @@ fn metadata_blob_symbol_relocations_are_filled_at_link_time() {
     meta.extend_from_slice(&[0u8; 8]);
     prepared.readonly.push((".ggmeta".to_owned(), meta));
     prepared.blob_relocations = vec![BlobRelocation {
+        blob: ".ggmeta".to_owned(),
         offset: 8,
         symbol: "main".to_owned(),
+        kind: BlobRelocationKind::Rva,
     }];
     // 符号 RVA 只有布局知道；用同一请求布局一次拿到它，再比对镜像里回填的字。
     let (_, layout) = link_with_layout(&prepared).expect("布局");
-    let expected = layout["main"];
     let image = link(&prepared).expect("镜像");
+    let expected = u64::from(image.entry_rva) + layout["main"];
     let at = image
         .bytes
         .windows(8)
@@ -53,14 +55,45 @@ fn metadata_blob_symbol_relocations_are_filled_at_link_time() {
     assert_eq!(value, expected, "元数据符号必须回填成符号布局给出的 RVA");
 
     prepared.blob_relocations = vec![BlobRelocation {
+        blob: ".ggmeta".to_owned(),
         offset: 8,
         symbol: "missing_symbol".to_owned(),
+        kind: BlobRelocationKind::Rva,
     }];
     let error = link(&prepared).expect_err("缺失符号必须失败");
     assert!(
         error.contains("missing_symbol"),
         "失败信息必须点名符号：{error}"
     );
+}
+
+#[test]
+fn absolute_blob_relocations_are_image_addresses_and_relocated() {
+    let mut prepared = request("main", vec![symbol("main", vec![0xc3], Vec::new())]);
+    prepared.constants.push((
+        "vtable".to_owned(),
+        vec![
+            0, 0, 0, 0, 0, 0, 0, 0, b'V', b'T', b'A', b'B', b'L', b'E', b'0', b'1',
+        ],
+    ));
+    prepared.blob_relocations = vec![BlobRelocation {
+        blob: "vtable".to_owned(),
+        offset: 0,
+        symbol: "main".to_owned(),
+        kind: BlobRelocationKind::Absolute,
+    }];
+    let (_, layout) = link_with_layout(&prepared).expect("布局");
+    let image = link(&prepared).expect("镜像");
+    let marker = image
+        .bytes
+        .windows(8)
+        .position(|window| window == b"VTABLE01")
+        .expect("vtable 必须在镜像内");
+    let at = marker - 8;
+    let value = u64::from_le_bytes(image.bytes[at..at + 8].try_into().expect("回填字"));
+    let expected = 0x0000_0001_4000_0000 + u64::from(image.entry_rva) + layout["main"];
+    assert_eq!(value, expected, "vtable 必须回填可解引用虚拟地址");
+    assert!(image.reloc_count >= 1, "绝对 vtable 入口必须进入 .reloc");
 }
 
 #[test]
@@ -495,7 +528,7 @@ fn coff_archive_extracts_only_the_named_member() {
 #[ignore = "slow full compilation"]
 fn compiled_windows_main_is_an_exe_and_linux_image_is_absent() {
     let source = "fn main() {}";
-    let compilation = Compiler::shared().compile(CompileRequest::single_file(
+    let compilation = Compiler::shared().compile_full_for_test(CompileRequest::single_file(
         "main.gg",
         source,
         TargetName::X86_64Windows,
@@ -515,7 +548,7 @@ fn compiled_windows_main_is_an_exe_and_linux_image_is_absent() {
     assert_eq!(&bytes[64..68], b"PE\0\0");
     assert!(bytes.windows(8).any(|window| window == b"GUGUSM01"));
     assert!(bytes.windows(8).any(|window| window == b"GUGUUN01"));
-    let again = Compiler::new().compile(CompileRequest::single_file(
+    let again = Compiler::new().compile_full_for_test(CompileRequest::single_file(
         "main.gg",
         source,
         TargetName::X86_64Windows,

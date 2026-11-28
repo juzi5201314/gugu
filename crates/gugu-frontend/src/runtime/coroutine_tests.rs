@@ -8,7 +8,8 @@ use crate::{CompileRequest, Compiler, TargetName};
 fn assert_source_coroutines_reach_image_plan(target: TargetName) {
     let compiler = Compiler::shared();
     let source = include_str!("fixtures/coroutines.gg");
-    let compile = || compiler.compile(CompileRequest::single_file("main.gg", source, target));
+    let compile =
+        || compiler.compile_full_for_test(CompileRequest::single_file("main.gg", source, target));
     let cold = compile();
     let warm = compile();
     assert!(cold.is_success(), "{:?}", cold.diagnostics().items());

@@ -465,6 +465,29 @@ impl std::fmt::Display for PlatformIntrinsic {
 }
 
 impl Model<'_> {
+    /// 规范的项路径身份：编译器拥有项按规范路径还原，源码声明项按定义位置还原。
+    /// 调用方仍负责先排除局部绑定遮蔽。
+    pub(in super::super) fn canonical_item_path(
+        &self,
+        module: usize,
+        path: &[&str],
+    ) -> Option<String> {
+        self.external_path(module, path)
+            .or_else(|| self.resolved_definition_path(module, path))
+    }
+
+    fn resolved_definition_path(&self, module: usize, path: &[&str]) -> Option<String> {
+        let definition = self.resolve(module, path).ok()?;
+        let item = &self.modules[definition.module].arena.items[definition.item.0 as usize];
+        let name = self.name(definition.module, item.name?);
+        let module_path = &self.modules[definition.module].path;
+        if module_path.is_empty() {
+            Some(name.to_owned())
+        } else {
+            Some(format!("{module_path}.{name}"))
+        }
+    }
+
     pub(in super::super) fn external_path(&self, module: usize, path: &[&str]) -> Option<String> {
         self.external_path_inner(module, path, false)
     }

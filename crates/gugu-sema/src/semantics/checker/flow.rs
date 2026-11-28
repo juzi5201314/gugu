@@ -1,4 +1,7 @@
 use super::*;
+
+#[cfg(test)]
+mod tests;
 impl Checker<'_, '_> {
     pub(super) fn merge(&mut self, base: &State, branches: &[State]) {
         let reachable: Vec<_> = branches.iter().filter(|s| s.reachable).collect();
@@ -91,14 +94,7 @@ impl Checker<'_, '_> {
             }
         }
         let ty = tail.map_or(Ty::Unit, |id| {
-            let statement_if = expected == Some(&Ty::Unit)
-                && matches!(
-                    self.arena().exprs[id.0 as usize].kind,
-                    ExprKind::If {
-                        else_branch: None,
-                        ..
-                    }
-                );
+            let statement_if = expected == Some(&Ty::Unit) && self.incomplete_if_chain(id);
             if discarded || statement_if {
                 self.discarded(id)
             } else {
@@ -334,6 +330,20 @@ impl Checker<'_, '_> {
             }
         }
     }
+
+    fn incomplete_if_chain(&self, id: ExprId) -> bool {
+        match self.arena().exprs[id.0 as usize].kind {
+            ExprKind::If {
+                else_branch: None, ..
+            } => true,
+            ExprKind::If {
+                else_branch: Some(branch),
+                ..
+            } => self.incomplete_if_chain(branch),
+            _ => false,
+        }
+    }
+
     pub(super) fn branch(
         &mut self,
         cond: ExprId,
@@ -366,8 +376,12 @@ impl Checker<'_, '_> {
                 );
             }
             Ty::Unit
-        } else {
+        } else if value_used {
             self.join(&left, &right, &self.arena().exprs[cond.0 as usize].span)
+        } else if self.resolve(&left) == Ty::Never && self.resolve(&right) == Ty::Never {
+            Ty::Never
+        } else {
+            Ty::Unit
         }
     }
     pub(super) fn matching(

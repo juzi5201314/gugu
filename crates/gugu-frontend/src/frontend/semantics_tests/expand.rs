@@ -2,12 +2,12 @@
 
 use crate::{CompileRequest, Compiler, DiagnosticCode, TargetName};
 
+fn request(source: &str) -> CompileRequest {
+    CompileRequest::single_file("main.gg", source, TargetName::X86_64Linux)
+}
+
 fn compile(source: &str) -> crate::Compilation {
-    Compiler::shared().compile(CompileRequest::single_file(
-        "main.gg",
-        source,
-        TargetName::X86_64Linux,
-    ))
+    Compiler::shared().compile_to_lir(request(source))
 }
 
 fn accepts(source: &str) -> bool {
@@ -40,8 +40,7 @@ fn rejects_with(source: &str, code: DiagnosticCode) -> crate::Compilation {
 }
 
 #[test]
-// 这个测试调用 compile 做完整编译，耗时过长；移出默认套件
-#[ignore = "integration test with full compilation"]
+#[ignore]
 fn expression_slot_macro_expands_into_initializer() {
     // spec/comptime.md 的示例：表达式 slot 宏生成 `1 + 2`。
     assert!(accepts(
@@ -50,8 +49,7 @@ fn expression_slot_macro_expands_into_initializer() {
 }
 
 #[test]
-// 这个测试调用 compile 做完整编译，耗时过长；移出默认套件
-#[ignore = "integration test with full compilation"]
+#[ignore]
 fn expression_slot_macro_registers_expansion_record() {
     let compilation = compile(
         "fn main() { let value = comptime source {\n    std.syntax.parse_source(\"1 + 2\")\n}\n _ = value }",
@@ -67,7 +65,7 @@ fn expression_slot_macro_registers_expansion_record() {
 }
 
 #[test]
-#[ignore = "slow full compilation"]
+#[ignore]
 fn item_slot_macro_generates_functions() {
     assert!(accepts(
         "comptime source {\n    std.syntax.parse_items(\"fn helper() int { 7 }\")\n}\nfn main() { _ = helper() }"
@@ -75,7 +73,7 @@ fn item_slot_macro_generates_functions() {
 }
 
 #[test]
-#[ignore = "slow full compilation"]
+#[ignore]
 fn statement_slot_macro_expands_statements_and_tail() {
     // 语句 slot：宏位于块尾，生成 `let x = 5` 语句与 `x + 1` 尾表达式。
     // 片段尾表达式成为内层块的块尾，块值再绑定到 v。
@@ -85,7 +83,7 @@ fn statement_slot_macro_expands_statements_and_tail() {
 }
 
 #[test]
-#[ignore = "slow full compilation"]
+#[ignore]
 fn statement_slot_macro_in_block_middle_without_tail() {
     // 宏在块中部：生成语句（无尾表达式），块的尾表达式来自后续源码。
     assert!(accepts(
@@ -94,7 +92,7 @@ fn statement_slot_macro_in_block_middle_without_tail() {
 }
 
 #[test]
-#[ignore = "slow full compilation"]
+#[ignore]
 fn type_slot_macro_expands_into_type_position() {
     assert!(accepts(
         "fn main() { let pair: comptime source {\n    std.syntax.parse_type(\"(int, bool)\")\n} = (1, true)\n _ = pair }"
@@ -102,7 +100,7 @@ fn type_slot_macro_expands_into_type_position() {
 }
 
 #[test]
-#[ignore = "slow full compilation"]
+#[ignore]
 fn pattern_slot_macro_expands_into_match_arm() {
     assert!(accepts(
         "fn pick(pair: (int, int)) int { match pair { comptime source {\n    std.syntax.parse_pattern(\"(a, b)\")\n} => a + b } }\nfn main() { _ = pick((1, 2)) }"
@@ -110,7 +108,7 @@ fn pattern_slot_macro_expands_into_match_arm() {
 }
 
 #[test]
-#[ignore = "slow full compilation"]
+#[ignore]
 fn nested_macro_registers_parent_chain_over_two_rounds() {
     // 外层宏生成包含内层宏的源码；第二轮展开内层宏。
     let source = "comptime source {\n    std.syntax.parse_items(\"comptime source {\\n    std.syntax.parse_items(\\\"fn inner() int { 9 }\\\")\\n}\\nfn outer() int { inner() }\")\n}\nfn main() { _ = outer() }";
@@ -122,7 +120,7 @@ fn nested_macro_registers_parent_chain_over_two_rounds() {
 }
 
 #[test]
-#[ignore = "slow full compilation"]
+#[ignore]
 fn generated_items_respect_cfg_pruning() {
     // 生成片段中的 cfg(false) item 必须被裁掉，不进入名称解析。
     assert!(accepts(
@@ -132,6 +130,38 @@ fn generated_items_respect_cfg_pruning() {
         "comptime source {\n    std.syntax.parse_items(\"#[cfg(false)]\\nfn dead() int { 1 }\")\n}\nfn main() { _ = dead() }",
         DiagnosticCode::InvalidType,
     );
+}
+
+#[test]
+fn len_is_available_in_source_macro_scripts() {
+    assert!(accepts(
+        "fn main() { let v = comptime source {\n    let s = \"abc\"\n    if s.len() == 3 {\n        std.syntax.parse_expr(\"1\")\n    } else {\n        std.syntax.parse_expr(\"2\")\n    }\n}\n _ = v }"
+    ));
+    assert!(accepts(
+        "fn main() { let v = comptime source {\n    let xs = [1, 2, 3]\n    if xs.len() == 3 {\n        std.syntax.parse_expr(\"1\")\n    } else {\n        std.syntax.parse_expr(\"2\")\n    }\n}\n _ = v }"
+    ));
+    assert!(accepts(
+        "const S: string = \"abc\"\nfn main() { let v = comptime source {\n    if S.len() == 3 {\n        std.syntax.parse_expr(\"1\")\n    } else {\n        std.syntax.parse_expr(\"2\")\n    }\n}\n _ = v }"
+    ));
+    assert!(accepts(
+        "const N = \"abc\".len()\nconst A = [1, 2].len()\nfn main() { _ = N\n _ = A }"
+    ));
+}
+
+#[test]
+fn constant_paths_are_len_receivers_in_source_macro_scripts() {
+    let queries = crate::QueryEngine::new();
+    super::frontend(
+        &[
+            (
+                "main.gg",
+                "use constants\nuse constants.{S as T}\nfn main() {\n let a = comptime source {\n    if T.len() == 3 { std.syntax.parse_expr(\"1\") } else { std.syntax.parse_expr(\"2\") }\n}\n let b = comptime source {\n    if constants.S.len() == 3 { std.syntax.parse_expr(\"1\") } else { std.syntax.parse_expr(\"2\") }\n}\n _ = a\n _ = b }",
+            ),
+            ("constants.gg", "pub const S: string = \"abc\""),
+        ],
+        &queries,
+    )
+    .unwrap();
 }
 
 #[test]
@@ -169,7 +199,7 @@ fn uncaught_syntax_error_becomes_macro_boundary_error() {
 }
 
 #[test]
-#[ignore = "slow full compilation"]
+#[ignore]
 fn script_catches_syntax_error_and_falls_back() {
     // 脚本用 match 捕获 Err(SyntaxError)，回退到候选文本。
     assert!(accepts(
@@ -281,13 +311,12 @@ fn macro_in_early_const_domain_is_rejected() {
 }
 
 #[test]
-// 这个测试调用 compile 做完整编译，耗时过长；移出默认套件
 #[ignore = "integration test with full compilation"]
 fn cold_and_warm_compilations_agree() {
     let source = "comptime source {\n    std.syntax.parse_items(\"fn gen() int { 3 }\")\n}\nfn main() { _ = gen() }";
     let compiler = Compiler::new();
     let run = || {
-        compiler.compile(CompileRequest::single_file(
+        compiler.compile_full_for_test(CompileRequest::single_file(
             "main.gg",
             source,
             TargetName::X86_64Linux,
@@ -309,13 +338,13 @@ fn cold_and_warm_compilations_agree() {
 }
 
 #[test]
-// 这个测试调用 compile 做完整编译，耗时过长；移出默认套件
 #[ignore = "integration test with full compilation"]
 fn action_key_is_sensitive_to_generated_text() {
     let base = "comptime source {\n    std.syntax.parse_items(\"fn gen() int { 3 }\")\n}\nfn main() { _ = gen() }";
     let changed = "comptime source {\n    std.syntax.parse_items(\"fn gen() int { 4 }\")\n}\nfn main() { _ = gen() }";
-    let first = compile(base);
-    let second = compile(changed);
+    let compiler = Compiler::shared();
+    let first = compiler.compile_full_for_test(request(base));
+    let second = compiler.compile_full_for_test(request(changed));
     assert!(first.is_success());
     assert!(second.is_success());
     assert_ne!(
@@ -326,7 +355,7 @@ fn action_key_is_sensitive_to_generated_text() {
 }
 
 #[test]
-#[ignore = "slow full compilation"]
+#[ignore]
 fn macro_free_sources_keep_baseline_pipeline() {
     // 无宏源码：展开驱动器直通，快照表不含生成文件，主链行为不变。
     let compilation = compile("fn main() { let x = 1\n _ = x }");
@@ -336,11 +365,10 @@ fn macro_free_sources_keep_baseline_pipeline() {
 }
 
 #[test]
-// 这个测试调用 compile 做完整编译，耗时过长；移出默认套件
 #[ignore = "integration test with full compilation"]
 fn dual_target_macro_smoke() {
     for target in [TargetName::X86_64Linux, TargetName::X86_64Windows] {
-        let compilation = Compiler::shared().compile(CompileRequest::single_file(
+        let compilation = Compiler::shared().compile_full_for_test(CompileRequest::single_file(
             "main.gg",
             "comptime source {\n    std.syntax.parse_items(\"fn gen() int { 5 }\")\n}\nfn main() { _ = gen() }",
             target,
@@ -350,18 +378,12 @@ fn dual_target_macro_smoke() {
 }
 
 #[test]
-#[ignore = "slow full compilation"]
+#[ignore]
 fn query_cache_returns_same_expansion_data() {
     // 相同生成文本复用 ParseSource/ExpandSourceMacro 缓存：两次编译展开记录一致。
     let source = "fn main() { _ = comptime source {\n    std.syntax.parse_source(\"40 + 2\")\n} }";
     let compiler = Compiler::new();
-    let run = || {
-        compiler.compile(CompileRequest::single_file(
-            "main.gg",
-            source,
-            TargetName::X86_64Linux,
-        ))
-    };
+    let run = || compiler.compile_to_lir(request(source));
     let first = run();
     let second = run();
     assert!(first.is_success() && second.is_success());
@@ -377,11 +399,11 @@ fn query_cache_returns_same_expansion_data() {
 }
 
 #[test]
-#[ignore = "slow full compilation"]
+#[ignore]
 fn cached_macro_tracks_constant_input_changes() {
     let compiler = Compiler::new();
     let run = |value| {
-        compiler.compile(CompileRequest::single_file(
+        compiler.compile_to_lir(CompileRequest::single_file(
         "main.gg",
         format!("const TEXT: string = \"{value}\"\nfn main() {{ _ = comptime source {{ std.syntax.parse_expr(TEXT) }} }}"),
         TargetName::X86_64Linux,
@@ -405,7 +427,7 @@ fn macro_try_unwinds_before_evaluating_later_operands() {
 }
 
 #[test]
-#[ignore = "slow full compilation"]
+#[ignore]
 fn cfg_deleted_source_slots_never_execute() {
     for dead in [
         "fn dead() { _ = comptime source { std.syntax.parse_expr(\"@\")? } }",

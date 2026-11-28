@@ -21,29 +21,20 @@ threads-required = 2
 filter = 'test(/frontend::semantics_tests::runtime::runtime_publish_resolves_imports_and_canonical_paths$/) | test(/frontend::semantics_tests::opaque::generic_opaque_instances_preserve_declared_type_parameters$/) | test(/build_json_reports_shared_heap_contract_keys$/)'
 threads-required = 3
 
-# 较重的整体编译与多轮编译用例占六槽；12 槽时最多两个并发，六槽及以下独占。
+# frontend 内聚合编译与多场景测试及轻量集成测试占三槽（12 槽时四并发），避开 SMT 与 L3 带宽争用，使每组稳定落在 3 秒上限内。
 [[profile.default.overrides]]
-filter = 'test(/^lir_tests::(stackmap_world_covers_call_poll_suspend_and_select|cached_lir_matches_fresh_output_and_action_identity)$/) | test(/^mono::tests::(public_summary_changes_with_effects_but_not_private_definition_ids|changed_source_with_shared_queries_matches_a_fresh_world)$/) | test(/frontend::semantics_tests::runtime_checks_survive_queries_and_reach_the_backend_plan$/) | test(/frontend::semantics_tests::comptime::action_key_is_deterministic_and_input_sensitive$/) | binary(=materialization_equivalence) | test(/connection_order_options_and_unix_addresses_follow_contract$/) | test(/filesystem_tests::resource::(running_cancellation_retains_credit_until_worker_exits|runtime_mapping_ledger_charges_only_successful_platform_operations)$/)'
-threads-required = 6
+filter = '(package(gugu-frontend) & test(/^(filesystem_tests::(docs_examples|float_formatting|collections|const_generics|formatting|array_init|a64_binding|process|platform|network|printing|strings|debug_builders|hashing|resource)|frontend::semantics_tests::array_init)::/)) | (package(gugu-compiler) & binary(=integration) & test(/^(abi_image_consistency|doc|harness|callback|native_link|filesystem|shared_handle|pin|channel_resume|foreign_roots|runtime_stats)::/))'
+threads-required = 3
 
-# 进程镜像验收包含完整后端；与较重协议用例统一占四槽，限制并发。
+# 重型集成镜像、物化复现与重型 frontend 解释用例占四槽（12 槽时最多三并发），在保持三秒安全余量的同时提升物理核吞吐。
 [[profile.default.overrides]]
-filter = 'binary(=process) | test(bridge_target_must_be_imported_or_defined) | test(resolver_cancellation_releases_late_result_and_wakes_only_once)'
+filter = '(package(gugu-compiler) & binary(=integration) & test(/^(materialization_equivalence|network|process|harness::(test_domain|bench_domain))/)) | test(resolver_cancellation_releases_late_result_and_wakes_only_once) | (package(gugu-frontend) & test(/^filesystem_tests::(collections::collections_(maps_sets|aggregate_keys)|process::snapshot::process_snapshots|resource::collection::major_collection)/))'
 threads-required = 4
 
-# network 镜像验收编译完整 socket 闭包，占六槽限制重编译并发。
+# 较重的多轮编译对比用例占六槽；12 槽时最多两个并发，六槽及以下独占。
 [[profile.default.overrides]]
-filter = 'binary(=network)'
+filter = 'test(/^lir_tests::(stackmap_world_covers_call_poll_suspend_and_select|cached_lir_matches_fresh_output_and_action_identity)$/) | test(/^mono::tests::(public_summary_changes_with_effects_but_not_private_definition_ids|changed_source_with_shared_queries_matches_a_fresh_world)$/) | test(/frontend::semantics_tests::runtime_checks_survive_queries_and_reach_the_backend_plan$/) | test(/frontend::semantics_tests::comptime::action_key_is_deterministic_and_input_sensitive$/)'
 threads-required = 6
-
-# 文档/harness/callback 端到端编译用例占六槽，限制重编译并发。
-[[profile.default.overrides]]
-filter = 'binary(=doc) | binary(=harness) | binary(=callback)'
-threads-required = 6
-
-[[profile.default.overrides]]
-filter = 'test(/^filesystem_tests::process::/)'
-threads-required = 2
 
 # a64 整程序装配用例每次编译一到两个完整程序（闭世界 LIR + 平台片段 + 镜像），
 # 占六槽并放宽单项时限：并行负载下两次顺序装配可超过默认 3 秒。
