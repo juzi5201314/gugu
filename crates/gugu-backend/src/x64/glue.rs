@@ -181,11 +181,6 @@ impl RuntimeGlueBindings {
     /// 步骤，因此闭合检查对它们放行，其余任何被可达代码引用却无定义的入口都必须阻断。清单
     /// 清空即代表本切片的 GC 执行体全部就位。
     const PENDING_GLUE_IMPL: &'static [&'static str] = &[
-        // 擦除句柄构造（闭包/`dyn` 值的动态擦除）：`mangle.rs:113` 有名字、
-        // `lir/build/rvalue.rs:423-439` 发 `[destination, source, descriptor, target]` 四参调用，
-        // 但 Rust 与 Gugu runtime 都没有实现。此前静默解析到 `__gugu_stub_exit`（含闭包的程序
-        // 运行期 exit 56），属动态值单元而不是 LocalHeap/回收迁移面。
-        "dynamic_erase",
         "type_is",
         "downcast",
         "downcast_copy",

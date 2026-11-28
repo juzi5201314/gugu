@@ -19,7 +19,7 @@ use std::{num::NonZeroU32, ops::Range};
 /// 25：C 聚合描述保留区别于对象对齐的自然对齐。
 /// 26：C 聚合的自然对齐保留 packed 成员约束。
 /// 27：合并数组初始化的动态逐根字节地址与 C 聚合自然对齐。
-pub const REVISION: u32 = 27;
+pub const REVISION: u32 = 28;
 
 macro_rules! ids {
     ($($name:ident),* $(,)?) => { $(
@@ -362,7 +362,6 @@ pub enum RuntimeCall {
     ResourceRelease,
     ResourceTransfer,
     ResourceFinalize,
-    DynamicErase,
     TypeIs,
     Downcast,
     DowncastCopy,

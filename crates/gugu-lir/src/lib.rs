@@ -11,6 +11,7 @@ pub mod exports;
 pub mod foreign;
 pub mod function_adapter;
 pub mod installed;
+pub mod vtable_shim;
 pub use pass::graph::Graph;
 pub mod liveness;
 pub mod pass;
@@ -38,7 +39,7 @@ use serde::{Deserialize, Serialize};
 use std::sync::Arc;
 
 /// LIR query 与 world 的 schema。27：合并动态根地址与 C 聚合自然对齐。
-pub const SCHEMA: u32 = 27;
+pub const SCHEMA: u32 = 28;
 
 #[derive(Clone, Debug, Eq, PartialEq, Serialize, Deserialize)]
 struct World {
@@ -782,6 +783,7 @@ pub fn build(
     let exports = exports::materialize(&mut bodies, hir.module(), &gir.concrete)
         .map_err(|error| vec![error])?;
     function_adapter::materialize(&mut bodies, hir.module()).map_err(|error| vec![error])?;
+    vtable_shim::materialize(&mut bodies, hir.module(), mono).map_err(|error| vec![error])?;
     installed_instances.sort_unstable();
     let installed: Vec<bool> = bodies
         .iter()

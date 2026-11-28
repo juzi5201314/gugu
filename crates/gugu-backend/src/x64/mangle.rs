@@ -115,7 +115,6 @@ pub fn runtime_call_name(call: RuntimeCall) -> &'static str {
         RuntimeCall::ResourceRelease => "resource_release",
         RuntimeCall::ResourceTransfer => "resource_transfer",
         RuntimeCall::ResourceFinalize => "resource_finalize",
-        RuntimeCall::DynamicErase => "dynamic_erase",
         RuntimeCall::TypeIs => "type_is",
         RuntimeCall::Downcast => "downcast",
         RuntimeCall::DowncastCopy => "downcast_copy",

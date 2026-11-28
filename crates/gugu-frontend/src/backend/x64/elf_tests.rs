@@ -1,4 +1,4 @@
-use super::codegen::BlobRelocation;
+use super::codegen::{BlobRelocation, BlobRelocationKind};
 use super::elf::{
     Blob, LinkRequest, ObjectReloc, ObjectSymbol, RelocKindCode, apply_relative, claim_slot,
     extract_archive, link, pack_archive, pc_rel32, reject_writable_executable,
@@ -62,8 +62,10 @@ fn metadata_blob_symbol_relocations_are_filled_at_link_time() {
         bytes: meta,
     });
     prepared.blob_relocations = vec![BlobRelocation {
+        blob: ".gugu.meta".to_owned(),
         offset: 8,
         symbol: "_start".to_owned(),
+        kind: BlobRelocationKind::Rva,
     }];
     let image = link(&prepared).expect("镜像");
     let at = image
@@ -76,8 +78,10 @@ fn metadata_blob_symbol_relocations_are_filled_at_link_time() {
 
     // 符号缺失必须失败，不能留零值让运行期读到无效地址。
     prepared.blob_relocations = vec![BlobRelocation {
+        blob: ".gugu.meta".to_owned(),
         offset: 8,
         symbol: "missing_symbol".to_owned(),
+        kind: BlobRelocationKind::Rva,
     }];
     let error = link(&prepared).expect_err("缺失符号必须失败");
     assert!(
