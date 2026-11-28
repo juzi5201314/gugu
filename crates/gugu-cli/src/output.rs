@@ -606,6 +606,27 @@ fn cli_error_message(format: OutputFormat, message: &str, cwd: &Path) -> String 
     }
 }
 
+pub(crate) fn empty_suite_report(domain: crate::RunDomain, format: OutputFormat) -> Option<String> {
+    let (reason, text, payload) = match domain {
+        crate::RunDomain::Test => (
+            "test-result",
+            "test result: ok. 0 passed; 0 failed; 0 ignored",
+            json!({ "success": true, "passed": 0, "failed": 0, "ignored": 0 }),
+        ),
+        crate::RunDomain::Bench => (
+            "bench-result",
+            "bench result: ok. 0 measured; 0 failed",
+            json!({ "success": true, "measured": 0, "failed": 0 }),
+        ),
+        crate::RunDomain::Default => return None,
+    };
+    match format {
+        OutputFormat::Text => Some(text.to_owned()),
+        OutputFormat::Json => Some(json!({ "reason": reason, "payload": payload }).to_string()),
+        OutputFormat::JsonDiagnosticShort => None,
+    }
+}
+
 pub(crate) fn sanitize_path(path: &Path, cwd: &Path) -> String {
     if let Ok(relative) = path.strip_prefix(cwd) {
         let text = relative.to_string_lossy();
@@ -767,6 +788,32 @@ mod tests {
             let text = cli_error_message(format, "从 /tmp/project 向父目录未找到 gugu.toml", cwd);
             assert_eq!(text, "从 . 向父目录未找到 gugu.toml");
         }
+    }
+
+    #[test]
+    fn empty_suites_report_success_in_the_selected_output_format() {
+        use crate::RunDomain;
+
+        assert_eq!(
+            empty_suite_report(RunDomain::Test, OutputFormat::Text).as_deref(),
+            Some("test result: ok. 0 passed; 0 failed; 0 ignored")
+        );
+        assert_eq!(
+            empty_suite_report(RunDomain::Bench, OutputFormat::Text).as_deref(),
+            Some("bench result: ok. 0 measured; 0 failed")
+        );
+        for (domain, reason) in [
+            (RunDomain::Test, "test-result"),
+            (RunDomain::Bench, "bench-result"),
+        ] {
+            let report = empty_suite_report(domain, OutputFormat::Json).unwrap();
+            let event: Value = serde_json::from_str(&report).unwrap();
+            assert_eq!(event["reason"], reason);
+            assert_eq!(event["payload"]["success"], true);
+            assert_eq!(event["payload"]["failed"], 0);
+            assert!(empty_suite_report(domain, OutputFormat::JsonDiagnosticShort).is_none());
+        }
+        assert!(empty_suite_report(RunDomain::Default, OutputFormat::Text).is_none());
     }
 
     #[test]

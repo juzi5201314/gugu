@@ -319,6 +319,7 @@ fn compile_and_exec(
     domain: RunDomain,
     exec_kinds: &[TargetKind],
     args: &[OsString],
+    mut emit_report: impl FnMut(&str),
 ) -> i32 {
     let format = format_of(options);
     let root = context.project.workspace().root().to_path_buf();
@@ -329,6 +330,7 @@ fn compile_and_exec(
     let compiler = Compiler::with_artifacts(&EMBEDDED_ARTIFACTS);
     let mut written = BTreeSet::new();
     let mut exit_code = 0;
+    let mut executed = false;
     for package in packages {
         let features = enabled_features(options, package);
         let selected = match package.select_targets_in(selection, &features) {
@@ -345,6 +347,7 @@ fn compile_and_exec(
                         | TargetSelection::Example(None)
                 );
                 if collective
+                    && matches!(error, gugu_compiler::ProjectError::TargetSelection { .. })
                     && exec_kinds.iter().all(|kind| {
                         package.targets().iter().all(|target| {
                             target.kind() != *kind || !target.features_enabled(&features)
@@ -356,6 +359,9 @@ fn compile_and_exec(
                 return fail(format, 2, error.to_string());
             }
         };
+        if selected.is_empty() {
+            continue;
+        }
         let compiled = compile_package(
             &root,
             package,
@@ -393,8 +399,12 @@ fn compile_and_exec(
                 );
             }
             let child = spawn_image(&path, args, format);
+            executed = true;
             exit_code = exit_code.max(child);
         }
+    }
+    if !executed && let Some(report) = crate::output::empty_suite_report(domain, format) {
+        emit_report(&report);
     }
     exit_code
 }
@@ -478,6 +488,7 @@ fn run_run(positional: Option<&str>, args: &[OsString], options: &GlobalArgs) ->
         RunDomain::Default,
         &[kind],
         args,
+        |report| println!("{report}"),
     )
 }
 
@@ -547,7 +558,15 @@ fn run_test_or_bench(test: bool, args: &[OsString], options: &GlobalArgs) -> i32
         )
     };
     compile_and_exec(
-        &context, &packages, options, target, &selection, domain, &kinds, args,
+        &context,
+        &packages,
+        options,
+        target,
+        &selection,
+        domain,
+        &kinds,
+        args,
+        |report| println!("{report}"),
     )
 }
 
@@ -606,6 +625,136 @@ mod tests {
             run_target_selection(&package, Some("bin"), &options)
                 .unwrap_err()
                 .contains("不能同时使用")
+        );
+    }
+
+    #[test]
+    fn empty_test_and_bench_targets_emit_one_workspace_summary() {
+        let directory = tempfile::tempdir().unwrap();
+        fs::write(
+            directory.path().join("gugu.toml"),
+            "[workspace]\nmembers = [\"first\", \"second\"]\n",
+        )
+        .unwrap();
+        for name in ["first", "second"] {
+            let package = directory.path().join(name);
+            fs::create_dir_all(package.join("src")).unwrap();
+            fs::write(
+                package.join("gugu.toml"),
+                format!("[package]\nname = \"{name}\"\nversion = \"0.0.0\"\n"),
+            )
+            .unwrap();
+            fs::write(package.join("src/main.gg"), "fn main() {}\n").unwrap();
+        }
+        let context = ProjectContext {
+            project: Project::discover(directory.path()).unwrap(),
+            lock: LockGraph {
+                version: 1,
+                packages: Vec::new(),
+            },
+            inputs: Vec::new(),
+        };
+        for workspace in [false, true] {
+            let options = GlobalArgs {
+                workspace,
+                ..GlobalArgs::default()
+            };
+            let packages = context
+                .project
+                .select_packages((!workspace).then_some("first"), workspace)
+                .unwrap()
+                .into_iter()
+                .cloned()
+                .collect::<Vec<_>>();
+            for (domain, selection, kinds, expected) in [
+                (
+                    RunDomain::Test,
+                    TargetSelection::Test(None),
+                    vec![TargetKind::Lib, TargetKind::Test],
+                    "test result: ok. 0 passed; 0 failed; 0 ignored",
+                ),
+                (
+                    RunDomain::Test,
+                    TargetSelection::Lib,
+                    vec![TargetKind::Lib],
+                    "test result: ok. 0 passed; 0 failed; 0 ignored",
+                ),
+                (
+                    RunDomain::Bench,
+                    TargetSelection::Bench(None),
+                    vec![TargetKind::Lib, TargetKind::Test, TargetKind::Bench],
+                    "bench result: ok. 0 measured; 0 failed",
+                ),
+                (
+                    RunDomain::Bench,
+                    TargetSelection::Lib,
+                    vec![TargetKind::Lib],
+                    "bench result: ok. 0 measured; 0 failed",
+                ),
+            ] {
+                let mut reports = Vec::new();
+                let code = compile_and_exec(
+                    &context,
+                    &packages,
+                    &options,
+                    TargetName::X86_64Linux,
+                    &selection,
+                    domain,
+                    &kinds,
+                    &[],
+                    |report| reports.push(report.to_owned()),
+                );
+                assert_eq!(code, 0, "{selection:?}, workspace={workspace}");
+                assert_eq!(reports, [expected]);
+            }
+            for (domain, selection, kind) in [
+                (
+                    RunDomain::Test,
+                    TargetSelection::Test(Some("missing".into())),
+                    TargetKind::Test,
+                ),
+                (
+                    RunDomain::Bench,
+                    TargetSelection::Bench(Some("missing".into())),
+                    TargetKind::Bench,
+                ),
+            ] {
+                let code = compile_and_exec(
+                    &context,
+                    &packages,
+                    &options,
+                    TargetName::X86_64Linux,
+                    &selection,
+                    domain,
+                    &[kind],
+                    &[],
+                    |_| panic!("无效目标不能报告零测试成功"),
+                );
+                assert_eq!(code, 2);
+            }
+        }
+        let options = GlobalArgs {
+            features: Some("missing".into()),
+            ..GlobalArgs::default()
+        };
+        let package = context
+            .project
+            .select_packages(Some("first"), false)
+            .unwrap()[0]
+            .clone();
+        assert_eq!(
+            compile_and_exec(
+                &context,
+                &[package],
+                &options,
+                TargetName::X86_64Linux,
+                &TargetSelection::Test(None),
+                RunDomain::Test,
+                &[TargetKind::Test],
+                &[],
+                |_| panic!("无效 feature 不能报告零测试成功"),
+            ),
+            2
         );
     }
 

@@ -150,6 +150,8 @@ runtime 契约签名的记录目录不计入 executable mono/GIR/LIR body 数量
 
 执行型收集选择（`test`/`bench` 默认全量、`--all-targets`、`--lib`）在 workspace 中允许成员没有对应 target，该成员被跳过；显式或单 target 选择（`run`、`--test <name>`、`--bench <name>`）始终要求匹配：所需 feature 未启用、名称缺失或无任何匹配 target 时按用法错误拒绝，退出码 `2`。
 
+收集选择结束后，若整个所选 package 集没有可执行 target，命令以退出码 `0` 输出一次零用例摘要：test 为 `test result: ok. 0 passed; 0 failed; 0 ignored`，bench 为 `bench result: ok. 0 measured; 0 failed`。`--quiet` 保留摘要；JSON 分别发布成功且计数为零的 `test-result` 或 `bench-result` 事件，`json-diagnostic-short` 不发布成功摘要。
+
 ### `gugu tree`
 
 打印依赖树。`--depth <n>` 限制深度；`--duplicates` 只显示重复版本；`--invert <package>` 显示反向依赖。
