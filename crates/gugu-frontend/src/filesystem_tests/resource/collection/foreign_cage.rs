@@ -3,12 +3,7 @@ use super::*;
 
 #[test]
 fn foreign_cage_address_requires_live_pin_before_submission() {
-    let mut imports: Vec<_> = crate::NativeLink::THREAD_SYMBOLS
-        .into_iter()
-        .map(|name| crate::NativeImport::function("libc.so.6", name))
-        .collect();
-    imports.push(crate::NativeImport::function("libprobe.so", "native_probe"));
-    let output = Compiler::shared().compile(
+    let output = Compiler::shared().compile_to_lir(
         CompileRequest::single_file(
             "main.gg",
             include_str!("../../../../../gugu-compiler/tests/fixtures/foreign_pointer.gg"),
@@ -16,11 +11,7 @@ fn foreign_cage_address_requires_live_pin_before_submission() {
         )
         .with_compression_policy(
             crate::runtime::compression_schema::CompressionPolicyV1::cage(8388608),
-        )
-        .with_native_link(crate::NativeLink {
-            imports,
-            interpreter: Some("/target/ld.so".into()),
-        }),
+        ),
     );
     assert!(output.is_success(), "{:?}", output.diagnostics().items());
     let mut harness = ResourceHarness::new(&output);

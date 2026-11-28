@@ -95,6 +95,10 @@ pub(crate) fn run(options: &GlobalArgs, open: bool, no_deps: bool) -> i32 {
         let request = CompileRequest::project_target(
             package, target_ref, identity, target, features, external,
         );
+        #[expect(
+            clippy::disallowed_methods,
+            reason = "gugu doc 需要完整编译诊断和 package action 结果"
+        )]
         let compilation = compiler.compile(request);
         print_compilation(&compilation, true, options, target);
         exit_code = exit_code.max(compilation.exit_code());
@@ -288,6 +292,10 @@ fn render_dependencies(
             features,
             external,
         );
+        #[expect(
+            clippy::disallowed_methods,
+            reason = "依赖文档生成需要完整编译诊断和 package action 结果"
+        )]
         let compilation = compiler.compile(request);
         print_compilation(&compilation, true, options, target);
         if compilation.exit_code() != 0 {

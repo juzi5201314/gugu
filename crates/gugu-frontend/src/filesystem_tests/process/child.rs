@@ -1,8 +1,6 @@
 use super::*;
 
-#[test]
-fn child_exit_is_shared_and_cancellation_removes_only_its_waiter() {
-    let output = protocol(TargetName::X86_64Linux);
+pub(super) fn child_exit_is_shared_and_cancellation_removes_only_its_waiter(output: &Protocol) {
     let mut h = output.harness();
     let mut m = vec![0; 1048576];
     let control = child(&mut h, &mut m);
@@ -34,9 +32,7 @@ fn child_exit_is_shared_and_cancellation_removes_only_its_waiter() {
     assert_eq!(word(&m, 1024 + 40), 7);
 }
 
-#[test]
-fn explicit_close_kills_once_and_detach_never_kills() {
-    let output = protocol(TargetName::X86_64Linux);
+pub(super) fn explicit_close_kills_once_and_detach_never_kills(output: &Protocol) {
     for detach in [false, true] {
         let mut h = output.harness();
         let mut m = vec![0; 1048576];
@@ -85,9 +81,9 @@ fn explicit_close_kills_once_and_detach_never_kills() {
     }
 }
 
-#[test]
-fn child_wait_precancel_has_no_effect_and_supervisor_does_not_keep_runtime_alive() {
-    let output = protocol(TargetName::X86_64Linux);
+pub(super) fn child_wait_precancel_has_no_effect_and_supervisor_does_not_keep_runtime_alive(
+    output: &Protocol,
+) {
     let mut h = output.harness();
     let mut m = vec![0; 1048576];
     let control = child(&mut h, &mut m);
@@ -122,9 +118,7 @@ fn child_wait_precancel_has_no_effect_and_supervisor_does_not_keep_runtime_alive
     );
 }
 
-#[test]
-fn nine_children_progress_without_blocking_worker_credits() {
-    let output = protocol(TargetName::X86_64Linux);
+pub(super) fn nine_children_progress_without_blocking_worker_credits(output: &Protocol) {
     let mut h = output.harness();
     let mut m = vec![0; 1048576];
     let mut nodes = Vec::new();
@@ -151,9 +145,7 @@ fn nine_children_progress_without_blocking_worker_credits() {
     assert_eq!(h.invoke(STATE, "pending", &[0], &mut m), [0]);
 }
 
-#[test]
-fn wait_closes_stdin_but_try_wait_does_not() {
-    let output = protocol(TargetName::X86_64Linux);
+pub(super) fn wait_closes_stdin_but_try_wait_does_not(output: &Protocol) {
     let mut h = output.harness();
     let mut m = vec![0; 1048576];
     store(&mut m, 512, &[71, 71, 72, u64::MAX, u64::MAX]);

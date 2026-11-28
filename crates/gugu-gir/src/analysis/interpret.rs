@@ -55,6 +55,7 @@ pub(super) fn analyze_generic(
     inbound[body.entry.index()] = AbstractState::entry(locals, exprs, params);
     seed_param_lens(module, owner, &mut inbound[body.entry.index()]);
     let mut budget_exhausted = false;
+    let mut widened = false;
     if !iterate(
         module,
         owner,
@@ -63,10 +64,13 @@ pub(super) fn analyze_generic(
         policy.max_block_iterations,
         passing,
         callees,
+        &mut widened,
     ) {
         budget_exhausted = true;
     }
-    if !budget_exhausted {
+    // 只有在前向固定点实际触发过回边 widening 时，narrowing 才可能收紧精度；无 widening 时
+    // `inbound` 已是精确不动点，跳过 narrowing 与逐状态对比结果完全一致。
+    if !budget_exhausted && widened {
         narrow(
             module,
             owner,
@@ -228,6 +232,10 @@ fn seed_param_lens(module: &Module, owner: &Owner, state: &mut AbstractState) {
     }
 }
 
+#[expect(
+    clippy::too_many_arguments,
+    reason = "固定点迭代需要 module/owner/body/inbound/轮次/传递表/callee 摘要与 widening 标记"
+)]
 fn iterate(
     module: &Module,
     owner: &Owner,
@@ -236,10 +244,13 @@ fn iterate(
     rounds: u32,
     passing: &PassingTable,
     callees: &dyn Fn(CallSite) -> Option<FunctionSummary>,
+    widened: &mut bool,
 ) -> bool {
     // 块编号是稠密下标；只有入状态改变后，原传播结果才可能改变。
     let mut dirty = vec![false; body.blocks.len()];
     dirty[body.entry.index()] = true;
+    let mut state = AbstractState::bottom(0, 0);
+    let mut branch = AbstractState::bottom(0, 0);
     for _ in 0..rounds {
         let mut changed = false;
         for index in 0..body.blocks.len() {
@@ -247,7 +258,7 @@ fn iterate(
                 continue;
             }
             dirty[index] = false;
-            let mut state = inbound[index].clone();
+            state.copy_from(&inbound[index]);
             let compare = execute_block(
                 module,
                 owner,
@@ -263,11 +274,13 @@ fn iterate(
                 body,
                 inbound,
                 BlockId(index as u32),
-                state,
+                &mut state,
+                &mut branch,
                 compare.as_ref(),
                 callees,
                 false,
                 Some(&mut dirty),
+                Some(widened),
             );
         }
         if !changed {
@@ -287,14 +300,19 @@ fn narrow(
     callees: &dyn Fn(CallSite) -> Option<FunctionSummary>,
 ) {
     let entry = inbound[body.entry.index()].clone();
+    let mut next = vec![AbstractState::bottom(0, 0); body.blocks.len()];
+    let mut state = AbstractState::bottom(0, 0);
+    let mut branch = AbstractState::bottom(0, 0);
     for _ in 0..rounds {
-        let mut next = vec![AbstractState::bottom(0, 0); body.blocks.len()];
-        next[body.entry.index()] = entry.clone();
+        for slot in &mut next {
+            slot.reset_unreachable();
+        }
+        next[body.entry.index()].copy_from(&entry);
         for (index, old) in inbound.iter().enumerate() {
             if !old.reachable {
                 continue;
             }
-            let mut state = old.clone();
+            state.copy_from(old);
             let block = BlockId(u32::try_from(index).expect("GIR 块编号可表示"));
             let compare = execute_block(module, owner, body, block, &mut state, passing, callees);
             propagate(
@@ -303,17 +321,23 @@ fn narrow(
                 body,
                 &mut next,
                 block,
-                state,
+                &mut state,
+                &mut branch,
                 compare.as_ref(),
                 callees,
                 true,
                 None,
+                None,
             );
         }
-        if next == *inbound {
+        if next
+            .iter()
+            .zip(inbound.iter())
+            .all(|(left, right)| left.semantic_eq(right))
+        {
             break;
         }
-        *inbound = next;
+        std::mem::swap(inbound, &mut next);
     }
 }
 
@@ -350,7 +374,7 @@ fn execute_block(
 
 #[expect(
     clippy::too_many_arguments,
-    reason = "块传播需要 module/owner/body/inbound/块号/状态/比较事实/摘要查询"
+    reason = "块传播需要 module/owner/body/inbound/块号/状态缓冲/比较事实/摘要查询"
 )]
 fn propagate(
     module: &Module,
@@ -358,31 +382,38 @@ fn propagate(
     body: &IndexedBody<'_>,
     inbound: &mut [AbstractState],
     id: BlockId,
-    state: AbstractState,
+    state: &mut AbstractState,
+    branch: &mut AbstractState,
     compare: Option<&CompareFact>,
     callees: &dyn Fn(CallSite) -> Option<FunctionSummary>,
     narrowing: bool,
     mut dirty: Option<&mut [bool]>,
+    mut widened: Option<&mut bool>,
 ) -> bool {
-    let edges = transfer_gir::successor_states(
+    let mut changed = false;
+    transfer_gir::for_each_successor(
         module,
         owner,
         body,
         state,
+        branch,
         &body.blocks[id.index()].terminator,
         compare,
         callees,
-    );
-    let mut changed = false;
-    for (target, next) in edges {
-        let backedge = target.0 <= id.0 && !narrowing;
-        if join_into(inbound, target, &next, backedge) {
-            changed = true;
-            if let Some(dirty) = dirty.as_deref_mut() {
-                dirty[target.index()] = true;
+        |target, next| {
+            let backedge = target.0 <= id.0 && !narrowing;
+            let mut did_widen = false;
+            if join_into(inbound, target, next, backedge, &mut did_widen) {
+                changed = true;
+                if let Some(dirty) = dirty.as_deref_mut() {
+                    dirty[target.index()] = true;
+                }
             }
-        }
-    }
+            if did_widen && let Some(flag) = widened.as_deref_mut() {
+                *flag = true;
+            }
+        },
+    );
     changed
 }
 
@@ -391,9 +422,10 @@ fn join_into(
     target: BlockId,
     state: &AbstractState,
     widen: bool,
+    widened_bound: &mut bool,
 ) -> bool {
     if widen {
-        inbound[target.index()].widen(state)
+        inbound[target.index()].widen_tracked(state, widened_bound)
     } else {
         inbound[target.index()].join(state)
     }
@@ -410,6 +442,7 @@ fn collect_proofs(
 ) -> Vec<ProofFact> {
     use super::prove;
     let mut proofs = Vec::new();
+    let mut state = AbstractState::bottom(0, 0);
     for (index, block) in body.blocks.iter().enumerate() {
         let statements =
             &body.statements[block.statements.start as usize..block.statements.end as usize];
@@ -421,7 +454,7 @@ fn collect_proofs(
         }) else {
             continue;
         };
-        let mut state = inbound[index].clone();
+        state.copy_from(&inbound[index]);
         let mut compare = None;
         // inbound 已由不动点求得；末个检查后的转移不能影响本块任何证明。
         for statement in &statements[..=last_check] {
@@ -467,11 +500,12 @@ fn summarize(
     let mut returns = Interval::EMPTY;
     let mut relation = None;
     let mut saw_return = false;
+    let mut state = AbstractState::bottom(0, 0);
     for (index, inbound_state) in inbound.iter().enumerate() {
         if !inbound_state.reachable && index != body.entry.index() {
             continue;
         }
-        let mut state = inbound_state.clone();
+        state.copy_from(inbound_state);
         let _ = execute_block(
             module,
             owner,
@@ -483,6 +517,7 @@ fn summarize(
         );
         absorb_effects(&mut summary, &state);
         if matches!(body.blocks[index].terminator, Terminator::Return) {
+            transfer_gir::sync_resolved(module, owner, body, &mut state);
             returns = returns.join(state.range(ValueKey::Expr(owner.body)));
             let next = return_relation(owner, &state, owner.body);
             if !saw_return {

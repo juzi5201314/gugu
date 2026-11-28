@@ -64,7 +64,7 @@ pub fn check<'a>(
     if let Some(prefix) = prefix {
         // 内建定义的早期常量直取物化表；用户定义现算后按定义序追加。
         let mut constants = prefix.early_constants().constants.clone();
-        constants.append(&mut early.constants);
+        constants.extend(early.constants.suffix_mut().drain(..));
         early.constants = constants;
     }
     let registry_identity = early.registry_identity();

@@ -624,19 +624,27 @@ impl BodyBuilder<'_, '_, '_, '_> {
             return false;
         };
         let first_name = self.compiler.model.name(self.module, first.name);
-        let Some(&local) = self.names.get(first_name) else {
-            return false;
-        };
-        let mut ty =
-            self.facts.body.slots[self.local_sources[local.index()].expect("source local")].clone();
-        for segment in &prefix[1..] {
-            let name = self.compiler.model.name(self.module, segment.name);
-            let Some((_, field, _)) = self.compiler.model.find_field(&ty, name) else {
-                return false;
-            };
-            ty = field;
+        if let Some(&local) = self.names.get(first_name) {
+            let source = self.local_sources[local.index()].expect("source local");
+            let mut ty = self.facts.body.slots[source].clone();
+            for segment in &prefix[1..] {
+                let name = self.compiler.model.name(self.module, segment.name);
+                let Some((_, field, _)) = self.compiler.model.find_field(&ty, name) else {
+                    return false;
+                };
+                ty = field;
+            }
+            return Self::is_len_self(&ty);
         }
-        Self::is_len_self(&ty)
+        let names: Vec<_> = prefix
+            .iter()
+            .map(|segment| self.compiler.model.name(self.module, segment.name))
+            .collect();
+        self.compiler
+            .model
+            .resolve(self.module, &names)
+            .and_then(|definition| self.compiler.model.value_type(definition))
+            .is_ok_and(|ty| Self::is_len_self(&ty))
     }
 
     fn is_len_name(&self, name: crate::intern::Symbol) -> bool {

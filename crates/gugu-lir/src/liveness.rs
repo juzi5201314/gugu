@@ -9,19 +9,21 @@
 //!
 //! 集合按机器字打包：槽规模常见在几十以内，一个 `u64` 就能覆盖，汇合退化成一条按字或。
 
-use super::body::{BlockId, Body, Definition, InstId, UseSite, id, range};
+use super::body::{BlockId, Body, Definition, InstId, UseSite, ValueId, id, range};
 use super::pass::graph::Graph;
+use std::sync::Arc;
 
 /// 槽活跃位图；位下标即槽下标。
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub struct LiveSet {
-    words: Vec<u64>,
+    // 块状态和逐位置查询共用不可变快照；实际更新时才复制，不为大函数预留内联空间。
+    words: Arc<[u64]>,
 }
 
 impl LiveSet {
     pub fn empty(slots: usize) -> Self {
         Self {
-            words: vec![0; words_for(slots)],
+            words: vec![0; words_for(slots)].into(),
         }
     }
 
@@ -31,7 +33,7 @@ impl LiveSet {
         let last = set.words.len() - 1;
         let tail = slots % 64;
         let tail_bits = if tail == 0 && slots != 0 { 64 } else { tail };
-        for (index, word) in set.words.iter_mut().enumerate() {
+        for (index, word) in Arc::make_mut(&mut set.words).iter_mut().enumerate() {
             // 末字只覆盖真实存在的槽：槽数为 64 的整数倍（含 0）时不能多置位。
             *word = if index == last && tail_bits != 64 {
                 (1u64 << tail_bits) - 1
@@ -49,25 +51,27 @@ impl LiveSet {
     }
 
     pub fn set(&mut self, slot: usize, live: bool) {
-        let Some(word) = self.words.get_mut(slot / 64) else {
+        let index = slot / 64;
+        let Some(&word) = self.words.get(index) else {
             return;
         };
         let bit = 1u64 << (slot % 64);
-        if live {
-            *word |= bit;
-        } else {
-            *word &= !bit;
+        let next = if live { word | bit } else { word & !bit };
+        if next != word {
+            Arc::make_mut(&mut self.words)[index] = next;
         }
     }
 
     fn union_with(&mut self, other: &Self) -> bool {
-        let mut changed = false;
-        for (word, other) in self.words.iter_mut().zip(&other.words) {
-            let next = *word | *other;
-            changed |= next != *word;
-            *word = next;
+        if Arc::ptr_eq(&self.words, &other.words) {
+            return false;
         }
-        changed
+        if self.words.len() == other.words.len() && self.words.iter().all(|word| *word == 0) {
+            let changed = self.words != other.words;
+            self.words = other.words.clone();
+            return changed;
+        }
+        self.merge_with(other, |word, other| word | other)
     }
 
     /// must 语义的汇合：只保留两侧都置位的元素。
@@ -76,9 +80,27 @@ impl LiveSet {
         reason = "逐根初始化证明（root_init）是当前唯一消费者，随该模块转入生产路径"
     )]
     pub fn intersect_with(&mut self, other: &Self) {
-        for (word, other) in self.words.iter_mut().zip(&other.words) {
-            *word &= *other;
+        if !Arc::ptr_eq(&self.words, &other.words) {
+            self.merge_with(other, |word, other| word & other);
         }
+    }
+
+    fn merge_with(&mut self, other: &Self, merge: impl Fn(u64, u64) -> u64) -> bool {
+        let first = self
+            .words
+            .iter()
+            .zip(other.words.iter())
+            .position(|(word, other)| merge(*word, *other) != *word);
+        let Some(first) = first else {
+            return false;
+        };
+        for (word, other) in Arc::make_mut(&mut self.words)[first..]
+            .iter_mut()
+            .zip(&other.words[first..])
+        {
+            *word = merge(*word, *other);
+        }
+        true
     }
 }
 
@@ -105,7 +127,8 @@ impl LiveSlots {
         for block in &mut events {
             block.sort_by_key(|(position, slot, _)| (*position, *slot));
         }
-        let mut input = vec![LiveSet::empty(slots); body.blocks.len()];
+        let empty = LiveSet::empty(slots);
+        let mut input = vec![empty.clone(); body.blocks.len()];
         let mut output = input.clone();
         input[body.entry.index()] = untracked.clone();
         loop {
@@ -114,7 +137,7 @@ impl LiveSlots {
                 let mut live = if block == body.entry {
                     untracked.clone()
                 } else {
-                    LiveSet::empty(slots)
+                    empty.clone()
                 };
                 for edge in predecessors(body, block) {
                     let from = body.edges[edge.index()].from;
@@ -173,14 +196,15 @@ pub struct LiveValues {
 impl LiveValues {
     pub fn new(body: &Body, graph: &Graph) -> Self {
         let values = body.values.len();
+        let empty = LiveSet::empty(values);
         let mut uses = vec![Vec::new(); body.blocks.len()];
         let mut defs = vec![Vec::new(); body.blocks.len()];
         // 本块内由指令或终结符定义的值。块参数不算：参数是被持有的接收入口，值来自边实参。
-        let mut local = vec![LiveSet::empty(values); body.blocks.len()];
+        let mut local = vec![empty.clone(); body.blocks.len()];
         // 块参数是被持有的接收入口：它必须留在 live-in 里，随后由对应边的实参替换。
         // 若不单独记下来，下面的「扣除本块定义」会把参数一起扣掉，替换循环永远不触发，
         // 跨块携带的受管值（未取地址的切片就退化成一条参数链）就再也传播不回前驱块。
-        let mut parameters = vec![LiveSet::empty(values); body.blocks.len()];
+        let mut parameters = vec![empty.clone(); body.blocks.len()];
         for (index, value) in body.values.iter().enumerate() {
             let index = id(index);
             match value.definition {
@@ -223,20 +247,25 @@ impl LiveValues {
         for events in &mut defs {
             events.sort_unstable();
         }
-        let mut output = vec![LiveSet::empty(values); body.blocks.len()];
+        // 本块生成的 live-in 与固定点轮次无关；复用 local 的行存储，及时丢弃定义位图。
+        for (index, defined) in local.iter_mut().enumerate() {
+            let mut generated = empty.clone();
+            for &(_, value) in &uses[index] {
+                let value = ValueId(value).index();
+                if !defined.is_live(value) {
+                    generated.set(value, true);
+                }
+            }
+            *defined = generated;
+        }
+        let generated = local;
+        let mut output = vec![empty.clone(); body.blocks.len()];
         let mut incoming = output.clone();
         loop {
             let mut changed = false;
             // 值活跃性向前驱传播；后序可在同一轮穿过整条无回边路径。
             for &block in graph.order.iter().rev() {
-                let mut live = LiveSet::empty(values);
-                // SSA 下同块定义必然支配同块使用，所以本块自己定义过的值不构成 live-in：
-                // 它的值由本块产生，只有块参数才需要沿边接收（随后由实参替换）。
-                for &(_, value) in &uses[block.index()] {
-                    if !local[block.index()].is_live(value as usize) {
-                        live.set(value as usize, true);
-                    }
-                }
+                let mut live = generated[block.index()].clone();
                 let mut carried = output[block.index()].clone();
                 for &(_, value) in &defs[block.index()] {
                     // 块参数不是「本块产生」的值：它必须留在 live-in 里，好让下面的替换
@@ -321,4 +350,25 @@ fn words_for(slots: usize) -> usize {
 fn predecessors(body: &Body, block: BlockId) -> &[super::body::EdgeId] {
     let range = &body.blocks[block.index()].predecessors;
     &body.predecessors[range.start as usize..range.end as usize]
+}
+
+#[cfg(test)]
+mod tests {
+    use super::LiveSet;
+
+    #[test]
+    fn live_root_snapshots_are_isolated_across_word_boundaries() {
+        let original = LiveSet::full(129);
+        let mut cleared = original.clone();
+        cleared.set(128, false);
+        assert!(original.is_live(128));
+        assert!(!cleared.is_live(128));
+        assert!(cleared.is_live(127));
+        assert!(!original.is_live(129));
+
+        let mut joined = cleared.clone();
+        assert!(joined.union_with(&original));
+        assert!(joined.is_live(128));
+        assert!(!cleared.is_live(128));
+    }
 }

@@ -8,13 +8,73 @@ on:
 permissions:
   contents: read
 
+env:
+  CARGO_INCREMENTAL: "0"
+  RUSTC_WRAPPER: sccache
+  SCCACHE_GHA_ENABLED: "true"
+
 concurrency:
   group: ${{ github.workflow }}-${{ github.ref }}
   cancel-in-progress: true
 
 jobs:
+  changes:
+    name: Change scope
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+      pull-requests: read
+    outputs:
+      code: ${{ steps.filter.outputs.code }}
+    steps:
+      - uses: actions/checkout@v6
+      - uses: dorny/paths-filter@v4
+        id: filter
+        with:
+          base: ${{ github.event.repository.default_branch }}
+          predicate-quantifier: every
+          filters: |
+            code:
+              - '**'
+              - '!docs/**'
+              - '!book.toml'
+
   rust:
-    name: Rust checks
+    name: Rust checks (${{ matrix.target }})
+    needs: changes
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - runner: ubuntu-latest
+            target: x86_64-linux
+          - runner: windows-2025
+            target: x86_64-windows
+          - runner: ubuntu-24.04-arm
+            target: aarch64-linux
+          - runner: macos-15
+            target: aarch64-macos
+    runs-on: ${{ matrix.runner }}
+    steps:
+      - uses: actions/checkout@v6
+      - uses: dtolnay/rust-toolchain@stable
+      - uses: mozilla-actions/sccache-action@v0.0.11
+      - uses: Swatinem/rust-cache@v2
+      - uses: taiki-e/install-action@v2
+        with:
+          tool: nextest@0.9.115
+      - if: needs.changes.outputs.code == 'true'
+        run: cargo nextest run --workspace --profile ci --tool-config-file "ci:$PWD/ci/nextest.toml"
+      - if: needs.changes.outputs.code != 'true'
+        run: >-
+          cargo nextest run -p gugu-frontend -p gugu-compiler --lib --test docs_links
+          --profile ci --tool-config-file "ci:$PWD/ci/nextest.toml"
+          -E 'test(/^filesystem_tests::docs_examples::/) | binary(=docs_links)'
+
+  lint:
+    name: Rust lint
+    needs: changes
+    if: needs.changes.outputs.code == 'true'
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v6
@@ -22,13 +82,12 @@ jobs:
         with:
           components: rustfmt, clippy
       - run: cargo fmt --all --check
+      - uses: mozilla-actions/sccache-action@v0.0.11
       - uses: Swatinem/rust-cache@v2
-      - uses: taiki-e/install-action@v2
-        with:
-          tool: nextest@0.9.115
-      - run: cargo build --workspace
-      - run: cargo nextest run --workspace --profile ci --tool-config-file "ci:$PWD/ci/nextest.toml"
-      - run: cargo clippy --workspace --all-targets -- -D warnings
+      - run: cargo clippy --workspace --all-targets -- -D warnings -D clippy::disallowed_methods
+      - run: >-
+          cargo clippy --workspace --tests --all-features
+          -- -A warnings -D clippy::disallowed_methods -D unfulfilled_lint_expectations
 
   book:
     name: mdBook
@@ -41,12 +100,31 @@ jobs:
       - run: mdbook build
 
   e2e:
-    name: Gugu executables (Linux x86_64)
-    runs-on: ubuntu-latest
+    name: Gugu executables (${{ matrix.target }})
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - runner: ubuntu-latest
+            target: x86_64-linux
+          - runner: windows-2025
+            target: x86_64-windows
+          - runner: ubuntu-24.04-arm
+            target: aarch64-linux
+          - runner: macos-15
+            target: aarch64-macos
+    runs-on: ${{ matrix.runner }}
+    needs: changes
+    if: needs.changes.outputs.code == 'true'
     timeout-minutes: 20
     steps:
       - uses: actions/checkout@v6
+      - uses: actions/setup-python@v6
+        with:
+          python-version: '3.13'
+      - run: python -B -m unittest discover -s ci/e2e -p 'test_*.py'
       - uses: dtolnay/rust-toolchain@stable
+      - uses: mozilla-actions/sccache-action@v0.0.11
       - uses: Swatinem/rust-cache@v2
       - run: cargo build -p gugu-cli --bin gugu
-      - run: bash ci/e2e/run.sh target/debug/gugu
+      - run: python ci/e2e/run.py --target ${{ matrix.target }}
