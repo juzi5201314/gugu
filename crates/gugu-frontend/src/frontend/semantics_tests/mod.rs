@@ -150,6 +150,10 @@ accept_cases! {
 
 #[cfg(feature = "slow-tests")]
 accept_cases! {
+    qualified_user_variants_do_not_use_prelude_constructors_00: true,
+        "enum Mine { Ok(int), Err(string) }\nenum Other { Some(int), None }\nfn main() { let x = Mine::Ok(42)\n let y = Other::Some(1)\n let z = Other::None\n match x { Mine::Ok(v) => { _ = v }, Mine::Err(e) => { _ = e } }\n _ = y\n _ = z\n let r: Result[int, string] = Result::Ok(1)\n let o: Option[int] = Option::Some(1)\n _ = r\n _ = o }";
+    qualified_user_variants_do_not_use_prelude_constructors_01: false,
+        "enum Mine { Ok(int), Err(string) }\nfn main() { _ = Mine::Ok(\"wrong\") }";
     explicit_generic_variant_constructors_use_type_arguments_00: true,
         "enum Either[L, R] { Left(L), Right(R) }\nenum E[T] { Unit, Tuple(T), Rec { x: T } }\nfn main() { let e = Either[int, string]::Left(42)\n match e { Either::Left(v) => { _ = v }, Either::Right(s) => { _ = s } }\n let a = E[int]::Unit\n let b = E[int]::Tuple(1)\n let c = E[int]::Rec { x: 2 }\n _ = a\n _ = b\n _ = c }";
     explicit_generic_variant_constructors_use_type_arguments_01: false,
