@@ -304,11 +304,13 @@ impl Parser<'_> {
             self.expect(TokenKind::RParen, "newtype 结构体需要 `)`");
             self.consume_decl_terminator();
             StructBody::Newtype(field)
-        } else {
-            self.expect(TokenKind::LBrace, "结构体需要 `{`");
+        } else if self.eat(TokenKind::LBrace) {
             let fields = self.parse_field_list(TokenKind::RBrace);
             self.expect(TokenKind::RBrace, "结构体需要 `}`");
             StructBody::Record(fields)
+        } else {
+            self.error_here(DiagnosticCode::ParseExpected, "结构体需要 `{`");
+            StructBody::Record(AstRange::empty())
         };
         self.push_item(
             mark,
@@ -773,7 +775,11 @@ impl Parser<'_> {
     pub(super) fn parse_field_list(&mut self, close: TokenKind) -> AstRange<Field> {
         let mut fields = Vec::new();
         while !self.at(close) && !self.at(TokenKind::Eof) {
+            let start = self.cursor;
             fields.push(self.parse_field());
+            if self.cursor == start {
+                break;
+            }
             if self.eat(TokenKind::Comma) || self.at_list_separator() {
                 continue;
             }

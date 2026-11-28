@@ -1,0 +1,3 @@
+struct Dog
+struct Cat
+fn main() {}

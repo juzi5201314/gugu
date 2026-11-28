@@ -2,6 +2,7 @@ use super::{FragmentAst, FragmentKind, ParseOutput, parse, parse_fragment};
 use crate::ast::{
     AssignOp, AstArena, AstRange, ExprId, ExprKind, FnBody, ItemKind, StmtId, StmtKind, StructBody,
 };
+use crate::diagnostics::DiagnosticCode;
 use crate::source::{ExpansionId, SourceMap, SourceSnapshot};
 use crate::token::TokenBuffer;
 
@@ -215,4 +216,48 @@ fn semicolon_formatting_preserves_ast_and_is_idempotent() {
         crate::format::format_source("semicolons.gg", &formatted).expect("再次格式化成功"),
         formatted
     );
+}
+
+#[test]
+fn missing_struct_bodies_preserve_following_declarations() {
+    for (source, missing) in [
+        (include_str!("fixtures/missing_struct_body.gg"), 1),
+        (include_str!("fixtures/missing_struct_bodies.gg"), 2),
+    ] {
+        let snapshot = SourceSnapshot::from_str("missing_struct.gg", source).expect("合法源码快照");
+        let sources = SourceMap::new(vec![snapshot.clone()]).expect("唯一源码路径");
+        let file = sources.file_id("missing_struct.gg").expect("已登记源码");
+        let mut lexed = crate::lex(&snapshot, &sources, file);
+        assert!(lexed.diagnostics.is_empty(), "{:?}", lexed.diagnostics);
+        let parsed = parse(source, &sources, file, &mut lexed.buffer);
+        assert_eq!(parsed.diagnostics.len(), missing);
+        for (index, diagnostic) in parsed.diagnostics.iter().enumerate() {
+            assert_eq!(diagnostic.code(), DiagnosticCode::ParseExpected);
+            assert_eq!(diagnostic.message(), "结构体需要 `{`");
+            assert_eq!(
+                diagnostic.span().expect("诊断必须定位缺失体").line(),
+                index as u32 + 2
+            );
+        }
+        assert_eq!(parsed.file.items.len as usize, missing + 1);
+        let (stmts, tail) = function_block(&parsed, &lexed.buffer, "main");
+        assert_eq!(stmts.len, 0);
+        assert!(tail.is_none());
+    }
+}
+
+#[test]
+fn malformed_struct_fields_stop_at_unconsumed_tokens() {
+    let source = include_str!("fixtures/malformed_struct_fields.gg");
+    let snapshot = SourceSnapshot::from_str("malformed_struct.gg", source).expect("合法源码快照");
+    let sources = SourceMap::new(vec![snapshot.clone()]).expect("唯一源码路径");
+    let file = sources.file_id("malformed_struct.gg").expect("已登记源码");
+    let mut lexed = crate::lex(&snapshot, &sources, file);
+    assert!(lexed.diagnostics.is_empty(), "{:?}", lexed.diagnostics);
+    let parsed = parse(source, &sources, file, &mut lexed.buffer);
+    assert!(!parsed.diagnostics.is_empty());
+    assert_eq!(parsed.arena.fields.len(), 2, "错误字段只能登记一次");
+    let (stmts, tail) = function_block(&parsed, &lexed.buffer, "main");
+    assert_eq!(stmts.len, 0);
+    assert!(tail.is_none());
 }

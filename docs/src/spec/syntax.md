@@ -94,6 +94,8 @@ global_asm_declaration ::= "global_asm" "(" STRING ")" terminator ;
 
 模块顶层的可见性、`extern`、属性适用范围、`type = impl Trait` 的不透明身份以及各声明的静态约束见[声明与模块](declarations.md)、[类型系统](types.md)和[unsafe 与 intrinsic](unsafe.md)。`field_separator` 和 `variant_separator` 可以是逗号或规范允许的换行；字段和变体的尾逗号合法。`terminator` 可以是分号或规范允许的换行，顶层声明不能靠逗号分隔。
 
+结构体声明必须包含记录体 `{ ... }` 或 newtype 体 `(T)`；只有 `struct 名字` 不是合法声明。缺失声明体时应在预期体的位置报告语法错误，并保留后续声明的独立解析；连续缺失声明体也必须分别诊断。非法字段不能让解析器重复处理同一记号而无法终止。
+
 ## 泛型、参数与类型
 
 ```ebnf
