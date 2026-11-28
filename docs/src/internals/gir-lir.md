@@ -193,7 +193,7 @@ HIR同样提供保持源码臂优先级的 pattern matrix。GIR把它编译成�
 
 `if`/`while` 条件里的 `let` 链不经过布尔合流块：每个 `let` 段的模式测试直接把 ok 路径分支进后续段或分支体，绑定发射在 ok 路径的块内，失败路径直接指向 else/exit。SSA 封口要求被读变量在目标块的全部前驱路径上都有定义，而模式绑定只存在于匹配成功的路径上，因此「绑定路径与失败路径合并出布尔再统一开关」的形状是非法的。
 
-没有 `else` 的 `if` 结果为 unit：then 分支仍完整求值并执行副作用，但丢弃其尾值，在合流目标写 unit；不能把链式方法返回的引用等尾值复制进零机器分量的 unit 槽。
+结果为 unit 的 `if`（包括没有 `else` 的 `if`，以及语句位置丢弃分支值的完整 `if` / `else if` 链）：分支仍完整求值并执行副作用，但丢弃其尾值，在合流目标写 unit；不能把链式方法返回的引用等尾值复制进零机器分量的 unit 槽。分支发散时不产生通往合流目标的正常边。
 
 `ScopedViewBegin`/`ScopedViewEnd` 成对出现：view 存活区间禁止 `Suspend`/`SelectCommit`，禁止把 token 或投影逃出配对区间，每条出口恰有一次 end。`NoSafepointBegin`/`End` 只能由 `LowerConcurrency` 或登记的 runtime publish intrinsic 产生；用户表达式不得直接制造任意 region。
 

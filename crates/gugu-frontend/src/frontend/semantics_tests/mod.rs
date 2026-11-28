@@ -7,6 +7,8 @@ mod array_init;
 mod callable;
 #[cfg(feature = "slow-tests")]
 mod comptime;
+#[cfg(feature = "slow-tests")]
+mod discarded_if;
 mod expand;
 mod hir;
 #[cfg(feature = "slow-tests")]
@@ -390,6 +392,21 @@ accept_cases! {
         "fn main() { let x: int\n while { x = 1\n false } {}\n _ = x }";
     condition_bindings_and_loop_initialization_follow_execution_04: false,
         "fn main() { let x: int\n while false { x = 1 }\n _ = x }";
+    condition_bindings_and_loop_initialization_follow_execution_05: true,
+        "fn main() { let v: Result[int, string] = Err(\"e\")\n if let Ok(x) = v { _ = x } else if let Err(e) = v { _ = e } }";
+    condition_bindings_and_loop_initialization_follow_execution_06: false,
+        "fn main() { let v: Result[int, string] = Err(\"e\")\n let n = if let Ok(x) = v { x } else if let Err(_) = v { 0 }\n _ = n }";
+    /* 语句位置丢弃整条 if-let 链时，分支尾值不统一类型。*/
+    condition_bindings_and_loop_initialization_follow_execution_07: true,
+        "fn main() { let v: Result[int, string] = Err(\"e\")\n if let Ok(x) = v { x } else if let Err(_) = v { 0 } }";
+    condition_bindings_and_loop_initialization_follow_execution_08: true,
+        "fn main() { let v: Result[int, string] = Err(\"e\")\n if let Ok(x) = v { x } else if let Err(e) = v { e } else { 1.0 }\n _ = 0 }";
+    condition_bindings_and_loop_initialization_follow_execution_09: true,
+        "fn main() { let v: Result[int, string] = Err(\"e\")\n let n = if let Ok(x) = v { x } else if let Err(_) = v { 0 } else { 0 }\n _ = n }";
+    condition_bindings_and_loop_initialization_follow_execution_10: false,
+        "fn main() { let v: Result[int, string] = Err(\"e\")\n let n = if let Ok(x) = v { x } else if let Err(e) = v { e } else { 1.0 }\n _ = n }";
+    condition_bindings_and_loop_initialization_follow_execution_11: true,
+        "fn main() { let v: Result[int, string] = Err(\"e\")\n if let Ok(x) = v { x } else { panic(\"e\") }\n _ = 0 }";
 }
 
 #[cfg(feature = "slow-tests")]
