@@ -142,6 +142,8 @@ match r {
 
 `catch` 的签名是 `fn catch[T, F: Fn() T](f: F) Result[T, Panic]`。它在当前协程、当前栈上执行 `f`；panic 展开到 `catch` 边界时，边界以内的 defer 仍运行，边界以外的 defer 不运行。不能从任意 defer 中隐式取得当前 panic。
 
+panic 展开进入 defer 或资源清理时，必须保留该清理路径所需的活跃值；异常控制流传递的参数应在清理代码读取前完成，不能读取正常返回路径或其他前驱遗留的值。
+
 导出为 `extern "C"` 的函数若有 panic 逃出且未被 `catch`，必须 abort 进程，禁止把 Gugu 展开继续推进外部帧。外部异常或 C++ 风格 unwind 也不得穿过 Gugu 边界。
 
 每个子协程只有一个完成记录：正常返回保存 `Ok(T)`，panic 展开完成保存 `Err(Panic)`。任意 `Join.wait()` 都从记录产生对应的语义值；第一次成功读取 `Err` 即把 panic 标记为已处理，重复读取不重复打印，也不改变退出类别。

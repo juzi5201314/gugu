@@ -158,3 +158,75 @@ fn empty_leaf_traps_and_bad_cfg_errors() {
     f.body.blocks.clear();
     assert!(codegen::compile_leaf(&f.body).is_err());
 }
+
+#[test]
+fn invoke_unwind_landing_enters_edge_copy_block() {
+    let mut f = Fixture::new(&[], &[]);
+    let normal_target = f.block(&[]);
+    let unwind_target = f.block(&[Type::I64]);
+    let value = f.constant(Type::I64, 7);
+    let normal = f.edge(normal_target, &[]);
+    let unwind = f.edge(unwind_target, &[value]);
+    f.body.edges[unwind.index()].unwind = true;
+    let output = f.value(
+        Type::Mem,
+        Definition::Invoke {
+            block: BlockId(0),
+            result: 0,
+        },
+    );
+    let safepoint = SafepointId(f.body.safepoints.len() as u32);
+    f.body.safepoints.push(Safepoint {
+        kind: SafepointKind::CallReturn,
+        block: BlockId(0),
+        instruction: None,
+    });
+    f.body.blocks[0].terminator = Terminator::Invoke {
+        call: Call {
+            target: CallTarget::Instance([1; 32]),
+            kind: crate::gir::body::CallKind::Managed,
+            parameters: vec![],
+            results: vec![],
+            may_unwind: true,
+            may_suspend: false,
+            may_allocate: false,
+            captures_arguments: false,
+            by_value: vec![],
+            foreign_arguments: vec![],
+            foreign_signature: None,
+            sret: None,
+            poll_free_leaf: false,
+        },
+        arguments: f.args(&[]),
+        results: 0..0,
+        memory: Memory {
+            input: f.memory,
+            output,
+        },
+        normal,
+        unwind,
+        safepoint: Some(safepoint),
+    };
+    f.switch_to(normal_target);
+    f.ret(&[]);
+    f.switch_to(unwind_target);
+    f.ret(&[]);
+
+    let function = select::select_runtime(&f.body).unwrap();
+    let unwind_edge_block = (f.body.blocks.len() + unwind.index() + 1) as u32;
+    let landing = function.blocks[1]
+        .items
+        .iter()
+        .find_map(|site| match &site.item {
+            machine::Item::Call { landing, .. } => *landing,
+            _ => None,
+        });
+    assert_eq!(landing, Some((unwind_edge_block, unwind_target as u32)));
+    assert!(
+        function.blocks[unwind_edge_block as usize]
+            .items
+            .iter()
+            .any(|site| matches!(&site.item, machine::Item::Copies(pairs)
+                if pairs == &[(machine::MReg::Virtual(value.0), machine::MReg::Virtual(f.param(unwind_target, 0).0))]))
+    );
+}
