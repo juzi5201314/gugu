@@ -1466,7 +1466,7 @@ fn build_machine_codegen(
         gc_types: &gc_metadata.type_section,
         gc_meta: &gc_metadata.metadata_section,
         cage_bytes: raw_contract.compression().cage_bytes(),
-        interpreter: descriptor.linux_interpreter.unwrap_or(""),
+        interpreter: native_link.interpreter.as_deref().unwrap_or(""),
         identifier: "gugu",
         universe: Some(universe),
         imports: &native_link.imports,

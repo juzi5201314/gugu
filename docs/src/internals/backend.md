@@ -389,7 +389,7 @@ fragment relocation 封闭为：
 
 ### 内部 AArch64 Linux ELF64
 
-整程序入口在 A64 装配前完成 `NativeLink.with_standard_library` 的 leaf 默认导入登记。`program::assemble` 合并内建与用户导入，复用 `definitions::linux_import_definition` 为每个新增 Function 建立调用桩和有文件内容的 GOT 槽；`program::linux_image` 从同一份 `World.imports` 生成动态绑定记录，不能重新枚举内建目录而漏掉用户符号。进程内镜像测试逐项核对动态符号、GLOB_DAT 的目标槽与 DT_NEEDED，构建成功本身不代表 loader 会填写新增槽。
+整程序入口在 A64 装配前完成 `NativeLink.with_standard_library` 的 leaf 默认导入登记。`program::assemble` 按可达 LIR 中的 `ResolverSymbol`、`EnvironmentSymbol`、`ProcessWorker`、`ProcessCall` 与 catalog 的 foreign dispatcher 绑定确定 Linux 系统库需求，再合并内建与用户导入。`definitions::linux_import_definitions` 为 Function 建立调用桩和有文件内容的 GOT 槽，Data 只建立 GOT 槽（包括 `environ`）；`program::linux_image` 从同一份 `World.imports` 生成动态绑定记录，不能重新枚举内建目录而漏掉用户符号。没有导入时使用 `link_entry`，有导入时才使用 `link_entry_dynamic`；解释器由 `NativeLink` 传入，镜像计划记录实际选中的解释器。进程内镜像测试逐项核对动态符号、GLOB_DAT 的目标槽与 DT_NEEDED，并核对静态镜像没有 PT_INTERP/PT_DYNAMIC 且启动指针保留 RELATIVE 自重定位。
 
 `a64_linux_resolver_image <output> [<interpreter> <libc>]` 将可选输入直接传入 `DynamicLink` 和所有 libc 导入；缺省仍为 musl，glibc 验证使用 `/lib/ld-linux-aarch64.so.1 libc.so.6`。外部 QEMU runner 以 `AARCH64_RUNNER_LIBC=musl/glibc` 选择 initramfs 的运行库；glibc 模式装入 Debian arm64 libc6 包的 loader、libc、NSS/files/DNS 与 libresolv，并设置 `hosts: files dns`。此手工验证不改变静态 writer 默认值，也不进入默认测试套件。
 
@@ -782,18 +782,18 @@ source poll-free 叶证明。隐含调用保留 LR frame，并保守预留同一
 `TypeUniverse` 按 descriptor 解析。所有 runtime glue 调用统一引用
 `__gugu_runtime_*` 命名空间：`build_with_catalog` 为 catalog 每个 binding 把
 `mangle_runtime(name)` 写成指向真实编译 body 的别名符号，机器片段则由
-`a64::definitions::runtime_definitions(platform)` 以同名 Definition 产出，调用点不区分。
+`a64::definitions::runtime_definitions(platform, linux_features)` 以同名 Definition 产出，调用点不区分。
 TLS 与普通 global 同形落 `__bss` 零初始化块（mangle 不消费 thread_local 标志），线程
 所有者绑定仍是 runtime 层 coroutine_locals 的职责，world 不再整类拒绝。
-`a64::program::build` 消费该 catalog：`runtime_definitions(platform)` 与四个启动保留区
+`a64::program::build` 消费该 catalog：`runtime_definitions(platform, linux_features)` 与四个启动保留区
 （`__gugu_a64_payload`/`__gugu_a64_initial_slot`/`__gugu_a64_processor` 4KiB 对齐零初始化
-页/`__gugu_a64_runtime_state`）和 `runtime_imports(platform)` 一起交给
+页/`__gugu_a64_runtime_state`）和按能力生成的 `runtime_imports(platform, linux_features)` 一起交给
 `world::build_runtime`；非空的 `__gugu_a64_gc_types`/`__gugu_a64_gc_meta` 在装配时各自
 独占一个只读节（与 `__gugu_maps`/`__gugu_cfa` 同法，Mach-O 名为 `__gugutyp`/`__ggmeta`），
 使载荷的长度字段精确等于 blob 大小，不吞掉共享 `__const` 的后续常量。随后 Darwin 走
 `world.macho_request` + `macho::link_entry(DarwinRuntime)`，Linux 走新加的
 `world.elf_request`（经 world 符号表解析指令重定位目标、数据指针转 RELATIVE）+
-`elf::link_entry_dynamic(LinuxRuntime)`，`Import::slot` 取 `linux_import_slot_symbol` 的
+`elf::link_entry(LinuxRuntime)`；实际需要系统库时才走 `link_entry_dynamic`，`Import::slot` 取 `linux_import_slot_symbol` 的
 已布局槽。`CoroutineSwitch`、线程 worker 启动与前端对 `program::build` 的调用
 仍留待后续 review unit；该驱动不是已完成的生产调度器。
 
@@ -810,9 +810,8 @@ candidate 后按 restore ABI 恢复系统上下文）、`gc_enter`（HOT/SP 切�
 （`fs_native_worker`/`net_call`/`resolver_symbol`/`process_call`/`process_worker`）和
 `gc_config_record` 数据定义；Linux 侧另加 `linux_import_definitions` 的
 `__gugu_linux_stub_*` C 函数桩与 `linux_import_slot_symbol` 八字节文件回填 GOT 槽。
-`runtime_imports(platform)` 汇总各片段声明的原生导入：Darwin 全部经 LIB_SYSTEM
-（含 exit/write/pthread_threadid_np，按名去重），Linux 为 resolver 与外调工作线程
-共用的 libc 面（getaddrinfo/freeaddrinfo/gettid/__errno_location）。
+`runtime_imports(platform, linux_features)` 汇总各片段声明的原生导入：Darwin 全部经 LIB_SYSTEM
+（含 exit/write/pthread_threadid_np，按名去重），Linux 仅按可达能力加入 resolver、外调工作线程与环境所需的 libc 面。没有 foreign 请求时，`fs_start` 保留 clone 文件 worker，`fs_poll` 仅检查内核清零的 tid 字，`callback_file_worker` 仅转交文件分派；同一生成器不发射 pthread 分支和 foreign worker，不使用未解析符号或退出桩代替可选能力。resolver/environment 片段也仅在对应能力可达时发射。
 
 `runtime_definitions` 另含两批 `native.rs`/`callback.rs` 机器片段：cage 与栈
 （`cage_control` 返回 `__gugu_cage_control` 记录的地址；记录由

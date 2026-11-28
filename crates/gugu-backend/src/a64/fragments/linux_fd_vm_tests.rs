@@ -279,7 +279,7 @@ impl Vm {
 
 #[test]
 fn fs_poll_reads_operation_for_foreign_and_tid_word_for_completion() {
-    let code = instructions(&linux_fs_poll());
+    let code = instructions(&linux_fs_poll(true));
     // 文件请求：tid 字非零 → pending(0)，内核 CHILD_CLEARTID 清零后 → done(1)。
     let mut vm = Vm::new(7, [0; 6]);
     vm.put(REQUEST, 1234, 8);
@@ -301,6 +301,19 @@ fn fs_poll_reads_operation_for_foreign_and_tid_word_for_completion() {
     vm.put(REQUEST + 80, 0xfeed, 8);
     let pending = vm.run_calls(&code, |vm, _| vm.registers[0] = 16);
     assert_eq!(pending, 0);
+}
+
+#[test]
+fn static_fs_poll_uses_only_kernel_thread_completion() {
+    let fragment = linux_fs_poll(false);
+    assert!(fragment.relocations.is_empty());
+    let code = instructions(&fragment);
+    let mut vm = Vm::new(7, [0; 6]);
+    vm.put(REQUEST, 1234, 8);
+    let mut unexpected = |_: &mut Vm| panic!("静态文件轮询不得调用系统库");
+    assert_eq!(vm.run_result(&code, &mut unexpected), 0);
+    vm.put(REQUEST, 0, 8);
+    assert_eq!(vm.run_result(&code, &mut unexpected), 1);
 }
 
 fn addend(operand: &Operand) -> u64 {

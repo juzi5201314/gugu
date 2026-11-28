@@ -5,10 +5,10 @@
 //! Mach-O `link_entry` 或 ELF `link_entry(_dynamic)` 出完整镜像。
 
 use super::{
-    definitions::{linux_import_definition, runtime_definitions, runtime_imports},
+    definitions::{LinuxFeatures, linux_import_definitions, runtime_definitions, runtime_imports},
     elf::{self, DynamicLink, Import, LinuxEntry, LinuxRuntime},
     foreign::Platform,
-    fragments::{linux_import_slot_symbol, linux_import_stub_symbol},
+    fragments::linux_import_slot_symbol,
     glue::{ForeignBindings, RuntimeBindings},
     macho::{self, DarwinEntry, DarwinRuntime},
     runtime::Catalog,
@@ -16,9 +16,10 @@ use super::{
 };
 use crate::{
     late::universe::TypeUniverse,
-    lir::body::Body,
+    lir::body::{Body, Op},
     macho::{Location, Section, SectionContent, Segment},
     runtime::{
+        RuntimeMachineOp,
         entry::{INITIAL_SLOT_BYTES, Rt0Payload, state},
         processor::PROCESSOR_PAGE_BYTES,
     },
@@ -122,11 +123,12 @@ fn bindings() -> RuntimeBindings {
 }
 
 fn assemble(request: &ProgramRequest<'_>) -> Result<World, Error> {
-    let mut definitions = runtime_definitions(request.platform)
+    let linux = linux_features(request);
+    let mut definitions = runtime_definitions(request.platform, linux)
         .into_iter()
         .chain(storage(request.cage_bytes))
         .collect::<Vec<_>>();
-    let mut imports = runtime_imports(request.platform);
+    let mut imports = runtime_imports(request.platform, linux);
     // World 按符号名（而非库名）校验唯一；runtime 片段申报过的同名导入直接复用，
     // 用户的同名导入等价指向同一动态符号。
     for import in request.imports {
@@ -135,19 +137,7 @@ fn assemble(request: &ProgramRequest<'_>) -> Result<World, Error> {
         }
     }
     if request.platform == Platform::Linux {
-        for import in &imports {
-            if import.kind != crate::NativeImportKind::Function {
-                continue;
-            }
-            let stub = linux_import_stub_symbol(&import.name);
-            if definitions
-                .iter()
-                .any(|definition| definition.symbol == stub)
-            {
-                continue;
-            }
-            definitions.extend(linux_import_definition(&import.name));
-        }
+        definitions.extend(linux_import_definitions(&imports));
     }
     let mut world = build_runtime(
         BuildRequest {
@@ -189,6 +179,28 @@ fn assemble(request: &ProgramRequest<'_>) -> Result<World, Error> {
     }
     register_type_symbols(&mut world, type_section, request.gc_types)?;
     Ok(world)
+}
+
+fn linux_features(request: &ProgramRequest<'_>) -> LinuxFeatures {
+    let mut features = LinuxFeatures::default();
+    features.foreign = request
+        .catalog
+        .bindings()
+        .any(|(name, _)| matches!(name, "foreign_dispatch" | "foreign_dirty_dispatch"));
+    for instruction in request.bodies.iter().flat_map(|body| &body.instructions) {
+        match instruction.op {
+            Op::RuntimeMachineCall(RuntimeMachineOp::ResolverSymbol) => features.resolver = true,
+            Op::RuntimeMachineCall(RuntimeMachineOp::EnvironmentSymbol) => {
+                features.environment = true
+            }
+            Op::RuntimeMachineCall(
+                RuntimeMachineOp::ProcessWorker | RuntimeMachineOp::ProcessCall,
+            ) => features.foreign = true,
+            _ => {}
+        }
+    }
+    features.foreign |= features.resolver || features.environment;
+    features
 }
 
 /// `World::type_symbols` 记的是 `__gugutyp` 段内偏移插槽；节追加后在这里落成真实符号。
@@ -262,8 +274,10 @@ pub fn build(request: &ProgramRequest<'_>) -> Result<Program, Error> {
 fn linux_image(world: &World, request: &ProgramRequest<'_>) -> Result<Vec<u8>, Error> {
     let mut imports = vec![];
     for native in &world.imports {
-        if native.kind != crate::NativeImportKind::Function {
-            continue;
+        if native.kind == crate::NativeImportKind::Library {
+            return Err(fail(
+                "A64 ELF 不支持仅声明动态库；必须登记 Function 或 Data 导入",
+            ));
         }
         let slot = symbol(world, &linux_import_slot_symbol(&native.name))?;
         imports.push(Import {
@@ -271,10 +285,6 @@ fn linux_image(world: &World, request: &ProgramRequest<'_>) -> Result<Vec<u8>, E
             slot,
         });
     }
-    let dynamic = DynamicLink {
-        interpreter: request.interpreter.into(),
-        imports,
-    };
     let entry = LinuxEntry {
         rt0_start: symbol(world, &rt("rt0_start"))?,
         payload: symbol(world, PAYLOAD)?,
@@ -292,7 +302,19 @@ fn linux_image(world: &World, request: &ProgramRequest<'_>) -> Result<Vec<u8>, E
             gc_meta: optional(world, GC_META),
         }),
     };
-    elf::link_entry_dynamic(world.elf_request()?, entry, &dynamic)
+    let linked = if imports.is_empty() {
+        elf::link_entry(world.elf_request()?, entry)
+    } else {
+        elf::link_entry_dynamic(
+            world.elf_request()?,
+            entry,
+            &DynamicLink {
+                interpreter: request.interpreter.into(),
+                imports,
+            },
+        )
+    };
+    linked
         .map(|image| image.bytes)
         .map_err(|message| fail(message.as_str()))
 }

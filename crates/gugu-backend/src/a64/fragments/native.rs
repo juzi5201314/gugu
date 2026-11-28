@@ -79,26 +79,33 @@ pub fn process_native_worker() -> Fragment {
 
 /// `callback_file_worker`：request x0；op==-1 转 foreign worker，其余走不发布
 /// DONE 的文件分派变体（对应 x64 `worker(false)`；完成由 callback 协议自身发布）。
-pub fn callback_file_worker() -> Fragment {
+pub fn callback_file_worker(foreign: bool) -> Fragment {
     let mut b = Builder::default();
-    load(&mut b, A, Reg::x(0), OPERATION);
-    b.emit("adds.X.imm", [reg(XZR), reg(A), add_imm(1)]);
-    let foreign = cond(&mut b, EQ);
+    let foreign = foreign_branch(&mut b, foreign);
     b.external_branch("b", &rt("fd_dispatch"));
-    patch(&mut b, foreign, EQ);
-    b.external_branch("b", &rt("foreign_native_worker"));
+    if let Some(branch) = foreign {
+        patch(&mut b, branch, EQ);
+        b.external_branch("b", &rt("foreign_native_worker"));
+    }
     b.finish()
+}
+
+/// 闭世界中没有 foreign 请求时，不发射 libc 依赖或不可达的线程分支。
+fn foreign_branch(b: &mut Builder, enabled: bool) -> Option<u32> {
+    enabled.then(|| {
+        load(b, A, Reg::x(0), OPERATION);
+        b.emit("adds.X.imm", [reg(XZR), reg(A), add_imm(1)]);
+        cond(b, EQ)
+    })
 }
 
 // ---- fs_start / fs_poll ----
 
 /// `fs_start`：x0 = packet（op==−1 走 foreign 线程），x1 = 工作线程栈顶。
 /// clone 标志同 x64：VM|FS|FILES|SIGHAND|THREAD|SYSVSEM|PARENT_SETTID|CHILD_CLEARTID。
-pub fn linux_fs_start() -> Fragment {
+pub fn linux_fs_start(foreign: bool) -> Fragment {
     let mut b = Builder::default();
-    load(&mut b, A, Reg::x(0), OPERATION);
-    b.emit("adds.X.imm", [reg(XZR), reg(A), add_imm(1)]);
-    let foreign = cond(&mut b, EQ);
+    let foreign = foreign_branch(&mut b, foreign);
     b.add(B, Reg::x(0), 0);
     b.emit("sub.X.imm", [reg(C), reg(Reg::x(1)), add_imm(16)]);
     store(&mut b, C, 0, B);
@@ -130,8 +137,10 @@ pub fn linux_fs_start() -> Fragment {
     patch(&mut b, child, EQ);
     load(&mut b, Reg::x(0), SP, 0);
     b.external_branch("b", &rt("fs_native_worker"));
-    patch(&mut b, foreign, EQ);
-    linux_foreign_start(&mut b);
+    if let Some(branch) = foreign {
+        patch(&mut b, branch, EQ);
+        linux_foreign_start(&mut b);
+    }
     b.finish()
 }
 
@@ -196,11 +205,9 @@ fn linux_foreign_start(b: &mut Builder) {
 }
 
 /// `fs_poll`：x0 = packet；op==−1 用 pthread_tryjoin_np，否则查 tid 字。
-pub fn linux_fs_poll() -> Fragment {
+pub fn linux_fs_poll(foreign: bool) -> Fragment {
     let mut b = Builder::default();
-    load(&mut b, B, Reg::x(0), OPERATION);
-    b.emit("adds.X.imm", [reg(XZR), reg(B), add_imm(1)]);
-    let foreign = cond(&mut b, EQ);
+    let foreign = foreign_branch(&mut b, foreign);
     // tid 是内核 32 位字；提交前高 32 位已清零。
     load(&mut b, A, Reg::x(0), 0);
     compare(&mut b, A, 0);
@@ -210,8 +217,10 @@ pub fn linux_fs_poll() -> Fragment {
     patch(&mut b, pending, NE);
     b.emit("movz.X", [reg(Reg::x(0)), movz(0)]);
     b.ret();
-    patch(&mut b, foreign, EQ);
-    linux_foreign_poll(&mut b);
+    if let Some(branch) = foreign {
+        patch(&mut b, branch, EQ);
+        linux_foreign_poll(&mut b);
+    }
     b.finish()
 }
 

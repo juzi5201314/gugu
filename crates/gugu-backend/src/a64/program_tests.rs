@@ -207,7 +207,7 @@ fn body(instance: [u8; 32], target: &str) -> Body {
 
 const ENTRY: [u8; 32] = [9; 32];
 
-fn fixture(target: &str) -> (&'static [Body], runtime::Catalog<'static>) {
+fn fixture(target: &str, foreign: bool) -> (&'static [Body], runtime::Catalog<'static>) {
     let mut bodies = vec![body(ENTRY, target)];
     let mut entries = vec![];
     for (index, glue) in [
@@ -221,6 +221,9 @@ fn fixture(target: &str) -> (&'static [Body], runtime::Catalog<'static>) {
     .into_iter()
     .enumerate()
     {
+        if !foreign && matches!(glue, "foreign_dispatch" | "foreign_dirty_dispatch") {
+            continue;
+        }
         let key = [index as u8 + 1; 32];
         bodies.push(body(key, target));
         entries.push((glue, key));
@@ -231,7 +234,7 @@ fn fixture(target: &str) -> (&'static [Body], runtime::Catalog<'static>) {
 
 #[test]
 fn darwin_program_image_links_the_full_startup_contract() {
-    let (bodies, catalog) = fixture("aarch64-macos");
+    let (bodies, catalog) = fixture("aarch64-macos", true);
     let program = program::build(&program::ProgramRequest {
         bodies,
         entry: ENTRY,
@@ -292,7 +295,7 @@ fn darwin_program_image_links_the_full_startup_contract() {
 
 #[test]
 fn linux_program_image_links_the_full_startup_contract() {
-    let (bodies, catalog) = fixture("aarch64-linux");
+    let (bodies, catalog) = fixture("aarch64-linux", true);
     let program = program::build(&program::ProgramRequest {
         bodies,
         entry: ENTRY,
@@ -390,8 +393,40 @@ fn linux_program_image_links_the_full_startup_contract() {
 }
 
 #[test]
+fn linux_program_without_imports_relocates_static_pie() {
+    let (bodies, catalog) = fixture("aarch64-linux", false);
+    let program = program::build(&program::ProgramRequest {
+        bodies,
+        entry: ENTRY,
+        platform: foreign::Platform::Linux,
+        catalog: &catalog,
+        gc_types: &[0xAA; 16],
+        gc_meta: &[0xBB; 16],
+        interpreter: "",
+        cage_bytes: 0,
+        identifier: "",
+        universe: None,
+        imports: &[],
+    })
+    .unwrap();
+    let image = &program.image;
+    assert!(program.world.imports.is_empty());
+    assert!(phdrs(image).iter().all(|header| !matches!(header.0, 2 | 3)));
+    let params = linux_params(image);
+    let count = u64_at(image, params + rt0_params::RELOC_COUNT * 8);
+    let relocations = u64_at(image, params + rt0_params::RELOC_TABLE * 8) as usize;
+    assert_eq!(count, 9, "启动载荷的九个指针必须自行重定位");
+    for index in 0..count as usize {
+        let record = relocations + index * 24;
+        assert_eq!(u64_at(image, record + 8), 1027);
+        let slot = u64_at(image, record) as usize;
+        assert_eq!(u64_at(image, slot), u64_at(image, record + 16));
+    }
+}
+
+#[test]
 fn linux_function_imports_relocate_user_slots_and_preserve_libraries() {
-    let (bodies, catalog) = fixture("aarch64-linux");
+    let (bodies, catalog) = fixture("aarch64-linux", true);
     let imports = [
         crate::NativeImport::function("libc.so.6", "getpid"),
         crate::NativeImport::function("libprobe.so", "probe_leaf"),
@@ -435,4 +470,24 @@ fn linux_function_imports_relocate_user_slots_and_preserve_libraries() {
         .map(|at| dynamic_string(image, tags[&5], u64_at(image, at as usize + 8)))
         .collect::<Vec<_>>();
     assert_eq!(libraries, ["libc.so.6", "libprobe.so"]);
+}
+
+#[test]
+fn linux_program_rejects_library_only_imports() {
+    let (bodies, catalog) = fixture("aarch64-linux", false);
+    let error = program::build(&program::ProgramRequest {
+        bodies,
+        entry: ENTRY,
+        platform: foreign::Platform::Linux,
+        catalog: &catalog,
+        gc_types: &[],
+        gc_meta: &[],
+        interpreter: "/lib/ld-linux-aarch64.so.1",
+        cage_bytes: 0,
+        identifier: "",
+        universe: None,
+        imports: &[crate::NativeImport::library("libprobe.so")],
+    })
+    .unwrap_err();
+    assert!(error.to_string().contains("必须登记 Function 或 Data 导入"));
 }

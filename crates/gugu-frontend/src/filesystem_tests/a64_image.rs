@@ -87,10 +87,29 @@ fn aarch64_targets_emit_distinct_macho_and_elf_images() {
 fn aarch64_runtime_program_assembles() {
     let output = Compiler::shared().compile_full_for_test(CompileRequest::single_file(
         "main.gg",
-        "use std.io.{println}\nfn main() { println(\"hello\") }\n",
+        "use std.io.{println}\nuse std.fs as fs\nuse std.path.{Path}\nfn main() {\n    println(\"hello\")\n    _ = fs.read_string(Path::from_string(\"input.txt\"))\n}\n",
         TargetName::Aarch64Linux,
     ));
     assert!(output.is_success(), "{:?}", output.diagnostics().items());
+    let program = output.a64_program().expect("aarch64-linux 装配产物");
+    assert!(
+        program.world.imports.is_empty(),
+        "普通输出和文件 I/O 不依赖 libc"
+    );
+    let image = &program.image;
+    assert_eq!(u16::from_le_bytes(image[16..18].try_into().unwrap()), 3);
+    let phoff = u64::from_le_bytes(image[32..40].try_into().unwrap()) as usize;
+    let phsize = u16::from_le_bytes(image[54..56].try_into().unwrap()) as usize;
+    let phnum = u16::from_le_bytes(image[56..58].try_into().unwrap()) as usize;
+    for index in 0..phnum {
+        let at = phoff + index * phsize;
+        let kind = u32::from_le_bytes(image[at..at + 4].try_into().unwrap());
+        assert!(
+            !matches!(kind, 2 | 3),
+            "静态镜像不得包含 PT_DYNAMIC/PT_INTERP"
+        );
+    }
+    assert!(output.image_plan().unwrap().linux_interpreter().is_empty());
 }
 
 const DYN_PROGRAM: &str = r#"use std.io.{println}

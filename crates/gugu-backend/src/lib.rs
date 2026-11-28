@@ -472,6 +472,7 @@ fn a64_stats(
     target: TargetName,
     program: &a64::program::Program,
     glues: &x64::glue::RuntimeGlueBindings,
+    native_link: &NativeLink,
 ) -> CodegenStats {
     let descriptor = target.descriptor();
     let world = &program.world;
@@ -500,7 +501,7 @@ fn a64_stats(
     metadata_hasher.update(&unwind_section);
     let linux = match descriptor.object_format {
         target::ObjectFormat::Elf64 => {
-            // ELF e_entry 是头部固定字段；镜像由 `link_entry_dynamic` 写完，直接读回。
+            // ELF e_entry 是头部固定字段；镜像由静态或动态入口 writer 写完，直接读回。
             let entry = program
                 .image
                 .get(24..32)
@@ -513,7 +514,11 @@ fn a64_stats(
                 reloc_count: 0,
                 reloc_vaddr: 0,
                 load_count: 0,
-                interpreter: descriptor.linux_interpreter.unwrap_or("").to_owned(),
+                interpreter: if world.imports.is_empty() {
+                    String::new()
+                } else {
+                    native_link.interpreter.clone().unwrap_or_default()
+                },
                 fingerprint: *blake3::hash(&program.image).as_bytes(),
             }
         }
@@ -602,7 +607,7 @@ pub fn plan(
     };
     let stats = match codegen {
         PlanCodegen::X64(x64) => x64_stats(target, x64, raw, native_link)?,
-        PlanCodegen::A64 { program, glues } => a64_stats(target, program, glues),
+        PlanCodegen::A64 { program, glues } => a64_stats(target, program, glues, native_link),
     };
     let placement = gir.placement.counts();
     Ok(Some(BackendPlan {

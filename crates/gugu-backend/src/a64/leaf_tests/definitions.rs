@@ -5,8 +5,8 @@ use crate::{
     NativeImport,
     a64::{
         definitions::{
-            DARWIN_EXTRA_IMPORTS, LINUX_LIBC, linux_import_definitions, runtime_definitions,
-            runtime_imports,
+            DARWIN_EXTRA_IMPORTS, LINUX_LIBC, LinuxFeatures, linux_import_definitions,
+            runtime_definitions, runtime_imports,
         },
         foreign::Platform,
         fragments::{
@@ -18,6 +18,12 @@ use crate::{
     macho::{LIB_SYSTEM, SectionContent, Segment},
     runtime::{GcImageConfig, platform_schema::PlatformOp},
     x64::mangle::mangle_runtime,
+};
+
+const ALL: LinuxFeatures = LinuxFeatures {
+    foreign: true,
+    resolver: true,
+    environment: true,
 };
 
 fn symbols(definitions: &[Definition]) -> BTreeSet<&str> {
@@ -67,7 +73,7 @@ fn platform_ops() -> Vec<String> {
 
 #[test]
 fn darwin_definitions_cover_shared_glue_platform_vm_and_dispatch() {
-    let definitions = runtime_definitions(Platform::Darwin);
+    let definitions = runtime_definitions(Platform::Darwin, LinuxFeatures::default());
     let names = symbols(&definitions);
     for expected in shared().into_iter().chain(platform_ops()) {
         assert!(names.contains(expected.as_str()), "missing {expected}");
@@ -95,7 +101,7 @@ fn darwin_definitions_cover_shared_glue_platform_vm_and_dispatch() {
 
 #[test]
 fn linux_definitions_mirror_darwin_with_linux_dispatch() {
-    let definitions = runtime_definitions(Platform::Linux);
+    let definitions = runtime_definitions(Platform::Linux, ALL);
     let names = symbols(&definitions);
     let cursor = definitions
         .iter()
@@ -127,7 +133,7 @@ fn linux_definitions_mirror_darwin_with_linux_dispatch() {
 
 #[test]
 fn linux_import_definitions_pair_named_stub_and_file_backed_slot() {
-    let definitions = linux_import_definitions();
+    let definitions = linux_import_definitions(&runtime_imports(Platform::Linux, ALL));
     let names = symbols(&definitions);
     for name in ["getaddrinfo", "freeaddrinfo", "gettid", "__errno_location"] {
         // 桩符号与 import 真名错开：世界校验拒绝定义与导入重名。
@@ -149,32 +155,38 @@ fn linux_import_definitions_pair_named_stub_and_file_backed_slot() {
         assert_eq!(slot.content, SectionContent::Data(vec![0; 8]));
         assert_eq!(slot.align, 8);
     }
+    assert!(names.contains(linux_import_slot_symbol("environ").as_str()));
+    assert!(!names.contains(linux_import_stub_symbol("environ").as_str()));
 }
 
 #[test]
 fn runtime_imports_match_platform_import_surfaces() {
-    let linux = runtime_imports(Platform::Linux);
+    let linux = runtime_imports(Platform::Linux, ALL);
     assert_eq!(
         linux,
         [
             "getaddrinfo",
             "freeaddrinfo",
             "gettid",
-            "__errno_location",
+            "pthread_create",
+            "pthread_tryjoin_np",
             "pthread_attr_init",
             "pthread_attr_setstack",
-            "pthread_create",
             "pthread_attr_destroy",
-            "pthread_tryjoin_np",
+            "__errno_location",
             "environ",
             "setenv",
             "unsetenv",
             "getenv",
         ]
-        .map(|name| NativeImport::function(LINUX_LIBC, name)),
+        .map(|name| if name == "environ" {
+            NativeImport::data(LINUX_LIBC, name)
+        } else {
+            NativeImport::function(LINUX_LIBC, name)
+        }),
         "Linux imports are the resolver plus worker/environment libc surface"
     );
-    let darwin = runtime_imports(Platform::Darwin);
+    let darwin = runtime_imports(Platform::Darwin, LinuxFeatures::default());
     // Darwin 面必须是各片段申报导入的完整去重并集：缺名立即失败。
     let mut expected: Vec<NativeImport> = [
         darwin_vm_imports(),
@@ -196,4 +208,35 @@ fn runtime_imports_match_platform_import_surfaces() {
         );
     }
     assert_eq!(darwin, expected);
+}
+
+#[test]
+fn static_linux_runtime_has_no_libc_references() {
+    let features = LinuxFeatures::default();
+    assert!(runtime_imports(Platform::Linux, features).is_empty());
+    let definitions = runtime_definitions(Platform::Linux, features);
+    let names = symbols(&definitions);
+    for glue in [
+        "resolver_symbol",
+        "environment_symbol",
+        "foreign_native_worker",
+    ] {
+        assert!(!names.contains(mangle_runtime(glue).as_str()));
+    }
+    for definition in definitions {
+        for relocation in definition.relocations {
+            assert!(
+                !relocation
+                    .relocation
+                    .target
+                    .starts_with("__gugu_linux_stub_")
+            );
+            assert!(
+                !relocation
+                    .relocation
+                    .target
+                    .starts_with("__gugu_linux_import_")
+            );
+        }
+    }
 }

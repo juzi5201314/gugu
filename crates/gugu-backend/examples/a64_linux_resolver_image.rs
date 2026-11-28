@@ -3,7 +3,7 @@
 pub mod probe;
 
 use gugu_backend::a64::{
-    definitions::runtime_imports,
+    definitions::{LinuxFeatures, runtime_imports},
     elf::{DynamicLink, Import, Location},
     foreign::Platform,
     fragments::{
@@ -16,19 +16,26 @@ use probe::{Arg, Arg::*, Probe};
 use std::collections::BTreeMap;
 
 fn imports(p: &mut Probe, interpreter: &str, library: &str) -> BTreeMap<String, Location> {
-    // 走生产面：导入表直接取 runtime_imports 的完整 libc 面，仅按调用方选择 musl/glibc
+    // 走生产面：导入表只取 resolver 与 foreign worker 所需 libc 面，按调用方选择 musl/glibc
     // 覆盖库名；槽与桩符号仍由 linux_import_definitions 的命名约定消费。
-    let imports: Vec<_> = runtime_imports(Platform::Linux)
-        .into_iter()
-        .map(|mut native| {
-            native.library = library.to_owned();
-            native
-        })
-        .map(|native| Import {
-            native,
-            slot: p.data(vec![0; 8]),
-        })
-        .collect();
+    let imports: Vec<_> = runtime_imports(
+        Platform::Linux,
+        LinuxFeatures {
+            resolver: true,
+            foreign: true,
+            environment: false,
+        },
+    )
+    .into_iter()
+    .map(|mut native| {
+        native.library = library.to_owned();
+        native
+    })
+    .map(|native| Import {
+        native,
+        slot: p.data(vec![0; 8]),
+    })
+    .collect();
     let mut symbols: BTreeMap<_, _> = imports
         .iter()
         .map(|import| (linux_import_slot_symbol(&import.native.name), import.slot))
