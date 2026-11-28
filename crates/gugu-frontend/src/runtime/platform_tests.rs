@@ -862,7 +862,7 @@ fn extent_return_target_follows_arena_domain_ownership() {
 }
 
 fn compile_platform_source(source: &str) -> crate::Compilation {
-    crate::Compiler::shared().compile(crate::CompileRequest::single_file(
+    crate::Compiler::shared().compile_full_for_test(crate::CompileRequest::single_file(
         "main.gg",
         source,
         crate::TargetName::X86_64Linux,

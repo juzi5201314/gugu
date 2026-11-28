@@ -4,6 +4,10 @@ use crate::x64::inst::Scale;
 use crate::x64::lower::Lowered;
 
 fn allocated(sequence: Lowered) -> Sequence {
+    allocated_with_end(sequence, 100)
+}
+
+fn allocated_with_end(sequence: Lowered, value_end: u32) -> Sequence {
     let body = live::foreign_root_tests::body(&[]);
     let frame = FrameLayout {
         frame_size: 32,
@@ -26,7 +30,7 @@ fn allocated(sequence: Lowered) -> Sequence {
             value,
             class: RegClass::Gpr,
             root: super::super::RootClass::NonPointer,
-            range: (0, 100),
+            range: (0, value_end),
             placement: Placement::Location(Location::Slot(value)),
         })
         .collect();
@@ -143,4 +147,58 @@ fn lea_pure_output_reuses_its_spilled_address_scratch() {
     machine.set_reg(Gpr::Rax, 3);
     assert_eq!(machine.run(&sequence), Stop::Return);
     assert_eq!(machine.word(stack + 8), 168);
+}
+
+#[test]
+fn spilled_two_address_result_stays_in_scratch_until_last_write() {
+    let mut b = Builder::new();
+    b.emit(
+        "mov",
+        &[OperandKind::Rm64, OperandKind::R64],
+        Access::Read,
+        vec![Operand::Reg(Reg::Virtual(1)), Operand::Reg(Reg::Virtual(0))],
+    );
+    b.emit(
+        "imul",
+        &[OperandKind::Rm64, OperandKind::R64],
+        Access::Read,
+        vec![
+            Operand::Reg(Reg::Gpr(Gpr::Rbx)),
+            Operand::Reg(Reg::Virtual(0)),
+        ],
+    );
+    let sequence = allocated(b.finish());
+    let mut machine = Machine::new(&[]);
+    let stack = machine.get(Gpr::Rsp);
+    machine.put(stack + 8, 5);
+    machine.set_reg(Gpr::Rbx, 7);
+    assert_eq!(machine.run(&sequence), Stop::Return);
+    assert_eq!(machine.word(stack), 35);
+}
+
+#[test]
+fn spilled_intermediate_write_is_visible_when_the_final_result_is_dead() {
+    let mut b = Builder::new();
+    for (mnemonic, source, destination) in [
+        ("mov", Reg::Virtual(1), Reg::Virtual(0)),
+        ("mov", Reg::Virtual(0), Reg::Gpr(Gpr::Rax)),
+        ("imul", Reg::Gpr(Gpr::Rbx), Reg::Virtual(0)),
+    ] {
+        b.emit(
+            mnemonic,
+            &[OperandKind::Rm64, OperandKind::R64],
+            Access::Read,
+            vec![Operand::Reg(source), Operand::Reg(destination)],
+        );
+    }
+    // 第三个机器点的 def_slot 为 5；最终结果已死，中间结果仍被 rax 读取。
+    let sequence = allocated_with_end(b.finish(), 5);
+    let mut machine = Machine::new(&[]);
+    let stack = machine.get(Gpr::Rsp);
+    machine.put(stack, 0);
+    machine.put(stack + 8, 5);
+    machine.set_reg(Gpr::Rbx, 7);
+    assert_eq!(machine.run(&sequence), Stop::Return);
+    assert_eq!(machine.get(Gpr::Rax), 5);
+    assert_eq!(machine.word(stack), 5);
 }

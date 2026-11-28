@@ -91,6 +91,8 @@ pub enum BindingTarget {
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub struct RuntimeGlueBindings {
     map: BTreeMap<&'static str, BindingTarget>,
+    /// 构造时生成一次；热路径点查与 writer 的有序枚举共用同一集合。
+    symbols: std::collections::BTreeSet<String>,
     runtime_owners: std::collections::BTreeSet<[u8; 32]>,
     fingerprint: [u8; 32],
 }
@@ -159,6 +161,10 @@ impl RuntimeGlueBindings {
             }
         }
         let bindings = Self {
+            symbols: map
+                .keys()
+                .map(|glue| mangle::mangle_runtime(glue))
+                .collect(),
             map,
             runtime_owners: Default::default(),
             fingerprint: [0; 32],
@@ -175,11 +181,6 @@ impl RuntimeGlueBindings {
     /// 步骤，因此闭合检查对它们放行，其余任何被可达代码引用却无定义的入口都必须阻断。清单
     /// 清空即代表本切片的 GC 执行体全部就位。
     const PENDING_GLUE_IMPL: &'static [&'static str] = &[
-        // 擦除句柄构造（闭包/`dyn` 值的动态擦除）：`mangle.rs:113` 有名字、
-        // `lir/build/rvalue.rs:423-439` 发 `[destination, source, descriptor, target]` 四参调用，
-        // 但 Rust 与 Gugu runtime 都没有实现。此前静默解析到 `__gugu_stub_exit`（含闭包的程序
-        // 运行期 exit 56），属动态值单元而不是 LocalHeap/回收迁移面。
-        "dynamic_erase",
         "type_is",
         "downcast",
         "downcast_copy",
@@ -268,17 +269,12 @@ impl RuntimeGlueBindings {
 
     /// 该 mangled 符号是否属于已绑定 glue。
     pub fn is_bound_symbol(&self, symbol: &str) -> bool {
-        self.map
-            .keys()
-            .any(|glue| mangle::mangle_runtime(glue) == symbol)
+        self.symbols.contains(symbol)
     }
 
     /// 已绑定 glue 的 mangled 符号名集合；镜像 writer 用它判定「绑定但缺失定义」。
     pub fn bound_symbols(&self) -> std::collections::BTreeSet<String> {
-        self.map
-            .keys()
-            .map(|glue| mangle::mangle_runtime(glue))
-            .collect()
+        self.symbols.clone()
     }
 
     /// 每个 Item 绑定的调用点 ABI 形状必须与绑定函数自身的签名一致。

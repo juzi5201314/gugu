@@ -125,7 +125,7 @@ impl Builder<'_, '_> {
             }
             self.parameters[index] = parameters;
         }
-        for index in 0..self.parameters.len() {
+        for index in self.installed_definitions()..self.parameters.len() {
             let owner = hir::DefId(checked_id(index)?);
             let mut formed = Vec::with_capacity(self.parameters[index].len());
             for (position, parameter) in self.parameters[index].clone().into_iter().enumerate() {
@@ -143,7 +143,7 @@ impl Builder<'_, '_> {
                 };
                 formed.push(hir::Parameter { name, kind });
             }
-            self.output.definitions[index].parameters = formed;
+            self.definition_mut(owner).parameters = formed;
         }
         Ok(())
     }
@@ -304,7 +304,7 @@ impl Builder<'_, '_> {
         };
         if let Some(ty) = ty {
             let signature = self.type_id(&ty, owner)?;
-            self.output.definitions[owner.index()].signature = Some(signature);
+            self.definition_mut(owner).signature = Some(signature);
         }
         Ok(())
     }
@@ -328,9 +328,7 @@ impl Builder<'_, '_> {
                 ty: self.type_id(&obligation.ty, owner)?,
                 interface: self.trait_ref(&obligation.interface, owner)?,
             };
-            self.output.definitions[owner.index()]
-                .obligations
-                .push(bound);
+            self.definition_mut(owner).obligations.push(bound);
         }
         for parameter in generics.as_slice(&self.model.modules[module].arena.generic_params) {
             let ast::GenericParamKind::Type { name, bounds, .. } = parameter.kind else {
@@ -349,9 +347,7 @@ impl Builder<'_, '_> {
                             .type_id(&Ty::Param(self.model.name(module, name).to_owned()), owner)?,
                         signature: self.type_id(&signature, owner)?,
                     };
-                    self.output.definitions[owner.index()]
-                        .obligations
-                        .push(obligation);
+                    self.definition_mut(owner).obligations.push(obligation);
                 }
             }
         }
@@ -400,6 +396,7 @@ impl Builder<'_, '_> {
         }
         self.output
             .aggregates
+            .suffix_mut()
             .sort_by_key(|aggregate| aggregate.definition);
         Ok(())
     }
@@ -416,9 +413,7 @@ impl Builder<'_, '_> {
                     ty: self.type_id(ty, owner)?,
                     interface: self.trait_ref(bound, owner)?,
                 };
-                self.output.definitions[owner.index()]
-                    .obligations
-                    .push(obligation);
+                self.definition_mut(owner).obligations.push(obligation);
             }
             self.output.interfaces.push(hir::Interface {
                 definition: owner,
@@ -428,6 +423,7 @@ impl Builder<'_, '_> {
         }
         self.output
             .interfaces
+            .suffix_mut()
             .sort_by_key(|interface| interface.definition);
         Ok(())
     }
@@ -455,6 +451,7 @@ impl Builder<'_, '_> {
         }
         self.output
             .implementations
+            .suffix_mut()
             .sort_by_key(|implementation| implementation.definition);
         Ok(())
     }
@@ -525,14 +522,12 @@ impl Builder<'_, '_> {
                     ty: self.type_id(&bound.ty, owner)?,
                     interface: self.trait_ref(&bound.interface, owner)?,
                 };
-                self.output.definitions[owner.index()]
-                    .obligations
-                    .push(obligation);
+                self.definition_mut(owner).obligations.push(obligation);
             }
             for signature in bounds.functions {
                 let ty = self.type_id(&Ty::Opaque(index as u32, arguments.clone()), owner)?;
                 let signature = self.type_id(&signature, owner)?;
-                self.output.definitions[owner.index()]
+                self.definition_mut(owner)
                     .obligations
                     .push(hir::Obligation::Callable { ty, signature });
             }
@@ -541,7 +536,10 @@ impl Builder<'_, '_> {
                 hidden,
             });
         }
-        self.output.opaques.sort_by_key(|opaque| opaque.definition);
+        self.output
+            .opaques
+            .suffix_mut()
+            .sort_by_key(|opaque| opaque.definition);
         Ok(())
     }
 }

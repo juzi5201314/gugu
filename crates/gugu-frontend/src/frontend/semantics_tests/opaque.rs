@@ -194,7 +194,12 @@ fn any_plans_preserve_exact_payload_across_cached_queries() {
         ]
     );
     let mut corrupted = warm.semantics.clone();
-    corrupted.bodies[index].reflections[0].kind = ReflectionKind::Downcast(Ty::Never);
+    corrupted
+        .bodies
+        .get_mut(index)
+        .expect("main 属于会话追加区")
+        .reflections[0]
+        .kind = ReflectionKind::Downcast(Ty::Never);
     assert!(corrupted.verify(&model).is_err());
 }
 

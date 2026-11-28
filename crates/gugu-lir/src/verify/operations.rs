@@ -5,6 +5,7 @@ use crate::body::{
     RuntimeCall, Symbol, Terminator, Type, ValueId, ValueType, VectorOp, range,
 };
 use crate::gir::body::{CallKind, MemoryOrdering};
+use smallvec::SmallVec;
 use std::collections::BTreeSet;
 
 #[cfg(test)]
@@ -12,12 +13,13 @@ mod foreign_tests;
 
 pub(super) fn verify(body: &Body) -> Result<(), Diagnostic> {
     for instruction in &body.instructions {
-        let args: Vec<_> = body
+        // 普通 op 的参数/结果短列表内联，调用等大列表仍扩容；不把内联容量当作 arity 上界。
+        let args: SmallVec<[ValueType; 4]> = body
             .args(&instruction.arguments)
             .iter()
             .map(|value| body.values[value.index()].kind)
             .collect();
-        let results: Vec<_> = body.values[range(&instruction.results)]
+        let results: SmallVec<[ValueType; 2]> = body.values[range(&instruction.results)]
             .iter()
             .map(|value| value.kind)
             .collect();
@@ -27,8 +29,10 @@ pub(super) fn verify(body: &Body) -> Result<(), Diagnostic> {
         {
             return Err(invalid("Mem/Void 不能伪装成普通指令结果"));
         }
-        let a: Vec<_> = args.iter().map(|kind| kind.ty).collect();
-        let r: Vec<_> = results.iter().map(|kind| kind.ty).collect();
+        let a: SmallVec<[Type; 4]> = args.iter().map(|kind| kind.ty).collect();
+        let r: SmallVec<[Type; 2]> = results.iter().map(|kind| kind.ty).collect();
+        let a = a.as_slice();
+        let r = r.as_slice();
         let valid = match &instruction.op {
             Op::IConst(value) => {
                 a.is_empty()
@@ -77,8 +81,8 @@ pub(super) fn verify(body: &Body) -> Result<(), Diagnostic> {
                     && (a[0].integer() || matches!(a[0], Type::F32 | Type::F64 | Type::Ptr))
                     && (r == [Type::I8] || r == [Type::Flags])
             }
-            Op::Convert(conversion) => convert(*conversion, &a, &r),
-            Op::Vector(operation) => vector(*operation, &a, &r),
+            Op::Convert(conversion) => convert(*conversion, a, r),
+            Op::Vector(operation) => vector(*operation, a, r),
             Op::Select => {
                 a.len() == 3
                     && a[0] == Type::I8

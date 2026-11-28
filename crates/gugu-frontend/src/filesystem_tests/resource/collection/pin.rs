@@ -2,13 +2,11 @@ use super::*;
 const PIN_PAGE: u64 = 73728;
 const PINNED: u64 = 0x8000000000;
 
-#[test]
-fn pinned_old_field_survives_minor_after_young_store() {
+pub(super) fn pinned_old_field_survives_minor_after_young_store() {
     const OLD: u64 = 2097152;
     const YOUNG: u64 = 4194304;
     const BARRIER: u64 = 98304;
-    let (hir, bodies) = runtime_bodies();
-    let mut harness = ResourceHarness::from_bodies(&hir, &bodies);
+    let mut harness = runtime_harness();
     harness.gc_config = CONFIG;
     harness.block_budget = 32768;
     let (mut memory, _) = graph_memory();
@@ -66,7 +64,7 @@ fn pinned_old_field_survives_minor_after_young_store() {
 }
 
 fn pin_compilation() -> Compilation {
-    let output = Compiler::shared().compile(CompileRequest::single_file(
+    let output = Compiler::shared().compile_to_lir(CompileRequest::single_file(
         "main.gg",
         include_str!("../../../../../gugu-compiler/tests/fixtures/pin.gg"),
         TargetName::X86_64Linux,
@@ -76,13 +74,21 @@ fn pin_compilation() -> Compilation {
 }
 
 #[test]
-fn pin_callback_cleanup_and_acquisition_keep_precise_roots() {
+fn pin_cleanup_and_lease_contracts() {
+    let output = pin_compilation();
+    pin_callback_cleanup_and_acquisition_keep_precise_roots(&output);
+    pin_pages_unlink_middle_head_and_tail_once(&output);
+    nested_pin_keeps_object_graph_until_last_release(&output);
+    large::large_mapping_is_traced_then_released_once(&output);
+    region::retired_region_keeps_fields_and_pin_until_last_root_then_releases_once(&output);
+}
+
+fn pin_callback_cleanup_and_acquisition_keep_precise_roots(output: &Compilation) {
     use crate::lir::{
         body::{Op, Terminator},
         stackmap,
     };
-    let output = pin_compilation();
-    let harness = ResourceHarness::new(&output);
+    let harness = ResourceHarness::new(output);
     let prepare = harness.body("pinning", "pin_prepare").instance;
     let acquire = harness.body("pinning", "pin_acquire").instance;
     let release = harness.body("pinning", "pin_release").instance;
@@ -243,10 +249,8 @@ fn cleanup_exits(body: &Body, start: usize) -> u8 {
     exits
 }
 
-#[test]
-fn pin_pages_unlink_middle_head_and_tail_once() {
-    let output = pin_compilation();
-    let mut harness = ResourceHarness::new(&output);
+fn pin_pages_unlink_middle_head_and_tail_once(output: &Compilation) {
+    let mut harness = ResourceHarness::new(output);
     harness.gc_config = CONFIG;
     harness.block_budget = 32768;
     let (mut memory, _) = graph_memory();
@@ -303,15 +307,8 @@ fn pin_pages_unlink_middle_head_and_tail_once() {
     assert_eq!(word(&memory, PROCESSOR + 3936), 2);
 }
 
-#[test]
-fn nested_pin_keeps_object_graph_until_last_release() {
-    let output = Compiler::shared().compile(CompileRequest::single_file(
-        "main.gg",
-        include_str!("../../../../../gugu-compiler/tests/fixtures/pin.gg"),
-        TargetName::X86_64Linux,
-    ));
-    assert!(output.is_success(), "{:?}", output.diagnostics().items());
-    let mut harness = ResourceHarness::new(&output);
+fn nested_pin_keeps_object_graph_until_last_release(output: &Compilation) {
+    let mut harness = ResourceHarness::new(output);
     harness.gc_config = CONFIG;
     harness.reserve_result = PIN_PAGE;
     harness.block_budget = 32768;

@@ -683,7 +683,11 @@ impl Checker<'_, '_> {
                 .cloned()
                 .unwrap_or_else(|| Ty::Option(Box::new(self.fresh())));
         }
-        if let Ok(Some((ty, ctor))) = self.model.constructor(self.module, &parts, expected)
+        let explicit = self.explicit_constructor_type(path, &p.span);
+        let constructor_expected = explicit.as_ref().or(expected);
+        if let Ok(Some((ty, ctor))) =
+            self.model
+                .constructor(self.module, &parts, constructor_expected)
             && ctor.fields.is_empty()
         {
             return ty;

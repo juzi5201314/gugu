@@ -8,8 +8,8 @@ use super::codegen::X64World;
 const CALLS: &str = "fn ping(value: int) int {\n if value <= 0 { return 0 }\n let next = pong(value - 1)\n next + 1\n}\nfn pong(value: int) int {\n if value <= 0 { return 1 }\n let next = ping(value - 1)\n next + 1\n}\nfn main() {\n let index = 0\n let total = 0\n while index < 4 {\n  total = total + ping(index)\n  index = index + 1\n }\n if total > 0 { _ = pong(total) }\n}\n";
 
 fn compile(source: &str, target: TargetName) -> crate::Compilation {
-    let compilation =
-        Compiler::shared().compile(CompileRequest::single_file("main.gg", source, target));
+    let compilation = Compiler::shared()
+        .compile_full_for_test(CompileRequest::single_file("main.gg", source, target));
     assert!(
         compilation.is_success(),
         "{:?}",

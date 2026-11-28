@@ -157,18 +157,29 @@ fn freeze(world: &MonoWorldV1) -> Result<TypeUniverse, Diagnostic> {
         vtables: Vec::new(),
         fingerprint: [0; 32],
     };
+    let mut vtables = std::collections::BTreeMap::new();
     for root in world.instances.iter().flat_map(|i| &i.vtable_roots) {
         let key = hash_domain("gugu-mono-v1", &root.self_type);
         let concrete = universe
             .type_id(&key)
             .ok_or_else(|| invalid("vtable payload 类型没有进入冻结集合"))?;
-        universe.vtables.push(VtableReference {
+        let object = universe
+            .type_id(&root.dyn_type)
+            .ok_or_else(|| invalid("vtable dyn 类型没有进入冻结集合"))?;
+        let reference = VtableReference {
             interface: root.interface,
             concrete,
-        });
+            object,
+            methods: root.methods.clone(),
+        };
+        if let Some(previous) = vtables.insert((root.interface, concrete), reference.clone())
+            && previous != reference
+        {
+            return Err(invalid("相同 vtable 的方法实例不一致"));
+        }
     }
+    universe.vtables = vtables.into_values().collect();
     universe.vtables.sort_unstable();
-    universe.vtables.dedup();
     universe.fingerprint = universe.fingerprint();
     universe.verify()?;
     Ok(universe)
