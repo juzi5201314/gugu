@@ -8,6 +8,8 @@
 
 `ImagePlan` 持有链接完成的镜像字节（ELF/PE）。`emit-image` 在镜像生成时 `complete`；落盘物化由 `gugu build`/`gugu test` 等宿主工具写入 `target/` 布局（见[构建产物布局](../spec/packages-builds.md#cache-and-target-view)）。任一前置 action 失败时，所有后续 action 都会被跳过，结果中不会留下镜像计划。
 
+CLI 的 `materialize` 层负责落盘文件的执行权限。单文件输出在 `finalize_bytes` 完成可选 strip 后，由 `write_executable` 写出并调用与项目构建共用的 `make_executable`；Unix 上按已有读位补执行位，写入或权限设置失败均传播为 CLI 错误。`emit-image` 与镜像缓存只管理字节，不修改宿主文件权限。
+
 ## CLI 入口与输出
 
 `gugu` 是唯一 CLI 入口：根级全局参数可在子命令前后解析，配置按内置默认、用户配置、当前 workspace 的 `.gugu/config.toml`、`--config`、环境变量、命令行的顺序合并，后层覆盖前层。`--frozen` 在解析结果中同时设置 `offline` 与 `locked`。

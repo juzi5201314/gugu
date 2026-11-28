@@ -111,12 +111,17 @@ pub(crate) fn materialize_single_file(
         .clone()
         .unwrap_or_else(|| PathBuf::from("."))
         .join(name);
-    fs::write(&output, bytes).map_err(|error| {
+    write_executable(&output, &bytes, format)
+}
+
+fn write_executable(output: &Path, bytes: &[u8], format: OutputFormat) -> Result<(), ()> {
+    fs::write(output, bytes).map_err(|error| {
         emit_cli_error(
             format,
             &format!("写出 `{}` 失败：{error}", output.display()),
         );
-    })
+    })?;
+    make_executable(output, format)
 }
 
 /// `--strip` 时先做末端后处理；image 与 stripped image 都进 action cache。
@@ -201,12 +206,12 @@ fn write_build_log(
     })
 }
 
-/// Unix 上按 chmod a+x 语义补执行位（只在已有读位上加执行位）。
+/// Unix 上按已有读位补对应执行位，保留 umask 限制。
 pub(crate) fn make_executable(path: &Path, format: OutputFormat) -> Result<(), ()> {
     #[cfg(unix)]
     {
         use std::os::unix::fs::PermissionsExt;
-        // chmod a+x 语义：只在已有读位上加执行位，不绕过用户 umask。
+        // 只在已有读位上加执行位，不绕过用户 umask。
         let mode = fs::metadata(path)
             .map_err(|error| {
                 emit_cli_error(
@@ -287,5 +292,46 @@ fn artifact_extension(target: TargetName, kind: &str) -> &'static str {
         }
         (TargetName::X86_64Linux | TargetName::Aarch64Linux, kind) if kind.contains("lib") => ".a",
         _ => "",
+    }
+}
+
+#[cfg(all(test, unix))]
+mod tests {
+    use std::os::unix::fs::PermissionsExt;
+
+    use super::*;
+
+    #[test]
+    fn single_file_output_is_executable_on_creation() {
+        let directory = tempfile::tempdir().expect("创建临时目录");
+        let output = directory.path().join("hello");
+        let reference = directory.path().join("ordinary");
+        fs::write(&reference, b"image").expect("写入普通文件以取得 umask 后的权限");
+        let initial_mode = fs::metadata(reference).unwrap().permissions().mode() & 0o777;
+
+        write_executable(&output, b"image", OutputFormat::Text).unwrap();
+
+        let mode = fs::metadata(&output).unwrap().permissions().mode() & 0o777;
+        assert_eq!(mode & 0o666, initial_mode);
+        assert_eq!(mode & 0o111, (initial_mode & 0o444) >> 2);
+        assert_eq!(fs::read(output).unwrap(), b"image");
+    }
+
+    #[test]
+    fn single_file_output_restores_execute_bits_without_widening_access() {
+        let directory = tempfile::tempdir().expect("创建临时目录");
+        let output = directory.path().join("hello");
+        for (initial_mode, expected_mode) in [(0o644, 0o755), (0o640, 0o750), (0o600, 0o700)] {
+            fs::write(&output, b"old image").unwrap();
+            fs::set_permissions(&output, fs::Permissions::from_mode(initial_mode)).unwrap();
+
+            write_executable(&output, b"new image", OutputFormat::Text).unwrap();
+
+            assert_eq!(
+                fs::metadata(&output).unwrap().permissions().mode() & 0o777,
+                expected_mode,
+            );
+            assert_eq!(fs::read(&output).unwrap(), b"new image");
+        }
     }
 }

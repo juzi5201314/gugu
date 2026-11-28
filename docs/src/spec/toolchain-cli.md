@@ -69,6 +69,8 @@
 
 `gugu build <file.gg>` 是单文件编译入口：绕过 package 模型，直接把该文件作为闭世界根编译。此时 `-p`、`--workspace`、`--features`、`--no-default-features`、`--all-features`、`--lib`、`--bin`、`--test`、`--bench`、`--example`、`--all-targets` 非法。`--target`、`--strip`、`--offline` 仍有效；产物写到当前目录或 `--target-dir` 指定目录。
 
+Unix 宿主写出可执行产物后，按落盘文件的属主、组和其它用户读权限分别补对应的执行位，不额外扩大读写权限；通常的 `0644` 变为 `0755`，受 umask 限制的 `0600` 变为 `0700`。该规则同时适用于单文件和项目构建，以及 `--strip` 输出；覆盖已有单文件产物时也必须重新补执行位。权限设置失败必须报错，不能报告构建成功。非 Unix 宿主不设置 Unix 权限位。
+
 ### `gugu check`
 
 只执行解析、类型检查与代码生成前的全部检查，不生成最终镜像。比 `build` 快，用于 IDE 与快速反馈。target 选择规则同 `build`。
