@@ -145,6 +145,16 @@ pub fn runtime_definitions(platform: Platform) -> Vec<Definition> {
     match platform {
         Platform::Linux => definitions.extend(
             [
+                Definition {
+                    symbol: fragments::LINUX_RESERVE_CURSOR.into(),
+                    align: 8,
+                    segment: Segment::Data,
+                    content: SectionContent::Data(
+                        fragments::LINUX_RESERVE_START.to_le_bytes().to_vec(),
+                    ),
+                    relocations: vec![],
+                    pointers: vec![],
+                },
                 Definition::fragment(rt("fs_native_worker"), fragments::linux_fd_dispatch(true)),
                 Definition::fragment(rt("fd_dispatch"), fragments::linux_fd_dispatch(false)),
                 Definition::fragment(rt("net_call"), fragments::linux_net_dispatch()),

@@ -458,6 +458,8 @@ Linux resolver 不是运行时 UDP DNS：它使用 resolver_symbol(0/1) 的 libc
 
 内部 aarch64 Linux VM 范围片段沿用平台原语协议：reserve_aligned 接收 x0 = bytes、x1 = alignment，其他操作接收 x0 = `(base, bytes)` 描述符地址，返回原始非负结果或负 errno。Reserve 以 mmap(PROT_NONE, MAP_PRIVATE|MAP_ANONYMOUS) 预留 bytes + alignment，修剪对齐范围两侧；空长度、非二次幂或零 alignment、加法溢出返回 -EINVAL，修剪失败释放仍然拥有的映射并保留错误，不触碰已经释放的前缀。Commit/Unprotect 用 mprotect(PROT_READ|PROT_WRITE)，ProtectGuard 用 PROT_NONE，Decommit 用 madvise(MADV_DONTNEED) 丢弃匿名页内容，Release 用 munmap；Decommit 不移除映射或写权限，下一次读取得到零填充。
 
+运行时保留范围必须完整落在低 47 位地址空间，不能把 ARM64 Linux 返回的其他合法 48 位用户地址直接交给栈与 GC。平台使用不覆盖已有映射的地址提示，并在修剪前验证原始范围；不满足约束时先释放本次映射，再作有限次重试，耗尽返回 -ENOMEM。释放失败立即保留其负 errno，不再申请新范围；无法容纳于平台候选区间的请求返回 -EINVAL。
+
 aarch64 Linux 页面探测由 `page_size` machine intrinsic（片段与上文协议相同：envp → auxv AT_PAGESZ，缺失返回 0，不硬编码 4 KiB，支持 4/16/64 KiB 内核页）在 `rt0_start` 首次页舍入预约之前执行；返回 0 或非法页大小按启动期 fatal 结束。探测值写入 `native_memory.gg` 的 `NATIVE_PAGE_BYTES` 与 `heap.gg` 的 `LARGE_MAPPING_PAGE_BYTES`——这两个标识在该目标上是 `pub static`（其余目标仍为 `pub const` 4096/16384），runtime 内所有页对齐对齐参数统一经 `native_memory.os_page_bytes()` 取得，不再出现 4096 字面量对齐。VM 调用方必须用 OS 页大小舍入长度、提供页对齐的 base 和有效原生描述符，并选择二次幂 alignment。Wait/Wake、Entropy、Zero、dump/hint 等非本次范围操作不由此片段实现。
 
 aarch64 Linux 也可显式选择动态 PIE：调用方提供绝对 interpreter 路径、库名、Function/Data 导入及其唯一、八字节对齐且有文件内容的可写槽。沿用同一 ELF writer、64 KiB 段布局与 LinuxEntry，增加 PT_INTERP、PT_DYNAMIC、DT_NEEDED、SysV hash、undefined dynsym 和 eager R_AARCH64_GLOB_DAT（1025），由 loader 解析导入；不使用 lazy PLT/JUMP_SLOT。RELATIVE 记录位于同一 RELA 表前缀，入口只遍历该前缀，不覆盖 loader 填写的导入槽。空导入、重复名字/槽、与 RELATIVE 重叠的槽和无效路径/名字为写出错误；不探测宿主 libc。
