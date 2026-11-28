@@ -320,14 +320,18 @@ impl AbstractState {
         if !self.reachable {
             return;
         }
-        // 任何区间写入都可能让已派生的表达式区间失效。
-        self.derived_synced = false;
-        match key {
-            ValueKey::Local(id) => self.local_range[id.index()] = interval,
-            ValueKey::Expr(id) => self.expr_range[id.index()] = interval,
-            ValueKey::LocalLen(id) => self.local_len[id.index()] = interval,
-            ValueKey::ExprLen(id) => self.expr_len[id.index()] = interval,
+        let slot = match key {
+            ValueKey::Local(id) => &mut self.local_range[id.index()],
+            ValueKey::Expr(id) => &mut self.expr_range[id.index()],
+            ValueKey::LocalLen(id) => &mut self.local_len[id.index()],
+            ValueKey::ExprLen(id) => &mut self.expr_len[id.index()],
+        };
+        if *slot == interval {
+            return;
         }
+        *slot = interval;
+        // 区间实际发生变化时才令已派生的表达式区间失效。
+        self.derived_synced = false;
     }
 
     /// 返回 `sync_resolved` 的派生结果是否仍与当前状态一致。
@@ -338,6 +342,44 @@ impl AbstractState {
     /// 标记派生结果已按当前状态重算完毕。
     pub fn mark_derived(&mut self) {
         self.derived_synced = true;
+    }
+
+    /// 复用已有 `Vec` 缓冲复制状态，避免固定点每块每轮重复分配/释放 8 块堆内存。
+    pub fn copy_from(&mut self, other: &Self) {
+        self.reachable = other.reachable;
+        self.local_range.clone_from(&other.local_range);
+        self.expr_range.clone_from(&other.expr_range);
+        self.local_len.clone_from(&other.local_len);
+        self.expr_len.clone_from(&other.expr_len);
+        self.init.clone_from(&other.init);
+        self.alias.clone_from(&other.alias);
+        self.local_version.clone_from(&other.local_version);
+        self.heap_version = other.heap_version;
+        self.foreign_version = other.foreign_version;
+        self.relations.clone_from(&other.relations);
+        self.relations_synced = other.relations_synced;
+        self.derived_synced = other.derived_synced;
+        self.effects = other.effects;
+    }
+
+    /// 复位为不可达态但保留底层 `Vec` 容量供后续复用。
+    pub fn reset_unreachable(&mut self) {
+        self.reachable = false;
+        self.relations.clear();
+        self.relations_synced = false;
+        self.derived_synced = false;
+        self.effects = EffectFacts::default();
+    }
+
+    /// 语义相等：两个不可达状态视为相等（忽略保留容量内的旧事实字节）。
+    pub fn semantic_eq(&self, other: &Self) -> bool {
+        if self.reachable != other.reachable {
+            return false;
+        }
+        if !self.reachable {
+            return true;
+        }
+        self == other
     }
 
     pub fn join(&mut self, other: &Self) -> bool {
@@ -351,7 +393,7 @@ impl AbstractState {
             return false;
         }
         if !self.reachable {
-            *self = other.clone();
+            self.copy_from(other);
             return true;
         }
         let mut changed = false;
@@ -392,19 +434,27 @@ impl AbstractState {
         changed
     }
 
+    #[cfg(test)]
     pub fn widen(&mut self, other: &Self) -> bool {
+        let mut widened_bound = false;
+        self.widen_tracked(other, &mut widened_bound)
+    }
+
+    /// 与 [`Self::widen`] 相同，并在任意区间端点因外推跳到 `±∞`（严格弱于 `join`）时将
+    /// `widened_bound` 置真；未外推时不动点即为精确最小不动点，无需后续 narrowing。
+    pub fn widen_tracked(&mut self, other: &Self, widened_bound: &mut bool) -> bool {
         if !other.reachable {
             return false;
         }
         if !self.reachable {
-            *self = other.clone();
+            self.copy_from(other);
             return true;
         }
         let mut changed = false;
-        changed |= widen_intervals(&mut self.local_range, &other.local_range);
-        changed |= widen_intervals(&mut self.expr_range, &other.expr_range);
-        changed |= widen_intervals(&mut self.local_len, &other.local_len);
-        changed |= widen_intervals(&mut self.expr_len, &other.expr_len);
+        changed |= widen_intervals(&mut self.local_range, &other.local_range, widened_bound);
+        changed |= widen_intervals(&mut self.expr_range, &other.expr_range, widened_bound);
+        changed |= widen_intervals(&mut self.local_len, &other.local_len, widened_bound);
+        changed |= widen_intervals(&mut self.expr_len, &other.expr_len, widened_bound);
         // widen 语义上必然先收缩关系集；求交一次即可，join_common 里跳过重复求交。
         changed |= intersect_relations(&mut self.relations, &other.relations);
         changed |= self.join_common(other, true);
@@ -513,11 +563,14 @@ fn join_intervals(slots: &mut [Interval], other: &[Interval]) -> bool {
     changed
 }
 
-fn widen_intervals(slots: &mut [Interval], other: &[Interval]) -> bool {
+fn widen_intervals(slots: &mut [Interval], other: &[Interval], widened_bound: &mut bool) -> bool {
     let mut changed = false;
     for (slot, &next) in slots.iter_mut().zip(other) {
         let widened = slot.widen(next);
         if widened != *slot {
+            if !slot.is_empty() && !next.is_empty() && widened != slot.join(next) {
+                *widened_bound = true;
+            }
             *slot = widened;
             changed = true;
         }

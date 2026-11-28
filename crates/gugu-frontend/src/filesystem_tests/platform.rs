@@ -157,7 +157,7 @@ impl<'a> Adapter<'a> {
 }
 
 fn compile(target: TargetName) -> Compilation {
-    let output = Compiler::shared().compile(CompileRequest::single_file(
+    let output = Compiler::shared().compile_to_lir(CompileRequest::single_file(
         "main.gg",
         include_str!("../../../gugu-compiler/tests/fixtures/fs_api.gg"),
         target,
@@ -167,8 +167,25 @@ fn compile(target: TargetName) -> Compilation {
 }
 
 #[test]
-fn linux_metadata_reads_x86_kernel_stat_fields() {
+fn linux_fs_platform_contracts() {
     let output = compile(TargetName::X86_64Linux);
+    linux_metadata_reads_x86_kernel_stat_fields(&output);
+    linux_metadata_failure_leaves_output_and_frees_scratch(&output);
+    linux_cross_device_rename_has_no_copy_fallback(&output);
+    linux_canonical_failure_closes_handle_and_preserves_primary_error(&output);
+    directory::linux_directory_retries_same_record_and_copies_names_before_refill(&output);
+}
+
+#[test]
+fn windows_fs_platform_contracts() {
+    let output = compile(TargetName::X86_64Windows);
+    windows_cancelled_read_preserves_completed_prefix_and_frees_count_buffer(&output);
+    windows_nofollow_validates_before_truncation_and_closes_on_error(&output);
+    directory::windows_directory_keeps_unconsumed_entry_after_small_buffer(&output);
+    reparse::windows_read_link_bounds_native_record_and_preserves_output_on_failure(&output);
+}
+
+fn linux_metadata_reads_x86_kernel_stat_fields(output: &Compilation) {
     let mut stat = vec![0; 144];
     for (offset, value) in [
         (0, 11_u64),
@@ -187,7 +204,7 @@ fn linux_metadata_reads_x86_kernel_stat_fields() {
         .argument(2, INPUT)
         .argument(4, 0)
         .write(3, stat);
-    let mut adapter = Adapter::new(&output, vec![reply]);
+    let mut adapter = Adapter::new(output, vec![reply]);
     let (result, memory) = adapter.run("fs_platform", "linux_stat", &[5, INPUT, 1, OUTPUT]);
     assert_eq!(result, vec![0, 0]);
     let actual: Vec<_> = memory[OUTPUT as usize..OUTPUT as usize + 64]
@@ -199,20 +216,16 @@ fn linux_metadata_reads_x86_kernel_stat_fields() {
     assert_eq!(actual, [123, 0o100640, 1, 999, 888, 0, 11, 12]);
 }
 
-#[test]
-fn linux_metadata_failure_leaves_output_and_frees_scratch() {
-    let output = compile(TargetName::X86_64Linux);
-    let mut adapter = Adapter::new(&output, vec![Reply::new(262, 0, 13).argument(2, INPUT)]);
+fn linux_metadata_failure_leaves_output_and_frees_scratch(output: &Compilation) {
+    let mut adapter = Adapter::new(output, vec![Reply::new(262, 0, 13).argument(2, INPUT)]);
     let (result, memory) = adapter.run("fs_platform", "linux_stat", &[5, INPUT, 1, OUTPUT]);
     assert_eq!(result, vec![0, 13]);
     assert_eq!(&memory[OUTPUT as usize..OUTPUT as usize + 64], &[0xa5; 64]);
 }
 
-#[test]
-fn linux_cross_device_rename_has_no_copy_fallback() {
-    let output = compile(TargetName::X86_64Linux);
+fn linux_cross_device_rename_has_no_copy_fallback(output: &Compilation) {
     let mut adapter = Adapter::new(
-        &output,
+        output,
         vec![Reply::new(82, 0, 18).argument(1, INPUT).argument(2, OUTPUT)],
     );
     assert_eq!(
@@ -254,11 +267,9 @@ fn darwin_canonicalize_reports_required_capacity_without_truncating() {
     }
 }
 
-#[test]
-fn linux_canonical_failure_closes_handle_and_preserves_primary_error() {
-    let output = compile(TargetName::X86_64Linux);
+fn linux_canonical_failure_closes_handle_and_preserves_primary_error(output: &Compilation) {
     let mut adapter = Adapter::new(
-        &output,
+        output,
         vec![
             Reply::new(2, 42, 0).argument(1, INPUT),
             Reply::new(89, 0, 13).argument(2, OUTPUT),
@@ -273,11 +284,9 @@ fn linux_canonical_failure_closes_handle_and_preserves_primary_error() {
     );
 }
 
-#[test]
-fn windows_cancelled_read_preserves_completed_prefix_and_frees_count_buffer() {
-    let output = compile(TargetName::X86_64Windows);
+fn windows_cancelled_read_preserves_completed_prefix_and_frees_count_buffer(output: &Compilation) {
     let mut adapter = Adapter::new(
-        &output,
+        output,
         vec![
             Reply::new(2, 0, u64::MAX)
                 .argument(1, 42)
@@ -297,9 +306,7 @@ fn windows_cancelled_read_preserves_completed_prefix_and_frees_count_buffer() {
     assert_eq!(memory[OUTPUT as usize + 3], 0xa5, "未完成的尾部保持原样");
 }
 
-#[test]
-fn windows_nofollow_validates_before_truncation_and_closes_on_error() {
-    let output = compile(TargetName::X86_64Windows);
+fn windows_nofollow_validates_before_truncation_and_closes_on_error(output: &Compilation) {
     for (attributes, stat_error, truncate_error, expected) in [
         (1024, 0, 0, 1921),
         (0, 5, 0, 5),
@@ -322,7 +329,7 @@ fn windows_nofollow_validates_before_truncation_and_closes_on_error() {
         if expected != 0 {
             replies.push(Reply::new(1, 0, 0).argument(1, 42));
         }
-        let mut adapter = Adapter::new(&output, replies);
+        let mut adapter = Adapter::new(output, replies);
         let result = adapter.run("fs_windows", "open", &[INPUT, 2 | 8 | 16]).0;
         assert_eq!(
             result,

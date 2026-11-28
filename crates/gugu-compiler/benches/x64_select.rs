@@ -5,6 +5,10 @@
 use gugu_compiler::{CompileRequest, Compiler, EMBEDDED_ARTIFACTS, TargetName};
 
 fn main() {
+    #[expect(
+        clippy::disallowed_methods,
+        reason = "x64 selection bench 需要机器码生成结果"
+    )]
     let compilation =
         Compiler::with_artifacts(&EMBEDDED_ARTIFACTS).compile(CompileRequest::single_file(
             "main.gg",

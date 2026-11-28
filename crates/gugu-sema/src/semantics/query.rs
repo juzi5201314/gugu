@@ -35,6 +35,7 @@ pub(super) fn check(
     // 因此查询键只由世界身份决定；把前缀折进键会让依赖指纹带着模式差异流进下游内容。
     let input_fingerprint = *hash.finalize().as_bytes();
     let key = QueryKey::new(QueryKind::TypeCheck, SCHEMA_VERSION, input_fingerprint);
+    let mut fresh = None;
     let result = queries.compute(key.clone(), |context| {
         for source in sources.snapshots() {
             context.record_dependency(
@@ -57,24 +58,25 @@ pub(super) fn check(
         match checker::check(model, early, installed, cfg.target()) {
             Ok(mut output) => {
                 output.input_fingerprint = input_fingerprint;
-                Ok((
-                    serde_json::to_vec(&output).expect("语义 schema 序列化"),
-                    Vec::new(),
-                ))
+                let payload = crate::canonical::to_vec(&output).expect("语义 schema 编码");
+                fresh = Some(output);
+                Ok((payload, Vec::new()))
             }
             Err(errors) => Err(store_errors(&errors)),
         }
     });
     match result {
         Ok(result) => {
-            let output: CheckedSemantics =
-                serde_json::from_slice(result.payload()).map_err(|_| {
+            let output = match fresh {
+                Some(output) => output,
+                None => crate::canonical::from_slice(result.payload()).map_err(|_| {
                     vec![Diagnostic::error(
                         DiagnosticCode::InvalidType,
                         "类型 query 缓存 schema 不合法",
                         None,
                     )]
-                })?;
+                })?,
+            };
             output.verify(model).map_err(|error| vec![error])?;
             Ok((
                 output,

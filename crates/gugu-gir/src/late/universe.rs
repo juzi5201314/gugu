@@ -68,6 +68,10 @@ pub struct TypeUniverse {
 pub struct VtableReference {
     pub interface: [u8; 32],
     pub concrete: u32,
+    /// 擦除目标 `dyn Trait` 在冻结类型表中的编号。
+    pub object: u32,
+    /// 按 trait 声明槽顺序排列的方法实例；vtable shim/数据发射使用同一顺序。
+    pub methods: Vec<crate::mono::instantiate::VtableMethodV1>,
 }
 
 impl TypeUniverse {
@@ -130,12 +134,11 @@ impl TypeUniverse {
                 )));
             }
         }
-        if self
-            .vtables
-            .iter()
-            .any(|vtable| vtable.concrete as usize >= self.records.len())
-        {
-            return Err(invalid("vtable 的具体类型引用越界"));
+        if self.vtables.iter().any(|vtable| {
+            vtable.concrete as usize >= self.records.len()
+                || vtable.object as usize >= self.records.len()
+        }) {
+            return Err(invalid("vtable 的类型引用或方法表越界"));
         }
         Ok(())
     }

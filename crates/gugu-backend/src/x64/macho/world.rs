@@ -2,7 +2,7 @@ use std::collections::{BTreeMap, BTreeSet};
 use std::mem::offset_of;
 
 use crate::macho::{
-    self, Arch, Location, MachImage, MachORequest, Section, SectionContent, Segment,
+    self, Arch, Fixup, Location, MachImage, MachORequest, Section, SectionContent, Segment,
 };
 use crate::runtime::cage_control::CageControlRecord;
 use crate::runtime::entry::{self, Rt0Payload, rt0_params};
@@ -57,6 +57,17 @@ pub fn link_world(
     for (name, at) in super::append_import_stubs(&mut image.request, &slots)? {
         image.define(format!("{prefix}{name}"), at)?;
         image.define(name, at)?;
+    }
+    for relocation in &world.blob_relocations {
+        let blob = image.addr(&relocation.blob)?;
+        let target = image.addr(&relocation.symbol)?;
+        image.request.fixups.push(Fixup::Rebase {
+            at: Location {
+                offset: blob.offset + relocation.offset,
+                ..blob
+            },
+            target,
+        });
     }
     let layout = macho::layout(&image.request)?;
     image.patch_code(&layout, world)?;

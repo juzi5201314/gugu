@@ -19,9 +19,7 @@ fn machine(_: &mut Harness<'_>, op: RuntimeMachineOp, args: &[u64], _: &mut Vec<
     }
 }
 
-#[test]
-fn linux_environment_empty_value_remove_and_case_sensitive_names() {
-    let output = protocol(TargetName::X86_64Linux);
+pub(super) fn linux_environment_empty_value_remove_and_case_sensitive_names(output: &Protocol) {
     let mut h = output.harness();
     let mut m = vec![0; 1048576];
     h.machine_hook = Some(machine);
@@ -55,9 +53,7 @@ fn linux_environment_empty_value_remove_and_case_sensitive_names() {
     assert!(h.script.is_empty());
 }
 
-#[test]
-fn windows_invalid_environment_block_is_freed_before_error_returns() {
-    let output = protocol(TargetName::X86_64Windows);
+pub(super) fn windows_invalid_environment_block_is_freed_before_error_returns(output: &Protocol) {
     let mut h = output.harness();
     let mut m = vec![0; 1048576];
     h.machine_hook = Some(machine);
@@ -87,9 +83,7 @@ fn windows_invalid_environment_block_is_freed_before_error_returns() {
     assert!(h.allocations.is_empty());
 }
 
-#[test]
-fn stdio_pipe_and_null_failures_release_every_acquired_handle() {
-    let output = protocol(TargetName::X86_64Linux);
+pub(super) fn stdio_pipe_and_null_failures_release_every_acquired_handle(output: &Protocol) {
     for (mode, script, closed) in [
         (2, vec![(1, 0, 0), (3, 0, 13)], vec![72, 71]),
         (1, vec![(2, 71, 0), (3, 0, 13)], vec![71]),
