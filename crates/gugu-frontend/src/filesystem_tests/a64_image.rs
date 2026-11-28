@@ -11,12 +11,17 @@ fn compile(source: &str, target: TargetName) -> super::Compilation {
     output
 }
 
-// 同一完整镜像编译同时覆盖 #275 的丢弃值 if-let 链，避免重复装配 runtime。
+// 同一完整镜像编译覆盖 #275 的丢弃值 if-let 链与 #104 的 leaf 导入，避免重复装配 runtime。
 const PROGRAM: &str = r#"
+#[ffi(leaf)]
+extern "C" fn getpid() i32
 fn choose(v: Result[int, string]) {
     if let Ok(x) = v { x } else if let Err(e) = v { e }
 }
-fn main() { choose(Err("e")) }
+fn main() {
+    choose(Err("e"))
+    let _ = getpid()
+}
 "#;
 
 /// aarch64-macos 与 aarch64-linux 各经整程序装配产出 Mach-O 64 / ELF64 镜像且 action key 互异。

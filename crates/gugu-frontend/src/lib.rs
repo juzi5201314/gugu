@@ -1094,6 +1094,8 @@ impl Compiler {
             ),
         );
 
+        let native_link = native_link.with_standard_library(target, &lir);
+
         // 机器码生成：x64 走片段世界，aarch64 走整程序装配（runtime catalog + 启动存储）。
         // 只有可执行入口才产出；统计供给 PlanBackend 的镜像计划。
         let entry_instance = frontend
@@ -1185,7 +1187,6 @@ impl Compiler {
             (None, None)
         };
 
-        let native_link = native_link.with_standard_library(target, &lir);
         let codegen_key = x64
             .as_ref()
             .map(|world| CodegenKey {

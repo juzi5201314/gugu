@@ -61,11 +61,63 @@ impl NativeLink {
         target: crate::TargetName,
         lir: &crate::lir::Validated,
     ) -> Self {
-        // 内建需求按目标 OS 族分派：Linux 走 libc.so.6 + PT_INTERP，Windows 走 ws2_32/kernel32，
-        // macOS 的系统绑定全部由 libSystem 桥接层解决，不补导入。
+        // `extern "C"` leaf 声明本身就是符号登记；目标系统库提供默认装载对象。
+        // 普通/DirtyCpu bridge 仍按显式 native 链接输入校验，不用默认库掩盖目标归属。
         let os = target.descriptor().os;
         let is_linux = matches!(os, crate::target::OperatingSystem::Linux);
         let is_windows = matches!(os, crate::target::OperatingSystem::Windows);
+        let leaf_library = if matches!(os, crate::target::OperatingSystem::Macos) {
+            Some("/usr/lib/libSystem.B.dylib")
+        } else if is_linux {
+            Some("libc.so.6")
+        } else {
+            None
+        };
+        if let Some(library) = leaf_library {
+            macro_rules! register_leaf {
+                ($call:expr) => {
+                    if matches!(
+                        $call.kind,
+                        gugu_gir::gir::body::CallKind::ForeignLeaf { .. }
+                    ) && let crate::lir::body::CallTarget::External { name, .. } = &$call.target
+                        && !self.imports.iter().any(|import| {
+                            &import.name == name && import.kind == NativeImportKind::Function
+                        })
+                    {
+                        self.imports.push(NativeImport::function(library, name));
+                    }
+                };
+            }
+            for body in lir.bodies() {
+                for instruction in &body.instructions {
+                    match &instruction.op {
+                        crate::lir::body::Op::Call(call)
+                        | crate::lir::body::Op::ForeignCall(call) => register_leaf!(call),
+                        _ => {}
+                    }
+                }
+                for block in &body.blocks {
+                    match &block.terminator {
+                        crate::lir::body::Terminator::Invoke { call, .. }
+                        | crate::lir::body::Terminator::TailCall { call, .. } => {
+                            register_leaf!(call)
+                        }
+                        _ => {}
+                    }
+                }
+            }
+            if is_linux
+                && self
+                    .imports
+                    .iter()
+                    .any(|import| import.library == "libc.so.6")
+                && self.interpreter.is_none()
+            {
+                self.interpreter = target.descriptor().linux_interpreter.map(str::to_owned);
+            }
+        }
+        // 内建需求按目标 OS 族分派：Linux 走 libc.so.6 + PT_INTERP，Windows 走 ws2_32/kernel32，
+        // macOS 的系统绑定全部由 libSystem 桥接层解决，不补导入。
         if matches!(os, crate::target::OperatingSystem::Macos) {
             return self;
         }

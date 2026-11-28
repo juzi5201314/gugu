@@ -389,7 +389,7 @@ C ABI 的寄存器、栈槽、布局和符号规则与 runtime 的调度效应�
 
 `#[ffi(dirty_cpu)]` 导入或 native definition、相应调用点，以及 managed `#[naked]` 使用 `ForeignBridge[DirtyCpu]`：持久 bridge state定位 coroutine stack上的 ABI frame和精确 roots，调用释放 `LogicalProcessor`，native stack不进入 Gugu stack map，且 native body不能回调 Gugu。`global_asm` 符号的模式来自显式 extern 声明；dirty CPU额度和等待状态属于 runtime 内部，不进入 C ABI。
 
-满足 `#[ffi(leaf)]` 契约的直接调用使用 `ForeignLeaf`：调用留在当前 worker、processor和 coroutine stack上，不建立 bridge state、不释放 processor，也不允许 C回调 Gugu。属性的 `stack = N`（省略时为0）计入 caller函数的 `max_leaf_reserve`；caller prologue以所有 direct leaf调用预算的最大值只执行一次 `StackCheck`，不在每个调用点重复检查。leaf调用仍须遵守本章的 C类型、pointer pin、内存别名和展开边界规则。
+满足 `#[ffi(leaf)]` 契约的直接调用使用 `ForeignLeaf`：调用留在当前 worker、processor和 coroutine stack上，不建立 bridge state、不释放 processor，也不允许 C回调 Gugu。属性的 `stack = N`（省略时为0）计入 caller函数的 `max_leaf_reserve`；caller prologue以所有 direct leaf调用预算的最大值只执行一次 `StackCheck`，不在每个调用点重复检查。leaf调用仍须遵守本章的 C类型、pointer pin、内存别名和展开边界规则。leaf 导入声明本身即符号登记：macOS 默认绑定 libSystem，Linux 默认绑定目标 libc 并使用目标解释器；普通/DirtyCpu bridge 目标仍须显式登记 native 链接输入。
 
 `extern "C"` 导出函数被非 Gugu 线程调用时，必须按运行时的线程接入规则登记该线程；导出函数返回后才能撤销临时登记。外部线程等待期间，参数与返回存储必须保持有效；managed 函数在受调度器管理的协程上执行，因此可以分配、挂起和参与 GC。完成发布必须晚于协程根与栈登记的结清，等待线程观察完成之后才可读取返回值并复用入口参数区。运行时关闭入口后不再接受新的线程登记。回调登记有固定 profile 上界，耗尽时在发布节点之前终止入口，不扩张无界链表或创建额外线程。回调提交必须通知 managed 安全点；长时间运行的协程在安全点让出后仍保留精确根。持有外层普通 worker credit 的回调等待线程可以借用执行同一普通 admission FIFO 中的请求；同线程嵌套回调继承该资格，独立外部线程不自带 credit，必须继续通过普通 admission。外层 credit 保留到外层线程退出，借用不建立额外 worker；回调协程的参数根、登记和结果交付全部结清后，其控制存储与栈才能复用；压力期间将空闲存储实际归还 provider，并扣除 owner cache 统计；DirtyCpu 不参与借用。回调协程与借用请求都结清后才能发布完成。线程数按 OS 线程身份计数：已有 worker 不重复计入，同一外部线程的嵌套回调只计一次，最后一次返回确认后撤销登记。C 线程不能直接操作 Gugu 协程句柄或 GC 元数据。DirtyCpu 与 ForeignLeaf 均不提供从 C 调入 Gugu 的回调桥。
 
@@ -463,6 +463,8 @@ Linux resolver 不是运行时 UDP DNS：它使用 resolver_symbol(0/1) 的 libc
 aarch64 Linux 页面探测由 `page_size` machine intrinsic（片段与上文协议相同：envp → auxv AT_PAGESZ，缺失返回 0，不硬编码 4 KiB，支持 4/16/64 KiB 内核页）在 `rt0_start` 首次页舍入预约之前执行；返回 0 或非法页大小按启动期 fatal 结束。探测值写入 `native_memory.gg` 的 `NATIVE_PAGE_BYTES` 与 `heap.gg` 的 `LARGE_MAPPING_PAGE_BYTES`——这两个标识在该目标上是 `pub static`（其余目标仍为 `pub const` 4096/16384），runtime 内所有页对齐对齐参数统一经 `native_memory.os_page_bytes()` 取得，不再出现 4096 字面量对齐。VM 调用方必须用 OS 页大小舍入长度、提供页对齐的 base 和有效原生描述符，并选择二次幂 alignment。Wait/Wake、Entropy、Zero、dump/hint 等非本次范围操作不由此片段实现。
 
 aarch64 Linux 也可显式选择动态 PIE：调用方提供绝对 interpreter 路径、库名、Function/Data 导入及其唯一、八字节对齐且有文件内容的可写槽。沿用同一 ELF writer、64 KiB 段布局与 LinuxEntry，增加 PT_INTERP、PT_DYNAMIC、DT_NEEDED、SysV hash、undefined dynsym 和 eager R_AARCH64_GLOB_DAT（1025），由 loader 解析导入；不使用 lazy PLT/JUMP_SLOT。RELATIVE 记录位于同一 RELA 表前缀，入口只遍历该前缀，不覆盖 loader 填写的导入槽。空导入、重复名字/槽、与 RELATIVE 重叠的槽和无效路径/名字为写出错误；不探测宿主 libc。
+
+整程序装配合并内建和用户函数导入后，每个函数的调用桩、GOT 槽、动态符号及 GLOB_DAT 必须成套写出；leaf 的默认系统库登记也遵守此规则。用户显式指定的额外函数库保留在 DT_NEEDED 中，同名内建导入复用既有槽，不能只生成调用桩而遗漏 loader 绑定记录。
 
 static PIE自重定位、PE header字段、section排序和 archive编码见[后端内部规范](../internals/backend.md)，不得在该文档扩展本节公开镜像面。
 
