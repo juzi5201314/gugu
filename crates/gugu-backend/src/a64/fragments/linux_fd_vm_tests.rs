@@ -8,6 +8,7 @@ const STACK: u64 = 0x8000;
 
 pub(super) struct Vm {
     pub registers: [u64; 32],
+    pub exclusive_failures: u16,
     memory: BTreeMap<u64, u8>,
     equal: bool,
     nonnegative: bool,
@@ -18,6 +19,7 @@ impl Vm {
     pub fn new(operation: u64, arguments: [u64; 6]) -> Self {
         let mut vm = Self {
             registers: [0; 32],
+            exclusive_failures: 0,
             memory: BTreeMap::new(),
             equal: false,
             nonnegative: false,
@@ -147,6 +149,8 @@ impl Vm {
             Operand::Condition(0) => self.equal,
             Operand::Condition(1) => !self.equal,
             Operand::Condition(2) => self.carry,
+            Operand::Condition(8) => self.carry && !self.equal,
+            Operand::Condition(9) => !self.carry || self.equal,
             Operand::Condition(10) => self.nonnegative,
             Operand::Condition(11) => !self.nonnegative,
             Operand::Condition(12) => self.nonnegative && !self.equal,
@@ -185,8 +189,13 @@ impl Vm {
                 },
             );
         } else if key.starts_with("stlxr") || key.starts_with("stxr") {
-            self.put(address, self.get(&args[1]), size);
-            self.set(&args[0], 0);
+            if self.exclusive_failures == 0 {
+                self.put(address, self.get(&args[1]), size);
+                self.set(&args[0], 0);
+            } else {
+                self.exclusive_failures -= 1;
+                self.set(&args[0], 1);
+            }
         } else {
             self.put(address, self.get(&args[0]), size);
         }

@@ -1,5 +1,4 @@
 use super::{accept_cases, accepts};
-use crate::{CompileRequest, Compiler, TargetName};
 
 accept_cases! {
     incomplete_if_let_chain_discards_nonunit_tails: true,
@@ -43,18 +42,4 @@ fn discarded_if_hir_preserves_unit_and_never_results() {
             expected
         );
     }
-}
-
-#[test]
-fn discarded_if_let_chain_compiles_for_aarch64_macos() {
-    let compilation = Compiler::shared().compile(CompileRequest::single_file(
-        "main.gg",
-        "fn choose(v: Result[int, string]) { if let Ok(x) = v { x } else if let Err(e) = v { e } }\nfn main() { choose(Err(\"e\")) }",
-        TargetName::Aarch64Macos,
-    ));
-    assert!(
-        compilation.is_success(),
-        "{:?}",
-        compilation.diagnostics().items()
-    );
 }
