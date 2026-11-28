@@ -365,7 +365,7 @@ fn terminator(
                     mode: lower::call::Mode::Runtime(
                         safepoint.map(|_| (index as u32, block.instructions.end)),
                     ),
-                    landing: Some((landing_block.0 + 1, cleanup)),
+                    landing: Some((edge(*unwind) as u32, cleanup)),
                 },
                 b,
             )?;

@@ -51,6 +51,8 @@ LIR 后端严格按以下顺序运行：
 11. `PlanImage`：布局 fragment、section、import/export 和 metadata；
 12. `ApplyRelocationsAndEmit`：写 ELF/PE/static archive/shared library。
 
+AArch64 `invoke` 的 landing PC 必须指向 unwind 边本身的机器块，而不是目标 LIR block：边块先执行 block 参数 parallel copy，再落入目标块；直接落到目标块会让 cleanup 路径读取未拷贝的旧寄存器或栈槽。
+
 一个阶段失败后不能退回较低优化级、外部 toolchain 或解释执行。目标不支持的 LIR/inline asm/native relocation 是编译错误；内部不变量破坏是 compiler internal error。
 
 ## 后端内存表示
