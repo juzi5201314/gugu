@@ -277,6 +277,8 @@ parser 必须满足：
 - `must_use` 保存丢掉 `Option`、`Result` 或 `#[must_use]` 类型/函数的源码范围。诊断在 lint 级别解析后才发射：默认警告，`deny`/`forbid` 才变成错误。加载标准库时，语言名称 `Formatter` 及格式 trait 参数绑定到 `std.fmt.Formatter` 的名义定义，其 string 字段按普通聚合参与 GC 追踪。无标准库的语义输入仍保留稳定类型键 29 的 8 字节占位语言类型；`Hasher` 保持类型键 30 的非 GC 根位类型。
 - 运行时 f-string 在 HIR 形成时展开为普通块：建立 Formatter 局部槽，写入字面量，每个插值保存一次求值的值、设置格式说明并调用已选择的格式 trait，最后 `finish()`。动态计数是正常的局部读取；生成表达式遵守 owner 的父节点先于子节点不变量。GIR / 单态化使用普通调用与派发，不再传递序列化的可变参数 `Format` runtime 调用。
 
+同一 AST 表达式可同时登记自身运算和外层插值的派发；二元运算按 `BinOp` 对应的语言 trait 与成员精确选择，不能取得该节点上的任意派发。checker 与 HIR 使用同一份运算符映射；短路逻辑不选择 trait 派发。
+
 局部槽的存储需求编码为三个位：`ADDRESS_TAKEN`、`CAPTURED`、`CROSS_COROUTINE`。这些位与捕获表一起交给 HIR/GIR 的存储选择；捕获或跨协程槽不能仅因创建它的词法块结束而销毁。分析记录 callable 值在求值时引用的槽，遮蔽或后续函数值赋值不能重新绑定已经形成的闭包环境。
 
 TypeCheck query 输入覆盖规范路径、源码内容、cfg 和稳定名称解析结果。schema verifier 验证后的 `CheckedSemantics` 只用于布局和 HIR 形成，不再作为后端的平行输入。`LowerHir` query 登记真实 TypeCheck 依赖 fingerprint，并加入入口和源码展开上下文；成功结果经完整 HIR verifier 后序列化。当前 schema 为 5：owner 携带显式清理计划表与 `return_plan`，模块类型表在存在定义时 intern `Unit`/`Never`/`Bool`/`Ptr(Unit)`，规范指纹域为 `gugu-validated-hir-v2`；query 只构造、校验并冻结 Module，不再嵌套单态化、late 或全程序分析。缓存命中重新验证 Module、输入身份和规范字节，不能从缓存直接恢复 `Validated` 凭据。失败诊断保存级别、顺序、附注、展开身份及逻辑文件字节范围，并在命中时重绑定当前 `SourceMap`。任何检查失败均中止 BuildIr 及后续产物路径。

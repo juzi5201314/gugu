@@ -552,21 +552,8 @@ impl Checker<'_, '_> {
         right: &Ty,
         span: &Span,
     ) -> Ty {
-        let (interface, method, comparison) = match op {
-            BinOp::Add => ("Add", "add", false),
-            BinOp::Sub => ("Sub", "sub", false),
-            BinOp::Mul => ("Mul", "mul", false),
-            BinOp::Div => ("Div", "div", false),
-            BinOp::Rem => ("Rem", "rem", false),
-            BinOp::BitAnd => ("BitAnd", "bitand", false),
-            BinOp::BitOr => ("BitOr", "bitor", false),
-            BinOp::BitXor => ("BitXor", "bitxor", false),
-            BinOp::Shl => ("Shl", "shl", false),
-            BinOp::Shr => ("Shr", "shr", false),
-            BinOp::Eq | BinOp::Ne => ("Eq", "eq", true),
-            BinOp::Lt | BinOp::Le | BinOp::Gt | BinOp::Ge => ("Ord", "cmp", true),
-            _ => unreachable!("短路操作不进入 trait 分发"),
-        };
+        let (interface, method, comparison) =
+            super::super::traits::binary_operator_trait(op).expect("短路操作不进入 trait 分发");
         let interface_id = self
             .model
             .traits

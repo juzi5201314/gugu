@@ -308,7 +308,12 @@ impl BodyBuilder<'_, '_, '_, '_> {
             ast::ExprKind::Binary { op, lhs, rhs } => {
                 let left = self.expression(lhs)?;
                 let right = self.expression(rhs)?;
-                let dispatch = self.selected_dispatch(source, None, None)?;
+                let dispatch = match crate::semantics::traits::binary_operator_trait(op) {
+                    Some((interface, method, _)) => {
+                        self.selected_dispatch(source, Some(interface), Some(method))?
+                    }
+                    None => None,
+                };
                 if dispatch.is_some() {
                     effects = hir::Effects::PANIC
                         | hir::Effects::ALLOCATE

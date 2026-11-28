@@ -1,6 +1,14 @@
 use super::{CompileRequest, Compiler, TargetName, harness::Harness};
 use gugu_sema::string::{FormatSpec, ParsedCount, fmt, parse_format};
 
+#[test]
+fn interpolation_binary_expressions_preserve_operator_dispatch_and_order() {
+    assert_eq!(
+        super::printing::output(include_str!("fixtures/interpolation_binary.gg"), &[]),
+        [(1, b"3|3|10|true|true|0003|ab|3|2|7|9\n".to_vec())]
+    );
+}
+
 pub(super) fn oracle(spec: &str, value: impl FnOnce(&mut fmt::Formatter)) -> String {
     let spec: FormatSpec<u64> = parse_format(spec)
         .unwrap()

@@ -1,6 +1,6 @@
 //! 闭世界接口表：声明身份、实现模式与关联项在同一张表上解析。
 use super::super::ast::{
-    AstRange, BoundKind, GenericParam, GenericParamKind, Param, PatKind, PathId,
+    AstRange, BinOp, BoundKind, GenericParam, GenericParamKind, Param, PatKind, PathId,
 };
 use super::model::{CallableId, ConstantValue, DefRef, Model, Ty, substitute};
 use crate::{Diagnostic, DiagnosticCode, Span};
@@ -9,6 +9,24 @@ mod associated;
 mod collect;
 pub mod select;
 mod validate;
+
+pub(super) fn binary_operator_trait(op: BinOp) -> Option<(&'static str, &'static str, bool)> {
+    Some(match op {
+        BinOp::Add => ("Add", "add", false),
+        BinOp::Sub => ("Sub", "sub", false),
+        BinOp::Mul => ("Mul", "mul", false),
+        BinOp::Div => ("Div", "div", false),
+        BinOp::Rem => ("Rem", "rem", false),
+        BinOp::BitAnd => ("BitAnd", "bitand", false),
+        BinOp::BitOr => ("BitOr", "bitor", false),
+        BinOp::BitXor => ("BitXor", "bitxor", false),
+        BinOp::Shl => ("Shl", "shl", false),
+        BinOp::Shr => ("Shr", "shr", false),
+        BinOp::Eq | BinOp::Ne => ("Eq", "eq", true),
+        BinOp::Lt | BinOp::Le | BinOp::Gt | BinOp::Ge => ("Ord", "cmp", true),
+        BinOp::And | BinOp::Or => return None,
+    })
+}
 
 #[derive(Clone, Debug, Eq, PartialEq, Ord, PartialOrd, serde::Serialize, serde::Deserialize)]
 pub struct TraitRef {
