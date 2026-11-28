@@ -47,7 +47,7 @@ fn discarded_if_hir_preserves_unit_and_never_results() {
 
 #[test]
 fn discarded_if_let_chain_compiles_for_aarch64_macos() {
-    let compilation = Compiler::shared().compile(CompileRequest::single_file(
+    let compilation = Compiler::shared().compile_full_for_test(CompileRequest::single_file(
         "main.gg",
         "fn choose(v: Result[int, string]) { if let Ok(x) = v { x } else if let Err(e) = v { e } }\nfn main() { choose(Err(\"e\")) }",
         TargetName::Aarch64Macos,
