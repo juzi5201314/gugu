@@ -1169,6 +1169,7 @@ impl Runner {
                 let cfg = CfgContext::target_only(TARGET);
                 match crate::frontend::bootstrap(
                     SourceInput::Sources {
+                        packages: &[],
                         source_map: &mut source_map,
                         entry: ENTRY,
                         source_root: SOURCE_ROOT,

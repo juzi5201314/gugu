@@ -20,6 +20,7 @@ pub struct EmbedHost {
     /// 记录缺失会让增量缓存把旧字节当成当前输入。`Rc` 共享：语义检查会克隆宿主，
     /// 复制出的登记表必须写回同一集合，否则 action key 读到空表。
     recorded: Rc<RefCell<BTreeMap<PathBuf, Vec<u8>>>>,
+    packages: BTreeMap<String, Rc<BTreeMap<String, Vec<u8>>>>,
 }
 
 impl EmbedHost {
@@ -30,7 +31,13 @@ impl EmbedHost {
             root,
             dirs,
             recorded: Rc::new(RefCell::new(BTreeMap::new())),
+            packages: BTreeMap::new(),
         }
+    }
+
+    /// 登记依赖的已验证文件集；嵌入文件始终从同一锁定输入读取。
+    pub fn add_package(&mut self, root: String, files: BTreeMap<String, Vec<u8>>) {
+        self.packages.insert(root, Rc::new(files));
     }
 
     /// 编译期实际嵌入的文件集合；供 action key 把内容纳入编译输入。
@@ -47,6 +54,35 @@ impl EmbedHost {
                 .any(|component| matches!(component, Component::Prefix(_)))
         {
             return Err(format!("embed_file 参数 `{relative}` 必须是相对路径"));
+        }
+        for (root, files) in &self.packages {
+            if let Ok(directory) = caller_dir.strip_prefix(root) {
+                let mut path = PathBuf::from(directory);
+                for component in relative_path.components() {
+                    match component {
+                        Component::Normal(segment) => path.push(segment),
+                        Component::CurDir => {}
+                        Component::ParentDir if path.pop() => {}
+                        _ => {
+                            return Err(format!(
+                                "embed_file 参数 `{relative}` 越出依赖输入根 {root}"
+                            ));
+                        }
+                    }
+                }
+                let key = path
+                    .to_str()
+                    .ok_or_else(|| "embed_file 路径不是 UTF-8".to_owned())?
+                    .replace(std::path::MAIN_SEPARATOR, "/");
+                let bytes = files
+                    .get(&key)
+                    .ok_or_else(|| format!("embed_file 目标 `{relative}` 不在依赖输入中"))?
+                    .clone();
+                self.recorded
+                    .borrow_mut()
+                    .insert(Path::new(root).join(path), bytes.clone());
+                return Ok(bytes);
+            }
         }
         let physical_dir = self
             .dirs

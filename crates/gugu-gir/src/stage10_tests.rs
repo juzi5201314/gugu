@@ -37,6 +37,7 @@ fn analyze_with_cfg(
     let mut source_map = SourceMap::new(snapshots).expect("unique source paths");
     bootstrap(
         SourceInput::Sources {
+            packages: &[],
             source_map: &mut source_map,
             entry: "src/main.gg",
             source_root: "src",

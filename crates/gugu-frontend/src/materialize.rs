@@ -65,6 +65,7 @@ fn record_functions(
     .expect("canonical 程序的源码表合法");
     let output = frontend::bootstrap_with(
         SourceInput::Sources {
+            packages: &[],
             source_map: &mut source_map,
             entry: "main.gg",
             source_root: "",

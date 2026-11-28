@@ -142,7 +142,12 @@ fn is_generated(module: &ParsedModule) -> bool {
 pub fn world(modules: &[ParsedModule], source_map: &SourceMap) -> DocWorld {
     let mut result = DocWorld::default();
     for module in modules {
-        if is_generated(module) {
+        if is_generated(module)
+            || module
+                .package
+                .as_ref()
+                .is_some_and(|package| !package.namespace.is_empty())
+        {
             continue;
         }
         let Some(snapshot) = source_map.snapshot(module.file.source) else {

@@ -359,6 +359,43 @@ fn fingerprint(
     format!("{:016x}", hash64(&hasher))
 }
 
+fn dependency_fingerprint(
+    local: &str,
+    dependencies: &gugu_compiler::LockGraph,
+    inputs: &[gugu_compiler::DependencyInput],
+) -> Result<String, gugu_compiler::ProjectError> {
+    let mut bytes = local.as_bytes().to_vec();
+    let lock = dependencies.to_toml()?;
+    bytes.extend_from_slice(&(lock.len() as u64).to_le_bytes());
+    bytes.extend_from_slice(lock.as_bytes());
+    for input in inputs {
+        let identity = input.package().to_string();
+        bytes.extend_from_slice(&(identity.len() as u64).to_le_bytes());
+        bytes.extend_from_slice(identity.as_bytes());
+        bytes.extend_from_slice(input.checksum().as_bytes());
+    }
+    Ok(format!("{:016x}", hash64(&bytes)))
+}
+
+#[test]
+fn build_dependency_fingerprint_roundtrips_without_dependencies() {
+    let lock = gugu_compiler::LockGraph {
+        version: 1,
+        packages: Vec::new(),
+    };
+    let current = dependency_fingerprint("source", &lock, &[]).unwrap();
+    let stored = format!("{current}\n");
+    assert_eq!(stored.trim(), current);
+    assert_eq!(
+        current,
+        dependency_fingerprint("source", &lock, &[]).unwrap()
+    );
+    assert_ne!(
+        current,
+        dependency_fingerprint("changed", &lock, &[]).unwrap()
+    );
+}
+
 fn glob_matches(root: &Path, pattern: &str) -> Vec<PathBuf> {
     let mut all = Vec::new();
     if let Ok(entries) = fs::read_dir(root) {
@@ -526,6 +563,8 @@ pub(crate) fn run_build_task(
     format: OutputFormat,
     externals: std::collections::BTreeSet<String>,
     identity: String,
+    dependencies: &gugu_compiler::LockGraph,
+    dependency_inputs: &[gugu_compiler::DependencyInput],
 ) -> Result<Option<BuildTaskOutput>, ()> {
     let Some(build_target) = package
         .targets()
@@ -557,6 +596,9 @@ pub(crate) fn run_build_task(
         &record.rerun_files,
         &record.rerun_envs,
     );
+    // build 依赖也是执行输入；锁图或已验证源码变化时必须重新运行 build task。
+    let current = dependency_fingerprint(&current, dependencies, dependency_inputs)
+        .map_err(|error| emit_cli_error(format, &error.to_string()))?;
     let fresh = !record.rerun_always
         && fs::read_to_string(&inputs_path)
             .map(|stored| stored.trim() == current)
@@ -571,7 +613,8 @@ pub(crate) fn run_build_task(
             host,
             features.to_vec(),
             externals,
-        );
+        )
+        .with_dependencies(dependencies, dependency_inputs);
         #[expect(
             clippy::disallowed_methods,
             reason = "build task 需要完整编译结果才能物化产物"

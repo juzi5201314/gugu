@@ -564,6 +564,7 @@ pub(super) fn frontend(
     );
     super::bootstrap(
         super::SourceInput::Sources {
+            packages: &[],
             source_map: &mut sources,
             entry: "main.gg",
             source_root: "",

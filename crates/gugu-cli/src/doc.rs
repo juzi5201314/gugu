@@ -55,7 +55,7 @@ pub(crate) fn run(options: &GlobalArgs, open: bool, no_deps: bool) -> i32 {
             return 2;
         }
     };
-    let (lock, _inputs) =
+    let (lock, inputs) =
         match resolve_project_lock(&project, &packages, options, target, format, false) {
             Ok(resolved) => resolved,
             Err(()) => return 2,
@@ -94,7 +94,8 @@ pub(crate) fn run(options: &GlobalArgs, open: bool, no_deps: bool) -> i32 {
         );
         let request = CompileRequest::project_target(
             package, target_ref, identity, target, features, external,
-        );
+        )
+        .with_dependencies(&lock, &inputs);
         #[expect(
             clippy::disallowed_methods,
             reason = "gugu doc 需要完整编译诊断和 package action 结果"
@@ -206,8 +207,9 @@ fn render_dependencies(
             return Err(());
         }
     };
-    let inputs: BTreeMap<String, PackageFiles> = inputs
-        .into_iter()
+    let dependency_inputs = inputs;
+    let inputs: BTreeMap<String, PackageFiles> = dependency_inputs
+        .iter()
         .map(|input| (input.package().to_string(), input.files().clone()))
         .collect();
     // pid + 纳秒随机后缀：共享 /tmp 上其他本地用户无法预建或冒充固定目录。
@@ -291,7 +293,8 @@ fn render_dependencies(
             target,
             features,
             external,
-        );
+        )
+        .with_dependencies(lock, &dependency_inputs);
         #[expect(
             clippy::disallowed_methods,
             reason = "依赖文档生成需要完整编译诊断和 package action 结果"

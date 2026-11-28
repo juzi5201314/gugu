@@ -15,6 +15,10 @@ gugu build main.gg
 
 一次产生可执行文件或 C 导出库的编译必须看见全部可达的 Gugu 代码：所选 target、其解析后的 package 依赖图、标准库和用 Gugu 写的 runtime。项目工具按 `gugu.toml` 与 `gugu.lock` 选择 target 入口，底层编译器从该入口开始闭世界可达性，见[包、依赖与构建模型](packages-builds.md)与[声明与模块](declarations.md)。命令行入口与参数见[工具链与命令行](toolchain-cli.md)。
 
+依赖的公开条目来自锁定 package 的 lib target；path、Git、registry 与 vendor 输入遵循同一名称与类型检查规则。`use dep_alias` 指向该依赖的 lib 入口，`use dep_alias.module` 指向其源码根下的模块。每个 package 只能通过自己的直接依赖别名访问外部 package；依赖的公开再导出可被消费者使用，私有条目与未声明的传递依赖别名不可见。相同 package 的别名不改变定义身份，不同 package 中的同名模块与类型保持独立。
+
+依赖源码按其锁图所属的 normal、test 或 build 域启用 feature。example、test 与 bench 消费测试图，build task 消费宿主 build 图；依赖自身仅传播 normal 依赖，消费者的 `cfg(test)`、`cfg(bench)` 和自定义 cfg 不传入依赖。依赖内部的 `embed_file` 只能读取该 package 已验证输入中的文件。依赖源码、启用 feature、直接别名映射与嵌入文件内容都参与本次编译身份；依赖变化不得复用旧的 build task 执行结果。
+
 因此，程序可观察模型满足：
 
 - 执行开始前，可达的 Gugu 函数、具体类型、impl、vtable、闭包和导出集合已经封闭；

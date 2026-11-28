@@ -843,6 +843,7 @@ mod tests {
         );
         crate::bootstrap(
             crate::SourceInput::Sources {
+                packages: &[],
                 source_map: &mut sources,
                 entry: "main.gg",
                 source_root: "",

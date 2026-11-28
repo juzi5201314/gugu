@@ -780,6 +780,7 @@ pub(crate) fn compile_package(
     check_only: bool,
     compiler: &Compiler,
     lock: &LockGraph,
+    inputs: &[DependencyInput],
     format: OutputFormat,
     written: &mut BTreeSet<PathBuf>,
     selection: &TargetSelection,
@@ -811,6 +812,8 @@ pub(crate) fn compile_package(
         format,
         build_externals,
         build_identity,
+        lock,
+        inputs,
     )?;
     let mut exit_code = 0;
     for package_target in selected {
@@ -823,7 +826,8 @@ pub(crate) fn compile_package(
             target,
             features.clone(),
             external_packages,
-        );
+        )
+        .with_dependencies(lock, inputs);
         // test/bench 域覆盖：`gugu test --lib` / `gugu bench --lib` 在对应域下
         // 编译 lib 内部 #[test]/#[bench] 项；对已是该域的 target 是幂等的。
         request = match (domain, package_target.kind()) {
@@ -1037,9 +1041,12 @@ pub(crate) fn package_resolution(
         .dependencies
         .iter()
         .filter(|dependency| {
-            dependency.domain == DependencyDomain::Normal
-                || (include_test && dependency.domain == DependencyDomain::Test)
-                || (target == TargetKind::Build && dependency.domain == DependencyDomain::Build)
+            if target == TargetKind::Build {
+                dependency.domain == DependencyDomain::Build
+            } else {
+                dependency.domain == DependencyDomain::Normal
+                    || (include_test && dependency.domain == DependencyDomain::Test)
+            }
         })
         .map(|dependency| dependency.alias.clone())
         .collect();
@@ -1063,7 +1070,7 @@ fn run_project_compile(options: &GlobalArgs, target: TargetName, check_only: boo
             return 2;
         }
     };
-    let (lock, _inputs) =
+    let (lock, inputs) =
         match resolve_project_lock(&project, &packages, options, target, format, false) {
             Ok(resolved) => resolved,
             Err(()) => return 2,
@@ -1080,6 +1087,7 @@ fn run_project_compile(options: &GlobalArgs, target: TargetName, check_only: boo
             check_only,
             &compiler,
             &lock,
+            &inputs,
             format,
             &mut written,
             &target_selection(options),

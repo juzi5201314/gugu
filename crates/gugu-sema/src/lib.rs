@@ -38,6 +38,8 @@ pub use parse::parse;
 #[derive(Clone, Debug)]
 pub struct ParsedModule {
     pub path: String,
+    /// 所属 package 的独立名称与 cfg 作用域；内建和独立源码输入不设此字段。
+    pub package: Option<std::sync::Arc<modules::PackageScope>>,
     pub file: ast::AstFile,
     pub arena: ast::AstArena,
     pub tokens: token::TokenBuffer,
@@ -49,6 +51,17 @@ pub struct ParsedModule {
     /// `std.option`、`std.runtime` 等公开标准库模块是 package API。`std.prelude`、`std.runtime.*` 与
     /// `runtime.*` 仍是私有实现：用户源码不能声明 `std` 根，也不能导入这些私有模块。
     pub builtin: bool,
+}
+
+impl ParsedModule {
+    pub fn local_path(&self) -> &str {
+        self.package.as_ref().map_or(self.path.as_str(), |package| {
+            self.path
+                .strip_prefix(&package.namespace)
+                .unwrap()
+                .trim_start_matches('.')
+        })
+    }
 }
 
 /// 探针入口程序所在的内建源前缀。

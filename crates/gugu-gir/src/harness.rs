@@ -60,7 +60,12 @@ pub fn apply(
     let mut doctests = Vec::new();
     let mut diagnostics = Vec::new();
     for (index, module) in modules.iter_mut().enumerate() {
-        if module.builtin {
+        if module.builtin
+            || module
+                .package
+                .as_ref()
+                .is_some_and(|package| !package.namespace.is_empty())
+        {
             continue;
         }
         let Some(source) = source_map

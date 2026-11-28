@@ -370,6 +370,7 @@ fn compile_and_exec(
             false,
             &compiler,
             &context.lock,
+            &context.inputs,
             format,
             &mut written,
             selection,

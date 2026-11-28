@@ -166,10 +166,16 @@ fn validate_modules(
     let local_roots = modules
         .iter()
         .filter(|module| module.configured.module_active())
+        .filter(|module| {
+            module
+                .package
+                .as_ref()
+                .is_none_or(|package| package.namespace.is_empty())
+        })
         .filter_map(|module| module.path.split('.').next())
         .collect::<BTreeSet<_>>();
     for module in modules {
-        if !module.builtin && module.path.split('.').next() == Some("std") {
+        if !module.builtin && module.local_path().split('.').next() == Some("std") {
             diagnostics.push(Diagnostic::error(
                 DiagnosticCode::ReservedName,
                 "用户源码不能声明保留模块根 `std`",
@@ -458,11 +464,14 @@ fn push_candidate(
     let root = if module.builtin {
         super::BUILTIN_PACKAGE_IDENTITY
     } else {
-        package_identity
+        module
+            .package
+            .as_ref()
+            .map_or(package_identity, |package| package.identity.as_str())
     };
     let mut def_path = parent
         .map(|index| set.values[index].def_path.clone())
-        .unwrap_or_else(|| module_def_path(root, &module.path));
+        .unwrap_or_else(|| module_def_path(root, module.local_path()));
     push_path_component(&mut def_path, kind as u8, identity.as_bytes(), *ordinal);
     let stable_key = *blake3::hash(&def_path).as_bytes();
     let index = set.values.len();
@@ -676,6 +685,7 @@ fn collect_imports(
                 &folded,
                 &builtin,
                 &module.path,
+                module.package.as_deref(),
                 item.span.clone(),
                 diagnostics,
             );
@@ -758,6 +768,7 @@ fn classify_module(
     folded: &BTreeMap<String, ModuleId>,
     builtin: &BTreeSet<String>,
     importer: &str,
+    package: Option<&crate::modules::PackageScope>,
     span: Span,
     diagnostics: &mut Vec<Diagnostic>,
 ) -> Option<ModuleTarget> {
@@ -776,6 +787,47 @@ fn classify_module(
             return None;
         }
         return Some(ModuleTarget::Local(module));
+    }
+    if let Some(package) = package
+        && path.first().is_none_or(|root| root != "std")
+    {
+        let local = package.module_path(&joined);
+        let dependency = path
+            .first()
+            .and_then(|alias| package.dependencies.get(alias));
+        if dependency.is_some() && exact.contains_key(local.as_str()) {
+            diagnostics.push(Diagnostic::error(
+                DiagnosticCode::ImportConflict,
+                format!("路径 `{joined}` 同时匹配本地模块与依赖别名"),
+                Some(span),
+            ));
+            return None;
+        }
+        let resolved = if let Some((namespace, entry)) = dependency {
+            if path.len() == 1 {
+                entry.clone()
+            } else {
+                format!("{namespace}.{}", path[1..].join("."))
+            }
+        } else {
+            local
+        };
+        if let Some(&module) = exact.get(resolved.as_str()) {
+            return Some(ModuleTarget::Local(module));
+        }
+        let (code, message) = if folded.contains_key(&resolved.to_ascii_lowercase()) {
+            (
+                DiagnosticCode::ModulePathCaseMismatch,
+                format!("模块路径 `{joined}` 的大小写与声明不一致"),
+            )
+        } else {
+            (
+                DiagnosticCode::ModuleNotFound,
+                format!("找不到模块 `{joined}`"),
+            )
+        };
+        diagnostics.push(Diagnostic::error(code, message, Some(span)));
+        return None;
     }
     let external = path
         .first()

@@ -89,6 +89,7 @@ fn compile(sources: &[(&str, &str)], queries: &crate::QueryEngine) -> crate::Fro
     );
     crate::bootstrap(
         crate::SourceInput::Sources {
+            packages: &[],
             source_map: &mut map,
             entry: "main.gg",
             source_root: "",

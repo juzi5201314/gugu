@@ -160,6 +160,7 @@ fn materialized_block_skips_builtin_derivation() {
     let engine = crate::QueryEngine::new();
     let output = crate::frontend::bootstrap_with(
         crate::frontend::SourceInput::Sources {
+            packages: &[],
             source_map: &mut source_map,
             entry: "main.gg",
             source_root: "",

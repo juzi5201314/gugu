@@ -45,6 +45,7 @@ fn protocol_source(target: TargetName, source: &str) -> Protocol {
         crate::runtime::RuntimeResources::new(crate::testing::provider().artifact(target).unwrap());
     let frontend = frontend::bootstrap_with(
         SourceInput::Sources {
+            packages: &[],
             source_map: &mut sources,
             entry: "main.gg",
             source_root: "",

@@ -188,10 +188,11 @@ pub fn run(
     }
     loop {
         for (index, module) in modules.iter_mut().enumerate() {
+            let package = module.package.clone();
             derive::run(
                 module,
                 sources,
-                cfg,
+                package.as_ref().map_or(cfg, |package| &package.cfg),
                 &mut token_files[index],
                 &mut derived[index],
             )?;
@@ -230,7 +231,10 @@ pub fn run(
                 &host,
                 round,
                 &round_input,
-                cfg,
+                modules[call.module]
+                    .package
+                    .as_ref()
+                    .map_or(cfg, |package| &package.cfg),
                 queries,
                 &mut budget,
             )?;
@@ -836,6 +840,8 @@ fn splice_one(
             )]
         })?;
     let module = &mut modules[call.module];
+    let package = module.package.clone();
+    let cfg = package.as_ref().map_or(cfg, |package| &package.cfg);
     let pre: ArenaLens = module.arena.lens();
     let kind = fragment_kind_of(call.slot);
     let arena = std::mem::take(&mut module.arena);

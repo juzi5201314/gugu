@@ -140,6 +140,7 @@ fn runtime_layouts() -> RuntimeLayouts {
     let cfg = crate::frontend::cfg::CfgContext::target_only(target);
     let output = crate::frontend::bootstrap_with(
         crate::frontend::SourceInput::Sources {
+            packages: &[],
             source_map: &mut source_map,
             entry: MODULE,
             source_root: "",

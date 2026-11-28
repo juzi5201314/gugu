@@ -33,6 +33,7 @@ pub(super) fn compile_sources_with_map(
     );
     let output = crate::bootstrap(
         crate::SourceInput::Sources {
+            packages: &[],
             source_map: &mut sources,
             entry: "main.gg",
             source_root: "",
@@ -67,6 +68,7 @@ fn compile_with(queries: &crate::QueryEngine, source: &str) -> crate::FrontendOu
     );
     crate::bootstrap(
         crate::SourceInput::Sources {
+            packages: &[],
             source_map: &mut sources,
             entry: "main.gg",
             source_root: "",

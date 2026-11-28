@@ -13,6 +13,7 @@ fn compile(
     let cfg = frontend::cfg::CfgContext::target_only(crate::TargetName::X86_64Linux);
     frontend::bootstrap(
         frontend::SourceInput::Sources {
+            packages: &[],
             source_map: &mut sources,
             entry: "main.gg",
             source_root: "",

@@ -9,6 +9,7 @@
 #[cfg(test)]
 mod a64_runtime_binding_tests;
 mod backend;
+mod dependency_sources;
 #[cfg(test)]
 mod diagnostics_tests;
 #[cfg(test)]
@@ -114,6 +115,13 @@ pub struct CompileRequest {
 }
 
 impl CompileRequest {
+    /// 将锁图与已验证的依赖文件集接入项目的闭世界编译。
+    pub fn with_dependencies(mut self, lock: &LockGraph, inputs: &[DependencyInput]) -> Self {
+        if let CompileInput::Project { dependencies, .. } = &mut self.input {
+            *dependencies = Some(Box::new((lock.clone(), inputs.to_vec())));
+        }
+        self
+    }
     /// 显式指定 native 导入；配置参与 action key，不探测宿主库或解释器。
     pub fn with_native_link(mut self, native_link: NativeLink) -> Self {
         self.native_link = native_link;
@@ -153,10 +161,12 @@ impl CompileRequest {
             test,
             bench,
             require_main,
+            dependency_domain,
             ..
         } = &mut self.input
         {
             *test = true;
+            *dependency_domain = DependencyDomain::Test;
             *bench = false;
             *require_main = false;
         }
@@ -171,10 +181,12 @@ impl CompileRequest {
             bench,
             bench_harness,
             require_main,
+            dependency_domain,
             ..
         } = &mut self.input
         {
             *test = false;
+            *dependency_domain = DependencyDomain::Test;
             *bench = true;
             *require_main = !*bench_harness;
         }
@@ -318,6 +330,14 @@ impl CompileRequest {
                 declared_features: package.declared_features().to_vec(),
                 enabled_features,
                 external_packages,
+                dependencies: None,
+                dependency_domain: match package_target.kind() {
+                    TargetKind::Build => DependencyDomain::Build,
+                    TargetKind::Test | TargetKind::Bench | TargetKind::Example => {
+                        DependencyDomain::Test
+                    }
+                    TargetKind::Lib | TargetKind::Bin => DependencyDomain::Normal,
+                },
                 test: package_target.kind() == TargetKind::Test,
                 bench: package_target.kind() == TargetKind::Bench,
                 bench_harness: package_target.harness(),
@@ -398,6 +418,8 @@ enum CompileInput {
         declared_features: Vec<String>,
         enabled_features: Vec<String>,
         external_packages: BTreeSet<String>,
+        dependencies: Option<Box<(LockGraph, Vec<DependencyInput>)>>,
+        dependency_domain: DependencyDomain,
         test: bool,
         bench: bool,
         /// `harness = false` 的 bench target 标记。
@@ -1516,6 +1538,22 @@ fn compilation_action_key(
     for (key, value) in cfg.action_inputs() {
         inputs.set_cfg(key, value);
     }
+    let mut packages = BTreeSet::new();
+    for module in &frontend.modules {
+        if let Some(package) = &module.package
+            && packages.insert(&package.identity)
+        {
+            for (key, value) in package.cfg.action_inputs() {
+                inputs.set_cfg(format!("package:{}:{key}", package.identity), value);
+            }
+            for (alias, (namespace, entry)) in &package.dependencies {
+                inputs.set_cfg(
+                    format!("package:{}:dependency:{alias}", package.identity),
+                    format!("{namespace}:{entry}"),
+                );
+            }
+        }
+    }
     inputs.set_native_link_metadata(native_link.canonical_bytes());
     inputs.set_comptime_registry(frontend.comptime_registry.1);
     inputs.set_type_universe(frontend.mono.universe.fingerprint);
@@ -1569,6 +1607,7 @@ struct LoadedInput {
     plan: Option<FrontendPlan>,
     /// `embed_file` 的编译输入根；内存源码等无文件系统边界的输入为 `None`。
     embed: Option<EmbedHost>,
+    packages: Vec<gugu_sema::modules::PackageSources>,
 }
 
 impl LoadedInput {
@@ -1584,6 +1623,7 @@ impl LoadedInput {
                 cfg: &plan.cfg,
                 external_packages: &plan.external_packages,
                 embed: self.embed.as_ref(),
+                packages: &self.packages,
             },
         }
     }
@@ -1640,12 +1680,14 @@ impl LoadInputError {
 fn load_input(input: CompileInput, target: TargetName) -> Result<LoadedInput, LoadInputError> {
     match input {
         CompileInput::EmptyPackage => Ok(LoadedInput {
+            packages: Vec::new(),
             source_map: SourceMap::empty(),
             plan: None,
             embed: None,
         }),
         #[cfg(feature = "runtime-gc-probes")]
         CompileInput::RuntimeGcProbe { case } => Ok(LoadedInput {
+            packages: Vec::new(),
             source_map: SourceMap::empty(),
             plan: Some(FrontendPlan {
                 entry: "std/runtime/fixtures/gc_image.gg".to_owned(),
@@ -1721,6 +1763,8 @@ fn load_input(input: CompileInput, target: TargetName) -> Result<LoadedInput, Lo
             declared_features,
             enabled_features,
             external_packages,
+            dependencies,
+            dependency_domain,
             test,
             bench,
             bench_harness,
@@ -1752,6 +1796,8 @@ fn load_input(input: CompileInput, target: TargetName) -> Result<LoadedInput, Lo
             external_packages,
             generated_modules,
             build_task,
+            dependencies.map(|dependencies| *dependencies),
+            dependency_domain,
         ),
     }
 }
@@ -1771,6 +1817,7 @@ fn loaded_single(
             message: error.to_string(),
         })?;
     Ok(LoadedInput {
+        packages: Vec::new(),
         source_map,
         plan: Some(FrontendPlan {
             entry,
@@ -1799,6 +1846,8 @@ fn load_project_sources(
     external_packages: BTreeSet<String>,
     generated_modules: Vec<(String, String)>,
     build_task: bool,
+    dependencies: Option<(LockGraph, Vec<DependencyInput>)>,
+    dependency_domain: DependencyDomain,
 ) -> Result<LoadedInput, LoadInputError> {
     let mut paths = Vec::new();
     collect_source_paths(source_root, &mut paths)?;
@@ -1850,6 +1899,22 @@ fn load_project_sources(
             })?;
         snapshots.push(snapshot);
     }
+    let mut embed = EmbedHost::new(embed_root, embed_dirs);
+    let packages = if let Some((lock, inputs)) = dependencies {
+        dependency_sources::load(
+            &mut snapshots,
+            &mut embed,
+            &lock,
+            &inputs,
+            &package_identity,
+            &source_root,
+            &cfg,
+            &external_packages,
+            dependency_domain,
+        )?
+    } else {
+        Vec::new()
+    };
     let source_map = SourceMap::new(snapshots).map_err(|error| LoadInputError::ModuleTree {
         path: package_root.to_path_buf(),
         message: error.to_string(),
@@ -1864,7 +1929,8 @@ fn load_project_sources(
             cfg,
             external_packages,
         }),
-        embed: Some(EmbedHost::new(embed_root, embed_dirs)),
+        embed: Some(embed),
+        packages,
     })
 }
 
@@ -4605,6 +4671,8 @@ mod tests {
             BTreeSet::new(),
             vec![("values".to_owned(), "pub fn answer() int = 42\n".to_owned())],
             false,
+            None,
+            super::DependencyDomain::Normal,
         )
         .expect("project 源码加载");
         assert!(

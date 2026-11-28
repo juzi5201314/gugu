@@ -35,6 +35,7 @@ fn with_model(source: &str, test: impl FnOnce(&Model<'_>, &[ParsedModule])) {
             )
             .unwrap();
             ParsedModule {
+                package: None,
                 path: if *path == "main.gg" {
                     "main"
                 } else {

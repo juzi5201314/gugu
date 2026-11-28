@@ -7,12 +7,51 @@ use crate::{
     parse, source::SourceSnapshot,
 };
 
+/// 同一 package 共享的身份、直接依赖入口与配置。
+#[derive(Clone, Debug)]
+pub struct PackageScope {
+    pub identity: String,
+    pub namespace: String,
+    pub dependencies: BTreeMap<String, (String, String)>,
+    pub cfg: cfg::CfgContext,
+}
+
+impl PackageScope {
+    pub fn module_path(&self, local: &str) -> String {
+        if self.namespace.is_empty() {
+            local.to_owned()
+        } else if local.is_empty() {
+            self.namespace.clone()
+        } else {
+            format!("{}.{local}", self.namespace)
+        }
+    }
+}
+
+/// 已登记到统一源码表的 package 源码根。
+#[derive(Clone, Debug)]
+pub struct PackageSources {
+    pub logical_root: String,
+    pub source_root: String,
+    pub scope: std::sync::Arc<PackageScope>,
+}
+
 /// 解析源码表中的全部模块；任一模块失败时汇总全部诊断返回。
 pub fn parse_modules(
     source_map: &SourceMap,
     source_root: &str,
     cfg: &cfg::CfgContext,
     builtin_paths: &BTreeSet<String>,
+) -> Result<Vec<ParsedModule>, Vec<Diagnostic>> {
+    parse_package_modules(source_map, source_root, cfg, builtin_paths, &[])
+}
+
+pub fn parse_package_modules(
+    source_map: &SourceMap,
+    source_root: &str,
+    cfg: &cfg::CfgContext,
+    builtin_paths: &BTreeSet<String>,
+    packages: &[PackageSources],
 ) -> Result<Vec<ParsedModule>, Vec<Diagnostic>> {
     let mut modules = Vec::with_capacity(source_map.snapshots().len());
     let mut diagnostics = Vec::new();
@@ -22,6 +61,19 @@ pub fn parse_modules(
             .file_id(snapshot.logical_path())
             .expect("源码表快照必须有稳定文件 ID");
         let builtin = builtin_paths.contains(snapshot.logical_path());
+        let package = (!builtin)
+            .then(|| {
+                packages.iter().find(|package| {
+                    package.logical_root.is_empty()
+                        || snapshot
+                            .logical_path()
+                            .strip_prefix(&package.logical_root)
+                            .is_some_and(|path| path.starts_with('/'))
+                })
+            })
+            .flatten();
+        let source_root = package.map_or(source_root, |package| package.source_root.as_str());
+        let cfg = package.map_or(cfg, |package| &package.scope.cfg);
         let path = match builtin_module_path(snapshot, builtin_paths) {
             Some(path) => path,
             None => match module_path(snapshot, source_root, source_map, file) {
@@ -32,6 +84,7 @@ pub fn parse_modules(
                 }
             },
         };
+        let path = package.map_or(path.clone(), |package| package.scope.module_path(&path));
         if let Some(previous) = occupied.insert(path.clone(), snapshot.logical_path()) {
             diagnostics.push(module_path_conflict(
                 snapshot, source_map, file, &path, previous,
@@ -39,7 +92,10 @@ pub fn parse_modules(
             continue;
         }
         match parse_module(snapshot, source_map, file, path, cfg, builtin) {
-            Ok(module) => modules.push(module),
+            Ok(mut module) => {
+                module.package = package.map(|package| package.scope.clone());
+                modules.push(module);
+            }
             Err(errors) => diagnostics.extend(errors),
         }
     }
@@ -123,6 +179,7 @@ pub fn parse_module_in_expansion(
     )?;
     Ok(ParsedModule {
         path,
+        package: None,
         file: parsed.file,
         arena: parsed.arena,
         tokens,

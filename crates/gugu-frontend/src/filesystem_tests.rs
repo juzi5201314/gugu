@@ -7,6 +7,8 @@ mod collections;
 mod const_generics;
 mod copy;
 mod debug_builders;
+#[path = "dependency_tests.rs"]
+mod dependency_tests;
 mod derive;
 mod docs_examples;
 mod dyn_erasure;

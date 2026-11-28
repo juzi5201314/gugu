@@ -59,6 +59,7 @@ pub enum SourceInput<'a> {
         require_main: bool,
         cfg: &'a cfg::CfgContext,
         external_packages: &'a BTreeSet<String>,
+        packages: &'a [gugu_sema::modules::PackageSources],
         embed: Option<&'a gugu_sema::semantics::comptime::embed::EmbedHost>,
     },
 }
@@ -198,6 +199,7 @@ fn bootstrap_stage(
             require_main,
             cfg,
             external_packages,
+            packages,
             embed,
         } => check_sources(
             source_map,
@@ -207,6 +209,7 @@ fn bootstrap_stage(
             require_main,
             cfg,
             external_packages,
+            packages,
             embed,
             queries,
             resources,
@@ -348,6 +351,7 @@ fn check_sources(
     require_main: bool,
     cfg: &cfg::CfgContext,
     external_packages: &BTreeSet<String>,
+    packages: &[gugu_sema::modules::PackageSources],
     embed: Option<&gugu_sema::semantics::comptime::embed::EmbedHost>,
     queries: &crate::query::QueryEngine,
     resources: crate::runtime::RuntimeResources<'_>,
@@ -392,7 +396,13 @@ fn check_sources(
         #[cfg(all(any(test, feature = "test-support"), feature = "slow-tests"))]
         PrefixMode::Derive => probe_module_paths(resources),
     };
-    let mut modules = parse_modules(source_map, source_root, cfg, &builtin_paths)?;
+    let mut modules = gugu_sema::modules::parse_package_modules(
+        source_map,
+        source_root,
+        cfg,
+        &builtin_paths,
+        packages,
+    )?;
     // 模块表定序：物化覆盖的内建模块（artifact 顺序）→ 未覆盖的内建模块 → 用户模块。
     modules.sort_by(|left, right| {
         (

@@ -23,6 +23,7 @@ fn evaluate_last_constant(source: &str) -> Result<ConstantValue, Diagnostic> {
     .expect("cfg 配置成功");
     let modules = [ParsedModule {
         path: "main.gg".to_owned(),
+        package: None,
         file: parsed.file,
         arena: parsed.arena,
         tokens: lexed.buffer,

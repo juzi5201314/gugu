@@ -47,6 +47,10 @@ target 自动发现覆盖 `src/lib.gg`、`src/main.gg`、`src/bin/`、`tests/`�
 
 ## 依赖解析
 
+CLI 的 build/check、run/test/bench、doc 与 build task 把 `resolve_project_lock` 返回的 `DependencyInput` 交给 `CompileRequest::with_dependencies`。frontend 以所选 target 的解析域遍历锁图，从已验证 `PackageFiles` 读取依赖的 lib 入口、源码根与 feature 声明，并为源码快照分配 package 身份派生的独立逻辑目录。依赖不重新落盘，也不直接读取缓存或 vendor 物理目录。
+
+每个解析模块共享所属 `PackageScope`：稳定 package identity、内部模块根、直接依赖别名到 lib 入口的映射与本包 cfg。模块路径、名称解析、宏展开与定义稳定键共同使用该作用域；依赖与用户源码进入同一语义、HIR/GIR 与单态化管线。外部别名解析为真实模块/定义，不再停留在 `External` 占位符。测试 harness 与本包文档仅收集当前 package，依赖里的测试不被执行；`embed_file` 从对应依赖的已验证文件表读取并登记 action 输入。
+
 `project::dependencies` 实现依赖清单到锁图的单向解析。`Version` 严格解析 SemVer 2.0.0 的三段数字、预发布标识和 build metadata；`VersionReq` 支持 caret、tilde、关系运算、逗号交集和 wildcard，并按 SemVer precedence 比较，build metadata 不参与兼容判断。预发布候选只有约束显式覆盖同一 `major.minor.patch` 时才进入匹配。
 
 每个依赖的身份由规范包名、精确版本和 `path`/`git`/registry source 共同决定。path source 只从已发现 package 和可递归发现的 `gugu.toml` 读取；Git 与 registry source 由 `ResolveOptions` 提供确定性候选索引，候选按版本降序和 package ID 排序，撤回版本不参与新解析。别名只影响边上的名称；同一 package ID 在同一 normal/test/build 上下文只建立一个节点，不兼容版本可以并存。

@@ -21,6 +21,7 @@ fn compile(sources: &[(&str, &str)], queries: &crate::QueryEngine) -> FrontendOu
     );
     crate::bootstrap(
         crate::SourceInput::Sources {
+            packages: &[],
             source_map: &mut map,
             entry: "main.gg",
             source_root: "",
@@ -54,6 +55,7 @@ fn compile_failing(sources: &[(&str, &str)]) -> Vec<crate::Diagnostic> {
     );
     crate::bootstrap(
         crate::SourceInput::Sources {
+            packages: &[],
             source_map: &mut map,
             entry: "main.gg",
             source_root: "",
@@ -282,6 +284,7 @@ fn harness_test_items_become_roots() {
     );
     let output = crate::bootstrap(
         crate::SourceInput::Sources {
+            packages: &[],
             source_map: &mut map,
             entry: "main.gg",
             source_root: "",

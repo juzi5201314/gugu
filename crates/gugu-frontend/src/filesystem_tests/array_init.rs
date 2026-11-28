@@ -300,6 +300,7 @@ fn resource_protocol() -> (crate::frontend::FrontendOutput, crate::lir::Validate
     let resources = crate::runtime::RuntimeResources::new(resource_artifact());
     let frontend = frontend::bootstrap_with(
         SourceInput::Sources {
+            packages: &[],
             source_map: &mut sources,
             entry: RESOURCE_PROBE_PATH,
             source_root: "",
@@ -344,6 +345,7 @@ fn protocol(
     .unwrap();
     let mut frontend = frontend::bootstrap_with(
         SourceInput::Sources {
+            packages: &[],
             source_map: &mut sources,
             entry: "main.gg",
             source_root: "",

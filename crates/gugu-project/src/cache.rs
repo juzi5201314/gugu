@@ -85,6 +85,61 @@ impl DependencyInput {
     pub fn checksum(&self) -> String {
         self.files.checksum()
     }
+
+    /// 从已验证文件集读取 lib 入口和 feature 声明，不依赖缓存或 vendor 的物理位置。
+    pub fn library_configuration(&self) -> Result<(crate::Target, Vec<String>), CacheError> {
+        let invalid = |message: String| CacheError::Invalid {
+            path: PathBuf::from(self.package.to_string()),
+            message,
+        };
+        let manifest = self
+            .files
+            .files()
+            .get("gugu.toml")
+            .ok_or_else(|| invalid("依赖缺少 gugu.toml".to_owned()))?;
+        let text = std::str::from_utf8(manifest).map_err(|error| invalid(error.to_string()))?;
+        let raw: crate::manifest::RawManifest =
+            toml::from_str(text).map_err(|error| invalid(error.to_string()))?;
+        if raw.lib.is_none()
+            && raw
+                .package
+                .as_ref()
+                .is_some_and(|package| package.auto_lib == Some(false))
+        {
+            return Err(invalid("依赖未声明 lib target".to_owned()));
+        }
+        let entry = raw
+            .lib
+            .and_then(|lib| lib.path)
+            .unwrap_or_else(|| PathBuf::from("src/lib.gg"));
+        if entry
+            .components()
+            .any(|component| matches!(component, std::path::Component::ParentDir))
+        {
+            return Err(invalid("依赖 lib 入口不能包含父目录分量".to_owned()));
+        }
+        let logical = gugu_base::source::normalize_logical_path(&entry)
+            .map_err(|error| invalid(error.to_string()))?;
+        if !self.files.files().contains_key(&logical) || !logical.ends_with(".gg") {
+            return Err(invalid(format!(
+                "依赖 lib 入口 `{logical}` 不存在或不是 .gg 源码"
+            )));
+        }
+        let source_root = logical.split_once('/').map_or("", |(root, _)| root);
+        let target = crate::Target::new(
+            crate::TargetKind::Lib,
+            self.package.name().to_owned(),
+            PathBuf::from(&logical),
+            PathBuf::from(source_root),
+            Vec::new(),
+            true,
+        );
+        let mut features: Vec<_> = raw.features.unwrap_or_default().into_keys().collect();
+        features.push("default".to_owned());
+        features.sort();
+        features.dedup();
+        Ok((target, features))
+    }
 }
 
 /// 依赖缓存、归档输入与 vendor 验证的错误。
