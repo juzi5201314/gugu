@@ -122,6 +122,7 @@ impl Model<'_> {
         expression: ExprId,
         params: &BTreeMap<String, Ty>,
         error: Diagnostic,
+        stack: &[DefRef],
     ) -> Result<Ty, Diagnostic> {
         let ExprKind::Path(path) = self.modules[module].arena.exprs[expression.0 as usize].kind
         else {
@@ -137,7 +138,9 @@ impl Model<'_> {
                 ItemKind::Const { .. }
             )
         {
-            return self.array_length(module, expression, params).map(Ty::Const);
+            return self
+                .array_length_with_context(module, expression, params, stack)
+                .map(Ty::Const);
         }
         Err(error)
     }
@@ -214,6 +217,16 @@ impl Model<'_> {
         expression: ExprId,
         params: &BTreeMap<String, Ty>,
     ) -> Result<ArrayLength, Diagnostic> {
+        self.array_length_with_context(module, expression, params, &[])
+    }
+
+    pub(in super::super) fn array_length_with_context(
+        &self,
+        module: usize,
+        expression: ExprId,
+        params: &BTreeMap<String, Ty>,
+        stack: &[DefRef],
+    ) -> Result<ArrayLength, Diagnostic> {
         let arena = &self.modules[module].arena;
         let inner = self.unparenthesized_expression(module, expression);
         if let ExprKind::Path(path) = arena.exprs[inner.0 as usize].kind {
@@ -231,7 +244,7 @@ impl Model<'_> {
                 Some(arena.exprs[expression.0 as usize].span.clone()),
             ));
         }
-        u64::try_from(self.constant_int(module, expression)?)
+        u64::try_from(self.constant_int_with_context(module, expression, stack)?)
             .map(ArrayLength::Known)
             .map_err(|_| self.error(module, "comptime 泛型实参或数组长度必须非负且不超过 u64"))
     }
