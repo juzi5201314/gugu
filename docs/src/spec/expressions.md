@@ -342,6 +342,8 @@ fn demo(ch: chan[int], h: Join[int], x: int) {
 
 `try { block }` 先建立一个新的错误出口，再执行 block。成功时把 block 的值传给 `Try::from_value`；`?` 失败时把错误传给 `Try::from_error`，执行该 try block 已注册的 block defer，然后产生整个 try 表达式的值。`return`、`break` 和 `continue` 不在 try 处截获，继续穿过它。嵌套 try 总是使用最近的出口。
 
+对内建 `Option[T]` 和 `Result[T, E]`，成功出口分别产生 `Some(block 的值)` 和 `Ok(block 的值)`，失败出口分别产生 `None` 和 `Err(error)`；`T` 可以是 `()` 或聚合类型。出口类型可由类型标注或块内的 `?` 推断，只有普通成功表达式且没有类型上下文时不能凭空选择出口类型。
+
 `async` 的调用形式先在当前协程按普通调用顺序求值被调用函数和所有实参，然后创建可运行的子协程；块形式创建的闭包按[函数与闭包](functions.md)的槽捕获规则执行。子协程何时第一次获得执行机会没有顺序保证，父协程不能依赖它在 `async` 表达式返回前或之后启动；队列与提交协议见[调度器内部规范](../internals/scheduler.md)。
 
 `Join[T]` 包含子协程的唯一完成记录，但句柄本身可以被复制传递为句柄值；语言不给它 `Clone`。`wait()` 阻塞当前协程直到记录完成，然后返回记录中的同一个 `Result[T, Panic]` 表示；重复 `wait()` 不重新执行子协程，也不重复展开 panic。丢弃尚未完成的 Join 是分离，不取消子协程；分离后的结果只能按[运行时](runtime.md)的未处理 panic 规则处理。

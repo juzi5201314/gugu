@@ -289,6 +289,8 @@ trait 表先收集声明和 impl 头，形成关联类型后再检查方法签�
 
 语言认识的 `Index`、复合赋值、`Try`、`IntoIter` 和 `Iter` 使用同一接口表；`?` 保留 operand 的 `branch` 与目标的 `from_error` 派发，`try` 正常出口保留 `from_value` 派发。用户 `IntoIter` 的关联迭代器必须实现 `Iter`，两侧 `Item` 投影必须一致；具名泛型、APIT 与不透明返回约束共用关联义务闭包。关联常量与数组长度共用类型模型中的常量求值路径；具体值保留类型，并在特化检查中比较求值结果而不是源码拼写。
 
+内建 `Option` / `Result` 的 `try` 不登记自定义 `from_value` 派发；GIR 正常出口必须以块值为载荷构造成功变体，不能直接把载荷复制到出口聚合槽。自定义 `Try` 仍调用 HIR 登记的 `from_value`。
+
 ### TypeCheck schema verifier 规则
 
 `CheckedSemantics::verify` 是 TypeCheck 结果的 schema verifier：首次产出（`checker::check` 返回前）与 query 缓存恢复（反序列化 payload 之后）两条路径都必须通过。任一检查失败统一映射为 `InvalidType`（`E0038`），且不进入布局与 HIR 形成。检查按下列分组进行，顺序与实现一致：

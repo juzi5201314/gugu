@@ -792,7 +792,17 @@ impl Builder<'_> {
             let wrapped = self.call_dispatch(id, dispatch, vec![argument])?;
             self.assign_copy(Place::local(dest), wrapped);
         } else {
-            self.assign_copy(Place::local(dest), value);
+            // 内建 Option / Result 的成功出口分别构造 Some / Ok，块值只是载荷。
+            self.assign(
+                Place::local(dest),
+                Rvalue::Aggregate {
+                    kind: AggregateKind::Adt {
+                        ty: self.expr_ty(id),
+                        variant: 0,
+                    },
+                    operands: vec![copy_of(value)],
+                },
+            );
         }
         self.goto(exit);
         self.tries.pop();

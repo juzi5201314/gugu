@@ -22,6 +22,7 @@ mod root_trace;
 mod signal;
 mod strings;
 mod trace;
+mod try_expression;
 mod type_names;
 
 use crate::lir::body::{Body, Condition, IntOp, Op, Terminator, Type, range};

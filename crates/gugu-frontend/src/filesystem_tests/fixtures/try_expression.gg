@@ -1,0 +1,86 @@
+fn result(fail: bool) Result[int, string] {
+    if fail { return Err("bad") }
+    Ok(7)
+}
+
+fn option(fail: bool) Option[int] {
+    if fail { return None }
+    Some(7)
+}
+
+fn result_case(fail: bool) int {
+    let value = try { result(fail)? + 1 }
+    match value { Ok(n) => n, Err(error) => error.len() }
+}
+
+fn option_case(fail: bool) int {
+    let value = try { option(fail)? + 1 }
+    match value { Some(n) => n, None => 0 }
+}
+
+fn unit_and_plain_success() int {
+    let unit: Option[()] = try {}
+    let pair: Result[(int, string), string] = try { (4, "payload") }
+    match unit {
+        Some(()) => match pair { Ok((n, text)) => n + text.len(), Err(_) => 0 },
+        None => 0,
+    }
+}
+
+fn nested_exit(fail: bool) int {
+    let value: Result[int, string] = try {
+        let inner = try { option(fail)? }
+        match inner { Some(n) => n + 1, None => 42 }
+    }
+    match value { Ok(n) => n, Err(_) => 0 }
+}
+
+fn cleanup(fail: bool) int {
+    let cleaned = 0
+    let value = try {
+        defer { cleaned += 1 }
+        let n = result(fail)?
+        defer { cleaned += 1 }
+        n + 1
+    }
+    match value { Ok(n) => n * 10 + cleaned, Err(error) => error.len() * 10 + cleaned }
+}
+
+struct Attempt { value: Result[int, string] }
+impl Try for Attempt {
+    type Value = int
+    type Error = string
+    fn branch(self) Result[int, string] = self.value
+    fn from_value(value: int) Self = Self { value: Ok(value) }
+    fn from_error(error: string) Self = Self { value: Err(error) }
+}
+
+fn user_try(fail: bool) int {
+    let input = Attempt { value: result(fail) }
+    let value: Attempt = try { input? + 1 }
+    match value.value { Ok(n) => n, Err(error) => error.len() }
+}
+
+fn return_through_try(early: bool) int {
+    let value: Option[int] = try {
+        if early { return 9 }
+        2
+    }
+    match value { Some(n) => n, None => 0 }
+}
+
+fn never_try() int {
+    let _: Option[int] = try { return 9 }
+    0
+}
+
+fn main() {
+    _ = result_case(false)
+    _ = option_case(false)
+    _ = unit_and_plain_success()
+    _ = nested_exit(false)
+    _ = cleanup(false)
+    _ = user_try(false)
+    _ = return_through_try(false)
+    _ = never_try()
+}
