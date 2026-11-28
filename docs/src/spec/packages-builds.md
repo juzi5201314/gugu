@@ -341,7 +341,7 @@ Linux 默认使用 `$XDG_CACHE_HOME/gugu`（未设置时 `~/.cache/gugu`）、`$
 实现使用以下稳定输入边界：registry archive 先解包为规范相对文件集合，再以 `gugu-package-v1`、路径长度、路径字节、内容长度和内容字节组成内容流计算 SHA-256；缓存条目另外保存每个文件的长度与 BLAKE3 摘要。缓存布局为 `dependencies/v1/packages/<package-key>/record.toml` 与 `files/`，`tmp/` 只放未发布临时目录，损坏条目移入 `quarantine/`。
 从缓存、path 或 vendor 的物理目录读取 package 时，先将宿主目录分隔符转换为 `/`，再校验规范相对路径；相同文件集合在各宿主上具有相同逻辑路径与 checksum。archive 和缓存记录中的逻辑路径必须直接满足规范，不转换其反斜杠；Unix 文件名中的字面反斜杠也必须拒绝。
 
-源码快照、target 入口与产物路径同样接受宿主原生目录分隔符：Windows 的 `src\main.gg` 与 `src/main.gg` 表示同一路径，源码逻辑路径统一为 `/`。分隔符转换不放宽边界检查：绝对路径、越过 package 根的源码路径，以及含 `..` 分量的 target 入口和产物路径仍须拒绝。
+从宿主文件系统获得的源码与自动发现的 target 物理路径，以及物化产物的宿主路径，接受宿主原生目录分隔符：Windows 的 `src\main.gg` 与 `src/main.gg` 表示同一路径，源码逻辑路径统一为 `/`。清单中显式 target 的 `path` 仍必须使用 `/`，不会转换其中的反斜杠。分隔符转换不放宽边界检查：绝对路径、越过 package 根的源码路径，以及含 `..` 分量的 target 入口和产物路径仍须拒绝。
 
 vendor 根包含严格的 `.gugu-vendor.toml` 映射；每个 registry/Git package 使用由 package identity 派生的 `pkg-<key>` 目录，并记录 source、锁定 registry checksum 和内容摘要。读取 vendor 时 package 集合、目录集合、source、每个文件和整体摘要都必须与锁图一致，path package 仍从本地目录读取。输入准备在 codegen 前完成，cache 与 vendor 不会静默互相回退。
 

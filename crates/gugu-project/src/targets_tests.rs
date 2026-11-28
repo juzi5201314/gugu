@@ -7,7 +7,7 @@ use super::super::{
 use super::*;
 
 #[test]
-fn target_entry_accepts_host_separators_and_rejects_traversal() {
+fn autodiscovered_target_preserves_native_paths_and_rejects_traversal() {
     let directory = TempDir::new().unwrap();
     let root = package(
         &directory,
@@ -15,17 +15,25 @@ fn target_entry_accepts_host_separators_and_rejects_traversal() {
         "[package]\nname = \"demo\"\nversion = \"0.1.0\"\n",
         &[("tests/basic.gg", "fn checks() {}\n")],
     );
-    let manifest = root.join("gugu.toml");
-    let native = Path::new("tests").join("basic.gg");
+    let project = Project::discover(&root).expect("自动发现 target");
+    let current = project.current_package().expect("当前 package");
     assert_eq!(
-        resolve_entry(&root, &native, &manifest).unwrap(),
+        target_summary(current),
+        vec![(TargetKind::Test, "basic".into())]
+    );
+    let native = Path::new("tests").join("basic.gg");
+    let target = &current.targets()[0];
+    assert_eq!(target.entry(), root.join(&native));
+    assert_eq!(target.source_root(), root.join("tests"));
+
+    let manifest = root.join("gugu.toml");
+    assert_eq!(
+        resolve_entry(&root, Path::new("tests/basic.gg"), &manifest).unwrap(),
         root.join(&native)
     );
-    assert_eq!(
-        resolve_entry(&root, Path::new("tests\\basic.gg"), &manifest).is_ok(),
-        cfg!(windows)
-    );
-    assert!(resolve_entry(&root, Path::new("tests/../tests/basic.gg"), &manifest).is_err());
+    for path in ["tests/../tests/basic.gg", "tests\\..\\tests\\basic.gg"] {
+        assert!(resolve_entry(&root, Path::new(path), &manifest).is_err());
+    }
 }
 
 #[test]

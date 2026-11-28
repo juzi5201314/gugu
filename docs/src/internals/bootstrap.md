@@ -47,6 +47,8 @@ workspace 成员按 `members` glob 展开并扣除 `exclude`，glob 展开按规
 
 target 自动发现覆盖 `src/lib.gg`、`src/main.gg`、`src/bin/`、`tests/`、`benches/`、`examples/` 与 package 根 `build.gg` 的文件与目录形式，`auto-*` 开关与显式 target 表按清单规则生效；`foo.gg` 与 `foo/mod.gg` 同时存在、同种类重名 target、入口越过 package 根均在编译前失败；target 自动发现与冲突检查会忽略构建输出目录 `target` 及隐藏目录。显式 `path` 可直接位于 package 根（如 `main.gg`），其源码根为 package 根本身，不再误当作目录。lib 的默认名是 package 短名把 `-` 换成 `_`。项目模式下每个选中 target 以 `project_entry` 进入同一 action graph：bin 类入口要求合法 main，lib/test/harness 类入口只做源码快照检查。`required-features` 按当前启用 feature 集合在编译前过滤：未满足的 target 不选择，`--features`/`--all-features`/`--no-default-features` 决定启用集合，未知 feature 名退出码 2。单文件模式（`gugu build <file.gg>`）拒绝 `-p`、`--workspace`、`--features`、`--no-default-features`、`--all-features`、`--lib`、`--bin`、`--test`、`--bench`、`--example`、`--all-targets`，以退出码 2 失败。项目 `build`/`check` 已接入依赖解析：锁图写入 workspace 根 `gugu.lock`，下载、缓存、checksum 与 vendor 由下一节规定。
 
+target 自动发现由 `discover_directory_targets` 将宿主物理路径转换为 `/` 分隔的 package 相对路径，再与显式清单路径共用 `resolve_entry` 校验。`resolve_entry` 在所有宿主上拒绝反斜杠、绝对路径和 `..` 分量；自动发现不得依靠放宽清单校验来接受 Windows 原生路径。校验后的入口与源码根保存规范化的宿主物理路径，回归同时检查其实际指向和显式非法路径的拒绝结果。
+
 ## 依赖解析
 
 CLI 的 build/check、run/test/bench、doc 与 build task 把 `resolve_project_lock` 返回的 `DependencyInput` 交给 `CompileRequest::with_dependencies`。frontend 以所选 target 的解析域遍历锁图，从已验证 `PackageFiles` 读取依赖的 lib 入口、源码根与 feature 声明，并为源码快照分配 package 身份派生的独立逻辑目录。依赖不重新落盘，也不直接读取缓存或 vendor 物理目录。

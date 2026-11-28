@@ -318,7 +318,7 @@ fn resolve_entry(root: &Path, path: &Path, manifest: &Path) -> Result<PathBuf, P
                 Component::ParentDir | Component::RootDir | Component::Prefix(_)
             )
         })
-        || (!cfg!(windows) && path.to_string_lossy().contains('\\'))
+        || path.to_string_lossy().contains('\\')
     {
         return Err(ProjectError::TargetDiscovery {
             package: manifest.to_path_buf(),
