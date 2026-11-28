@@ -158,6 +158,32 @@ accept_cases! {
         "trait Marker {}\ntrait Identity { fn identity[T](self, value: T) T }\nstruct Point {}\nimpl Identity for Point { fn identity[T: Marker](self, value: T) T = value }\nfn main() {}";
     associated_function_generic_order_and_method_contracts_are_preserved_03: true,
         "trait Create { fn create(value: int) Self }\nstruct Point { value: int }\nimpl Create for Point { fn create(value: int) Self = Self { value } }\nfn main() { let point: Point = Create::create(1)\n _ = point }";
+    value_path_receiver_method_calls_are_accepted_00: true,
+        "enum Dir { N, S }\nimpl Dir { fn name(self: &Self) string = \"n\" }\nfn main() { _ = Dir.N.name() }";
+    value_path_receiver_method_calls_are_accepted_01: true,
+        "const DATA: [byte; 1] = [0]\nfn main() { _ = DATA.len() }";
+    value_path_receiver_method_calls_are_accepted_02: true,
+        "static DATA: [byte; 1] = [0]\nfn main() { _ = DATA.len() }";
+    value_path_receiver_method_calls_are_accepted_03: true,
+        "struct Point { x: int }\nimpl Point { fn value(self) int = self.x }\nconst P: Point = Point { x: 1 }\nfn main() { _ = P.value() }";
+}
+
+#[test]
+fn value_path_callable_fields_preserve_static_roots() {
+    super::frontend(
+        &[
+            (
+                "main.gg",
+                "use callbacks as cb\nuse callbacks.{P}\nfn main() { _ = P.f()\n _ = cb.P.f() }",
+            ),
+            (
+                "callbacks.gg",
+                "pub struct Callback { pub f: fn() int }\nfn read() int = 7\npub static P: Callback = Callback { f: read }",
+            ),
+        ],
+        &crate::QueryEngine::new(),
+    )
+    .unwrap();
 }
 
 #[test]
@@ -300,13 +326,12 @@ accept_cases! {
         "impl Print for int { fn print(self: &Self, out: &Formatter) {} }\nfn main() {}";
 }
 
-/// 编译一份 `main.gg`：lint 类用例只关心诊断与是否产出镜像。
+fn request(source: &str) -> crate::CompileRequest {
+    crate::CompileRequest::single_file("main.gg", source, crate::TargetName::X86_64Linux)
+}
+
 fn compile(source: &str) -> crate::Compilation {
-    crate::Compiler::shared().compile(crate::CompileRequest::single_file(
-        "main.gg",
-        source,
-        crate::TargetName::X86_64Linux,
-    ))
+    crate::Compiler::shared().compile_to_lir(request(source))
 }
 
 /// 该源码是否报告了指定诊断代码。
@@ -342,7 +367,8 @@ fn unused_must_use_is_absent_when_the_value_is_kept() {
 
 #[test]
 fn denied_unused_must_use_fails_without_an_image_plan() {
-    let denied = compile("#![deny(unused_must_use)]\nfn main() { Some(1); }");
+    let denied = crate::Compiler::shared()
+        .compile_full_for_test(request("#![deny(unused_must_use)]\nfn main() { Some(1); }"));
     assert!(!denied.is_success());
     assert!(denied.image_plan().is_none());
 }

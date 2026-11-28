@@ -193,7 +193,7 @@ HIR同样提供保持源码臂优先级的 pattern matrix。GIR把它编译成�
 
 `if`/`while` 条件里的 `let` 链不经过布尔合流块：每个 `let` 段的模式测试直接把 ok 路径分支进后续段或分支体，绑定发射在 ok 路径的块内，失败路径直接指向 else/exit。SSA 封口要求被读变量在目标块的全部前驱路径上都有定义，而模式绑定只存在于匹配成功的路径上，因此「绑定路径与失败路径合并出布尔再统一开关」的形状是非法的。
 
-没有 `else` 的 `if` 结果为 unit：then 分支仍完整求值并执行副作用，但丢弃其尾值，在合流目标写 unit；不能把链式方法返回的引用等尾值复制进零机器分量的 unit 槽。
+结果为 unit 的 `if`（包括没有 `else` 的 `if`，以及语句位置丢弃分支值的完整 `if` / `else if` 链）：分支仍完整求值并执行副作用，但丢弃其尾值，在合流目标写 unit；不能把链式方法返回的引用等尾值复制进零机器分量的 unit 槽。分支发散时不产生通往合流目标的正常边。
 
 `ScopedViewBegin`/`ScopedViewEnd` 成对出现：view 存活区间禁止 `Suspend`/`SelectCommit`，禁止把 token 或投影逃出配对区间，每条出口恰有一次 end。`NoSafepointBegin`/`End` 只能由 `LowerConcurrency` 或登记的 runtime publish intrinsic 产生；用户表达式不得直接制造任意 region。
 
@@ -314,6 +314,12 @@ monomorphic GIR 必须按以下顺序处理；pass 可以在没有匹配机会�
 步骤 1–4 在 generic GIR 构造、`ScopedView`/`NoSafepointRegion` 展开与值传递 lowering 中完成；步骤 10 由 `EscapeAndPlacement` 完成；步骤 12–15 在 GIR→LIR lowering 中完成。步骤 5–9、11 由 `gir::pass` 的固定管线驱动，顺序固定为 `Inline`、`SimplifyCfg`、`SparseConditionalConstants`、`CopyPropagationAndGvn`、`BoundsCheckElimination`、`CowAndResourceElision`，禁止运行时重排；每跑一个 pass 立即运行 `ConcreteBody` 与 GIR verifier，失败为 `E0055`。局部集合（活跃性、读取集合、块内定义集合）用稠密 `LocalId` 位图 `LocalSet` 表示：插入/查询是常数次位运算，并集/差集/比较按 `u64` 字批量处理，不逐元素分配树节点。管线 revision 与 pass 名单进入前端 action key，`-Zdump-gir` 头部打印 `gir-passes`、`inline-count` 与 `checks-elided`。当前 `Inline` 只展开「无参数、无 cleanup、单出口、语句为纯标量赋值」的直接调用；参数传递、投影与跨体作用域复制仍保留为调用，完整展开由后端阶段的内联器承担。`BoundsCheckElimination` 只在 `AnalysisWorldV1.proofs` 为 `Proved` 时把检查分支改为不可达并交给 `SimplifyCfg` 删除。
 
 ## LIR
+
+### dyn 擦除与 vtable shim
+
+`Rvalue::DynErase` 不调用 runtime 擦除入口。LIR 直接按源类型 descriptor 在 LocalHeap 分配载荷对象，把已经按语言复制语义形成的源值移入该对象，再把数据指针和 `Symbol::Vtable { interface, concrete }` 的 metadata 指针写入 16 byte 胖对；fat pair 仍是 `(0, GcHeap)`、`(8, Metadata)` 两条 ABI lane。mono vtable root 记录接口键、具体类型、`dyn` 类型键以及按 trait 槽顺序解析出的具体方法实例，冻结 `TypeUniverse` 后同一组合必须解析到同一方法表。
+
+函数体物化后为每个 vtable 方法生成 checked LIR shim，实例键由接口、具体类型与目标方法共同哈希。`self: &Self` shim 的签名与目标一致：它从 dyn 对象引用的字 0 取出载荷指针并调用目标。按值 `self` 的动态调用以胖对两条 lane 入栈；在载荷无 COW/resource 动作且直接 ABI 不超过 16 byte 时，shim 重新从载荷读取接收者车道并调用目标。其它按值 receiver 需要完整语义复制或间接 ABI 物化，当前必须在编译期拒绝，不能把 dyn data/vtable lane 错传给具体方法。后端把 shim 地址写进编译期 vtable blob；x64 与 A64 都不得再引用不存在的 `dynamic_erase` runtime glue。
 
 ### SSA 与 block 参数
 

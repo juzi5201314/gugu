@@ -129,7 +129,9 @@ fn freeze_rejects_invalid_type_ids_and_capture_owners() {
         "fn unrelated(x: int) int = x\nfn main() { let x = 1\n let call = fn() = x\n _ = call() }",
     );
     let mut invalid_type = hir.module().clone();
-    invalid_type.owners[0].expression_inputs[0] = hir::TypeId(u32::MAX);
+    let mut expression_inputs = invalid_type.owners[0].expression_inputs.to_vec();
+    expression_inputs[0] = hir::TypeId(u32::MAX);
+    invalid_type.owners[0].expression_inputs = expression_inputs.into();
     assert!(hir::Validated::freeze(invalid_type).is_err());
     let mut wrong_owner = hir.module().clone();
     let unrelated = wrong_owner
@@ -138,14 +140,16 @@ fn freeze_rejects_invalid_type_ids_and_capture_owners() {
         .find(|owner| wrong_owner.definitions[owner.definition.index()].name == "unrelated")
         .unwrap()
         .definition;
-    let capture = &mut wrong_owner
+    let owner_index = wrong_owner
         .owners
-        .iter_mut()
-        .find(|owner| !owner.captures.is_empty())
-        .unwrap()
-        .captures[0];
+        .iter()
+        .position(|owner| !owner.captures.is_empty())
+        .unwrap();
+    let mut captures = wrong_owner.owners[owner_index].captures.to_vec();
+    let capture = &mut captures[0];
     capture.owner = unrelated;
     capture.source = hir::LocalId(0);
+    wrong_owner.owners[owner_index].captures = captures.into();
     assert!(hir::Validated::freeze(wrong_owner).is_err());
 }
 
@@ -156,28 +160,48 @@ fn freeze_rejects_field_and_cleanup_targets_outside_their_domain() {
         "struct Value { number: int }\nfn main() { let value = Value { number: 1 }\n _ = value.number\n loop { defer {}\n break } }",
     );
     let mut wrong_field = hir.module().clone();
-    let expression = wrong_field
+    let owner_index = wrong_field
         .owners
+        .iter()
+        .position(|owner| {
+            owner
+                .expressions
+                .iter()
+                .any(|expression| matches!(expression.kind, hir::ExprKind::Field { .. }))
+        })
+        .unwrap();
+    let mut expressions = wrong_field.owners[owner_index].expressions.to_vec();
+    let expression = expressions
         .iter_mut()
-        .flat_map(|owner| &mut owner.expressions)
         .find(|expression| matches!(expression.kind, hir::ExprKind::Field { .. }))
         .unwrap();
     let hir::ExprKind::Field { index, .. } = &mut expression.kind else {
         unreachable!()
     };
     *index = u32::MAX;
+    wrong_field.owners[owner_index].expressions = expressions.into();
     assert!(hir::Validated::freeze(wrong_field).is_err());
     let mut wrong_cleanup = hir.module().clone();
-    let expression = wrong_cleanup
+    let owner_index = wrong_cleanup
         .owners
+        .iter()
+        .position(|owner| {
+            owner
+                .expressions
+                .iter()
+                .any(|expression| matches!(expression.kind, hir::ExprKind::Exit { .. }))
+        })
+        .unwrap();
+    let mut expressions = wrong_cleanup.owners[owner_index].expressions.to_vec();
+    let expression = expressions
         .iter_mut()
-        .flat_map(|owner| &mut owner.expressions)
         .find(|expression| matches!(expression.kind, hir::ExprKind::Exit { .. }))
         .unwrap();
     let hir::ExprKind::Exit { cleanup, .. } = &mut expression.kind else {
         unreachable!()
     };
     cleanup.end -= 1;
+    wrong_cleanup.owners[owner_index].expressions = expressions.into();
     assert!(hir::Validated::freeze(wrong_cleanup).is_err());
 }
 

@@ -25,7 +25,7 @@ fn linux_bridge(h: &mut Harness<'_>, args: &[u64], memory: &mut Vec<u8>) -> Vec<
 
 #[test]
 fn linux_signal_arm_passes_kernel_sigset_size_before_signalfd_flags() {
-    let output = Compiler::shared().compile(CompileRequest::single_file(
+    let output = Compiler::shared().compile_to_lir(CompileRequest::single_file(
         "main.gg",
         include_str!("../../../gugu-compiler/tests/fixtures/linux_signal.gg"),
         TargetName::X86_64Linux,
@@ -74,19 +74,11 @@ fn native(h: &mut Harness<'_>, op: u64, request: u64, memory: &mut Vec<u8>) {
 
 #[test]
 fn darwin_signals_arm_deliver_counts_and_restore_disposition() {
-    let output = Compiler::shared().compile(
-        CompileRequest::single_file(
-            "main.gg",
-            include_str!("../../../gugu-compiler/tests/fixtures/macos_signal.gg"),
-            TargetName::X86_64Macos,
-        )
-        .with_native_link(crate::NativeLink {
-            imports: ["getpid", "kill"]
-                .map(|name| crate::NativeImport::function("/usr/lib/libSystem.B.dylib", name))
-                .to_vec(),
-            interpreter: None,
-        }),
-    );
+    let output = Compiler::shared().compile_to_lir(CompileRequest::single_file(
+        "main.gg",
+        include_str!("../../../gugu-compiler/tests/fixtures/macos_signal.gg"),
+        TargetName::X86_64Macos,
+    ));
     assert!(output.is_success(), "{:?}", output.diagnostics().items());
     let mut h = Harness::new(&output);
     let mut memory = vec![0; 262144];

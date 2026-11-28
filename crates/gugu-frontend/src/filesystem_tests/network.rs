@@ -6,7 +6,7 @@ mod protocol;
 mod transport;
 
 fn compilation(target: TargetName) -> Compilation {
-    let output = Compiler::shared().compile(CompileRequest::single_file(
+    let output = Compiler::shared().compile_to_lir(CompileRequest::single_file(
         "main.gg",
         include_str!("../../../gugu-compiler/tests/fixtures/net_address.gg"),
         target,
