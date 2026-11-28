@@ -70,21 +70,15 @@ fn is_user_path(path: &std::path::Path, builtin: &[String]) -> bool {
 
 fn user_definitions(output: &super::FrontendOutput) -> usize {
     let builtin = builtin_paths();
-    output
-        .names
-        .definitions
-        .iter()
-        .filter(|definition| is_user_path(definition.span.path(), &builtin))
+    (0..output.names.definitions.len())
+        .filter(|&index| is_user_path(output.names.definition_span(index).path(), &builtin))
         .count()
 }
 
 fn user_imports(output: &super::FrontendOutput) -> usize {
     let builtin = builtin_paths();
-    output
-        .names
-        .imports
-        .iter()
-        .filter(|import| is_user_path(import.span.path(), &builtin))
+    (0..output.names.imports.len())
+        .filter(|&index| is_user_path(output.names.import_span(index).path(), &builtin))
         .count()
 }
 

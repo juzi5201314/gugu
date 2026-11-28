@@ -2,10 +2,12 @@
 use super::*;
 use crate::runtime::stackmap_codec::{CodeLayout, SafepointLayout, encode};
 
-#[test]
+pub(super) fn run_all() {
+    pressure_poll_dispatches_gc_once_and_preserves_stack_resource();
+}
+
 fn pressure_poll_dispatches_gc_once_and_preserves_stack_resource() {
-    let (hir, bodies) = runtime_bodies();
-    let mut harness = ResourceHarness::from_bodies(&hir, &bodies);
+    let mut harness = runtime_harness();
     harness.gc_config = CONFIG;
     harness.block_budget = 32768;
     harness.clock.extend([1000, 1125]);

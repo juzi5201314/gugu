@@ -160,7 +160,7 @@ fn sync_contract_and_image_plan_cli() {
     assert_ne!(contract.fingerprint(), contract3.fingerprint());
 
     let compiler = Compiler::shared();
-    let res = compiler.compile(CompileRequest::single_file(
+    let res = compiler.compile_full_for_test(CompileRequest::single_file(
         "main.gg",
         "fn main() { let value = 1\n _ = value }",
         TargetName::X86_64Linux,

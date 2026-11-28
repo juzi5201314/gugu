@@ -572,6 +572,10 @@ pub(crate) fn run_build_task(
             features.to_vec(),
             externals,
         );
+        #[expect(
+            clippy::disallowed_methods,
+            reason = "build task 需要完整编译结果才能物化产物"
+        )]
         let compilation = compiler.compile(request);
         if !compilation.is_success() {
             crate::print_compilation(&compilation, false, options, host);

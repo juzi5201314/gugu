@@ -15,20 +15,14 @@ const CONTEXT: &str = "std/runtime/process_context.gg";
 struct Protocol {
     frontend: crate::frontend::FrontendOutput,
     lir: crate::lir::Validated,
+    metadata: crate::frontend::gc::GcMetadataBundle,
 }
 
 impl Protocol {
     fn harness(&self) -> Harness<'_> {
         let mut harness = Harness::from_bodies(self.frontend.hir.module(), self.lir.bodies());
         harness.set_sizes(&self.frontend.gir);
-        harness.metadata = Some(
-            crate::frontend::gc::derive(
-                &self.frontend.mono.universe,
-                &self.frontend.gir,
-                self.frontend.hir.module(),
-            )
-            .unwrap(),
-        );
+        harness.metadata = Some(self.metadata.clone());
         harness
     }
 }
@@ -77,7 +71,17 @@ fn protocol_source(target: TargetName, source: &str) -> Protocol {
         (&frontend.installed, resources.prebuilt()),
     )
     .unwrap();
-    Protocol { frontend, lir }
+    let metadata = crate::frontend::gc::derive(
+        &frontend.mono.universe,
+        &frontend.gir,
+        frontend.hir.module(),
+    )
+    .unwrap();
+    Protocol {
+        frontend,
+        lir,
+        metadata,
+    }
 }
 
 fn store(memory: &mut [u8], address: u64, values: &[u64]) {
@@ -104,7 +108,7 @@ const STATE: &str = "std/runtime/process_state.gg";
 const STATUS: u64 = 1024;
 
 fn compilation() -> Compilation {
-    let output = Compiler::shared().compile(CompileRequest::single_file(
+    let output = Compiler::shared().compile_to_lir(CompileRequest::single_file(
         "main.gg",
         include_str!("../../../gugu-compiler/tests/fixtures/process_status.gg"),
         TargetName::X86_64Linux,
@@ -116,6 +120,30 @@ fn compilation() -> Compilation {
 fn status(memory: &mut [u8], kind: u64, value: u64) {
     put(memory, STATUS, kind);
     put(memory, STATUS + 8, value);
+}
+
+#[test]
+fn linux_process_protocol_contracts() {
+    let output = protocol(TargetName::X86_64Linux);
+    child::child_exit_is_shared_and_cancellation_removes_only_its_waiter(&output);
+    child::explicit_close_kills_once_and_detach_never_kills(&output);
+    child::child_wait_precancel_has_no_effect_and_supervisor_does_not_keep_runtime_alive(&output);
+    child::nine_children_progress_without_blocking_worker_credits(&output);
+    child::wait_closes_stdin_but_try_wait_does_not(&output);
+    environment::linux_environment_empty_value_remove_and_case_sensitive_names(&output);
+    environment::stdio_pipe_and_null_failures_release_every_acquired_handle(&output);
+    pipe::linux_pipe_consumes_short_completion_before_cancellation(&output);
+    pipe::pipe_round_robin_reaches_cancelled_tail_beyond_service_budget(&output);
+    pipe::pipe_eof_short_write_and_broken_pipe_have_distinct_terminal_results(&output);
+    context::environment_names_reject_invalid_bytes_before_any_native_call(&output);
+}
+
+#[test]
+fn windows_process_protocol_contracts() {
+    let output = protocol(TargetName::X86_64Windows);
+    environment::windows_invalid_environment_block_is_freed_before_error_returns(&output);
+    pipe::windows_cancel_keeps_overlapped_request_until_terminal_completion(&output);
+    context::windows_command_line_round_trips_empty_quotes_slashes_and_surrogates();
 }
 
 #[test]

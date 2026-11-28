@@ -41,8 +41,9 @@ impl Module {
                 .all(|pair| pair[0].definition < pair[1].definition)
             || !self
                 .definitions
-                .windows(2)
-                .all(|pair| pair[0].module <= pair[1].module)
+                .iter()
+                .zip(self.definitions.iter().skip(1))
+                .all(|(left, right)| left.module <= right.module)
         {
             return Err(invalid("定义及 owner 身份不是规范唯一序列"));
         }

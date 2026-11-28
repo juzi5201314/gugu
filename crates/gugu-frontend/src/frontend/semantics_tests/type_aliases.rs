@@ -1,7 +1,7 @@
 use super::accepts;
 
 #[test]
-fn generic_aliases_are_transparent_in_all_type_positions() {
+fn generic_type_aliases_transparency_and_error_contracts() {
     assert!(accepts(
         "type Table[K] = Vec[K]\n\
          type Nested[T] = Table[Table[T]]\n\
@@ -18,30 +18,14 @@ fn generic_aliases_are_transparent_in_all_type_positions() {
          let zs: Vec[Vec[int]] = nested(Vec[Vec[int]]::new())\n _ = zs\n\
          _ = plain(1) }"
     ));
-}
-
-#[test]
-fn generic_alias_requires_arguments() {
     assert!(!accepts(
         "type Table[K] = Vec[K]\nfn f(x: Table) {}\nfn main() {}"
     ));
-}
-
-#[test]
-fn generic_alias_rejects_extra_arguments() {
     assert!(!accepts(
         "type Table[K] = Vec[K]\nfn f(x: Table[int, bool]) {}\nfn main() {}"
     ));
-}
-
-#[test]
-fn generic_alias_rejects_incompatible_instantiations() {
     assert!(!accepts(
         "type Table[K] = Vec[K]\nfn f(x: Table[int]) Table[bool] { x }\nfn main() {}"
     ));
-}
-
-#[test]
-fn generic_alias_rejects_cycles() {
     assert!(!accepts("type A[T] = B[T]\ntype B[T] = A[T]\nfn main() {}"));
 }

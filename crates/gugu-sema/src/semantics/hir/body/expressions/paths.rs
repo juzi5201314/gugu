@@ -144,7 +144,16 @@ impl BodyBuilder<'_, '_, '_, '_> {
                 .iter()
                 .map(|segment| self.compiler.model.name(self.module, segment.name))
                 .collect();
-            let definition = self.compiler.model.resolve(self.module, &names)?;
+            let (definition, root_len) = (1..=names.len())
+                .rev()
+                .find_map(|len| {
+                    self.compiler
+                        .model
+                        .resolve(self.module, &names[..len])
+                        .ok()
+                        .map(|definition| (definition, len))
+                })
+                .ok_or_else(|| self.error("值路径缺少已解析声明根"))?;
             let ty = if let Some(expected) = expected
                 && matches!(
                     self.compiler.model.modules[definition.module].arena.items
@@ -159,7 +168,7 @@ impl BodyBuilder<'_, '_, '_, '_> {
             (
                 hir::Res::Def(self.compiler.identities.item(definition)),
                 ty,
-                &segments[segments.len()..],
+                &segments[root_len..],
             )
         };
         let mut steps = vec![Step::new(StepKind::Root(root), self.type_id(&ty)?)];

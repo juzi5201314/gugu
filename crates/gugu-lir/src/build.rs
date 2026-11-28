@@ -279,7 +279,7 @@ pub fn lower(
             source_scopes: concrete.body.source_scopes.clone(),
             uses: Vec::new(),
             data: Vec::new(),
-            assembly: owner.assembly.clone(),
+            assembly: owner.assembly.to_vec(),
             environments: Vec::new(),
             entry: BlockId(0),
             poll_summary: body::PollSummary::default(),

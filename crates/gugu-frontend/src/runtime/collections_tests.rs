@@ -3,7 +3,7 @@ use gugu_runtime_world::collections::*;
 use gugu_runtime_world::hash::HashFamily;
 
 fn compile(source: &str) -> crate::Compilation {
-    Compiler::shared().compile(CompileRequest::single_file(
+    Compiler::shared().compile_to_lir(CompileRequest::single_file(
         "main.gg",
         source,
         TargetName::X86_64Linux,

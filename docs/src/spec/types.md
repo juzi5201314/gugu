@@ -160,7 +160,7 @@ impl[T: Clone, comptime N: int] Clone for [T; N] {
 - 切片 `&[T]`：胖指针（指针 + 长度），不拥有存储。`&[T; N]` 必须能强制成 `&[T]`；转换保留原数组的地址并附加长度 N，不复制数组，也不指向保存数组引用的临时槽。经切片写入元素必须能从原数组及其它视图观察到。
 - `[T; N]` 与 `&[T]` 的固有方法 `len(self: &Self) int` 由编译器提供：数组返回类型中的 `N`，切片返回胖指针长度。`string` / `Vec[T]` 的 `len` 仍由标准库实现。
 - 下标：`xs[i]`、`xs[a..b]`、`xs[a..]`、`xs[..b]`、`xs[..]`。不完整区间 `a..` / `..b` / `..` **只**允许出现在 `[]` 里，不能当独立值（独立值必须是 `a..b`，类型 `Range`）。
-- `Vec[T]` 不是内置类型，在 `std`（预导入）：可增长、存储在 GC 堆或显式传入的 `LocalArena` / `SyncArena`。至少提供 `new`、`push`、`len`、`cap`（`len` / `cap` 返回 `int`），以及 `IntoIter`（`Item = T`，拷贝元素）。必须实现 `Clone`（`T: Clone`）、`Eq`（`T: Eq`）、`Print`。
+- `Vec[T]` 不是内置类型，在 `std`（预导入）：可增长的共享身份集合。至少提供 `new`、`push`、`len`（返回 `int`），以及 `IntoIter`（`Item = T`，拷贝元素）。必须实现 `Clone`（`T: Clone`）、`Eq`（`T: Eq`）、`Print`。`Vec` 是逻辑集合而不是容量可预留的连续缓冲；完整接口见[标准库 · 集合与 Hash](standard-library.md#collections-and-hash)。
 
 下标类型是 `int`。语言层默认插入越界检查；发布构建也检查。编译器在**证明** `0 <= i < len` 时必须删掉该检查（循环归纳、`if` 守卫、`for i in 0..n`、comptime 已知长度与下标）。证明不了就留检查。`unsafe` 提供无检查下标。
 
@@ -467,7 +467,7 @@ trait 方法的返回 `impl Trait` 是 RPITIT；每个实现可以选择不同�
 
 ## `dyn Trait` 与方法解析
 
-`dyn Trait` 只能由满足该 trait 的具体值显式擦除得到。擦除产生数据指针和 vtable 句柄；vtable 固定该具体类型的最具体肯定 impl。`dyn Trait` 的复制只复制胖指针，不复制载荷；若 trait 没有适用 impl 或存在无法比较具体性的 impl，程序在编译期失败。
+`dyn Trait` 只能由满足该 trait 的具体值显式擦除得到。擦除产生数据指针和 vtable 句柄；vtable 固定该具体类型的最具体肯定 impl。擦除容器拥有载荷；只要任一胖指针副本存活，载荷就保持有效。`dyn Trait` 的复制只复制胖指针，不复制载荷；若 trait 没有适用 impl 或存在无法比较具体性的 impl，程序在编译期失败。
 
 可对象化 trait 除已有规则外，还必须满足：除接收者外的方法参数和返回类型不能出现 `Self`；方法不能要求按值返回未知大小的 `Self`；不能有泛型方法、关联类型、关联常量或 RPITIT。`self` 和 `self: &Self` 是允许的接收者；`self: &Self` 的调用不移动对象。违反任一条件的 trait 仍可用于泛型约束，但不能写 `dyn Trait`。
 

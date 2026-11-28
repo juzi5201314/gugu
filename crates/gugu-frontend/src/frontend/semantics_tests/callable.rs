@@ -1,18 +1,4 @@
-use crate::{CompileRequest, Compiler, TargetName};
-
-fn accepts(source: &str) -> bool {
-    let result = Compiler::shared().compile(CompileRequest::single_file(
-        "main.gg",
-        source,
-        TargetName::X86_64Linux,
-    ));
-    if !result.is_success() {
-        eprintln!("{:?}", result.diagnostics().items());
-    }
-    result.is_success()
-}
-
-use super::accept_cases;
+use super::{accept_cases, accepts};
 
 accept_cases! {
     closure_signatures_infer_from_context_and_expression_bodies_00: true,

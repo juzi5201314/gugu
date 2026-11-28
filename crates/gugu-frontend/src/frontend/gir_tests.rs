@@ -1,10 +1,18 @@
-//! 需要完整 `Compiler` 的 GIR 层回归：action key、image plan 计数、GIR dump 与大拷贝 lint。
+//! GIR dump、大拷贝 lint 以及 GIR 到 action key 和镜像计划的回归测试。
 
 use crate::{CompileRequest, Compiler, TargetName};
 
 /// 大拷贝诊断：一次编译一个用例，单项不超过测试耗时上限。
 fn large_copy_compilation(source: &str) -> crate::Compilation {
-    Compiler::shared().compile(CompileRequest::single_file(
+    Compiler::shared().compile_full_for_test(CompileRequest::single_file(
+        "main.gg",
+        source,
+        TargetName::X86_64Linux,
+    ))
+}
+
+fn compile_to_lir(source: &str) -> crate::Compilation {
+    Compiler::shared().compile_to_lir(CompileRequest::single_file(
         "main.gg",
         source,
         TargetName::X86_64Linux,
@@ -31,7 +39,7 @@ fn large_copy_warns_by_default() {
 
 #[test]
 fn large_copy_allow_suppresses_the_lint() {
-    let compilation = large_copy_compilation(
+    let compilation = compile_to_lir(
         "fn take(xs: [uint; 9]) { _ = xs }\n#[allow(large_copy)]\nfn main() { take([0; 9]) }",
     );
     assert!(compilation.is_success());
@@ -49,7 +57,7 @@ fn large_copy_allow_suppresses_the_lint() {
 #[test]
 fn large_copy_exact_limit_is_not_reported() {
     let compilation =
-        large_copy_compilation("fn take(xs: [uint; 8]) { _ = xs }\nfn main() { take([0; 8]) }");
+        compile_to_lir("fn take(xs: [uint; 8]) { _ = xs }\nfn main() { take([0; 8]) }");
     assert!(compilation.is_success());
     assert!(
         compilation
@@ -80,14 +88,10 @@ fn large_copy_deny_fails_without_an_image_plan() {
 }
 
 #[test]
-#[ignore = "slow full compilation"]
+#[ignore]
 fn borrowed_fields_keep_original_places_without_large_copy() {
     let source = "#[repr(C, align(64))]\nstruct Large { head: uint, tail: [uint; 9] }\n#[used]\n#[deny(large_copy)]\nfn field(value: &Large) &uint = &value.head\nfn main() {}";
-    let result = Compiler::shared().compile(CompileRequest::single_file(
-        "main.gg",
-        source,
-        TargetName::X86_64Linux,
-    ));
+    let result = compile_to_lir(source);
     assert!(result.is_success(), "{:?}", result.diagnostics().items());
     assert!(
         result
@@ -100,11 +104,7 @@ fn borrowed_fields_keep_original_places_without_large_copy() {
     );
 
     let copying = "struct Large { bytes: [uint; 9] }\n#[used]\n#[deny(large_copy)]\nfn copy(value: &Large) Large = *value\nfn main() {}";
-    let result = Compiler::shared().compile(CompileRequest::single_file(
-        "main.gg",
-        copying,
-        TargetName::X86_64Linux,
-    ));
+    let result = large_copy_compilation(copying);
     assert!(!result.is_success());
     assert!(result.image_plan().is_none());
     assert!(
@@ -124,11 +124,7 @@ fn borrowed_fields_keep_original_places_without_large_copy() {
 fn string_copy_seals() {
     let string =
         "fn take(s: string) { _ = s }\nfn main() { let t: string = \"ok\"\n take(t)\n _ = t }";
-    let compilation = Compiler::shared().compile(CompileRequest::single_file(
-        "main.gg",
-        string,
-        TargetName::X86_64Linux,
-    ));
+    let compilation = compile_to_lir(string);
     assert!(
         compilation.is_success(),
         "{:?}",
@@ -143,11 +139,7 @@ fn string_copy_seals() {
 #[test]
 fn chan_shares_identity() {
     let chan = "fn take(c: chan[int]) { _ = c }\nfn main() { let c: chan[int] = chan[int](1)\n take(c)\n _ = c }";
-    let compilation = Compiler::shared().compile(CompileRequest::single_file(
-        "main.gg",
-        chan,
-        TargetName::X86_64Linux,
-    ));
+    let compilation = compile_to_lir(chan);
     assert!(
         compilation.is_success(),
         "{:?}",
@@ -168,7 +160,7 @@ fn body_named<'a>(dump: &'a str, owner: &str, marker: &str) -> &'a str {
 #[test]
 #[ignore = "slow full compilation"]
 fn image_plan_reports_gir_counts() {
-    let compilation = Compiler::shared().compile(CompileRequest::single_file(
+    let compilation = Compiler::shared().compile_full_for_test(CompileRequest::single_file(
         "main.gg",
         "fn main() { _ = 1 }",
         TargetName::X86_64Linux,
@@ -184,12 +176,12 @@ fn image_plan_reports_gir_counts() {
 #[test]
 #[ignore = "slow full compilation"]
 fn action_key_includes_generic_gir() {
-    let first = Compiler::shared().compile(CompileRequest::single_file(
+    let first = Compiler::shared().compile_full_for_test(CompileRequest::single_file(
         "main.gg",
         "fn main() { _ = 1 }",
         TargetName::X86_64Linux,
     ));
-    let second = Compiler::shared().compile(CompileRequest::single_file(
+    let second = Compiler::shared().compile_full_for_test(CompileRequest::single_file(
         "main.gg",
         "fn main() { _ = 2 }",
         TargetName::X86_64Linux,
