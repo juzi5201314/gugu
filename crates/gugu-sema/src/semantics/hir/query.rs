@@ -53,6 +53,7 @@ pub(super) fn lower(
             entry,
             InstalledBlock {
                 fragment: prefix.map(|prefix| prefix.hir()),
+                type_index: prefix.map(|prefix| prefix.type_index()),
                 builtin,
             },
         )

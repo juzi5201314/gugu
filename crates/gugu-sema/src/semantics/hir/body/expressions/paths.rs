@@ -144,7 +144,16 @@ impl BodyBuilder<'_, '_, '_, '_> {
                 .iter()
                 .map(|segment| self.compiler.model.name(self.module, segment.name))
                 .collect();
-            let definition = self.compiler.model.resolve(self.module, &names)?;
+            let (definition, root_len) = (1..=names.len())
+                .rev()
+                .find_map(|len| {
+                    self.compiler
+                        .model
+                        .resolve(self.module, &names[..len])
+                        .ok()
+                        .map(|definition| (definition, len))
+                })
+                .ok_or_else(|| self.error("值路径缺少已解析声明根"))?;
             let ty = if let Some(expected) = expected
                 && matches!(
                     self.compiler.model.modules[definition.module].arena.items
@@ -159,7 +168,7 @@ impl BodyBuilder<'_, '_, '_, '_> {
             (
                 hir::Res::Def(self.compiler.identities.item(definition)),
                 ty,
-                &segments[segments.len()..],
+                &segments[root_len..],
             )
         };
         let mut steps = vec![Step::new(StepKind::Root(root), self.type_id(&ty)?)];
@@ -273,9 +282,32 @@ impl BodyBuilder<'_, '_, '_, '_> {
                 let segments = self.arena().paths[path.0 as usize]
                     .segments
                     .as_slice(&self.arena().segments);
+                let span = &self.arena().paths[path.0 as usize].span;
+                let first = self.compiler.model.name(self.module, segments[0].name);
+                if !self.names.contains_key(first) {
+                    let parts = self.compiler.model.path(self.module, path);
+                    if let Some((ty, constructor)) = self.compiler.model.constructor(
+                        self.module,
+                        &parts[..parts.len() - 1],
+                        None,
+                    )? && constructor.fields.is_empty()
+                    {
+                        let id = self.reserve(&ty)?;
+                        self.set_expression(
+                            id,
+                            hir::ExprKind::Construct {
+                                variant: checked_id(constructor.index)?,
+                                fields: 0..0,
+                            },
+                            self.scope,
+                            span,
+                            0,
+                        )?;
+                        return Ok(id);
+                    }
+                }
                 let (steps, ty) = self.path_steps(&segments[..segments.len() - 1], None)?;
                 let id = self.reserve(&ty)?;
-                let span = &self.arena().paths[path.0 as usize].span;
                 let (kind, effects) = self.emit_path(callee, id, steps, span)?;
                 self.set_expression(id, kind, self.scope, span, effects)?;
                 Ok(id)

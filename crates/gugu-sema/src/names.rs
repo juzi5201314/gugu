@@ -90,7 +90,7 @@ pub fn analyze_with_prefix(
         definitions
     };
     diagnose_definition_conflicts(&candidates.values, &mut diagnostics);
-    let module_bindings = module_bindings(&definitions);
+    let module_bindings = module_bindings(definitions.iter());
     let mut pending = collect_imports(external_packages, modules, &mut diagnostics, prefix);
     let implicit = prelude::implicit_imports(modules, &pending, &module_bindings);
     pending.extend(implicit);
@@ -115,12 +115,16 @@ pub fn analyze_with_prefix(
         &reexports,
         &mut diagnostics,
     ));
-    diagnose_import_conflicts(&definitions, &imports, &mut diagnostics);
+    let definition_spans = prefix
+        .map(|prefix| prefix.names().definition_spans.clone())
+        .unwrap_or_default();
+    let import_spans = prefix
+        .map(|prefix| prefix.names().import_spans.clone())
+        .unwrap_or_default();
+    let resolution =
+        NameResolution::with_session_spans(definitions, imports, definition_spans, import_spans);
+    diagnose_import_conflicts(&resolution, &mut diagnostics);
     if diagnostics.is_empty() {
-        let resolution = NameResolution {
-            definitions,
-            imports,
-        };
         debug_assert!(resolution_is_valid(&resolution));
         Ok(resolution)
     } else {
@@ -607,7 +611,7 @@ fn assign_def_ids(
         .collect()
 }
 
-fn module_bindings(definitions: &[Definition]) -> ModuleBindings {
+fn module_bindings<'a>(definitions: impl IntoIterator<Item = &'a Definition>) -> ModuleBindings {
     let mut bindings = BTreeMap::<_, Vec<_>>::new();
     for definition in definitions {
         if !definition.module_binding {
@@ -1079,46 +1083,45 @@ fn resolve_local_item(
     Err(Diagnostic::error(code, message, Some(import.span.clone())))
 }
 
-fn diagnose_import_conflicts(
-    definitions: &[Definition],
-    imports: &[ResolvedImport],
-    diagnostics: &mut Vec<Diagnostic>,
-) {
+fn diagnose_import_conflicts(resolution: &NameResolution, diagnostics: &mut Vec<Diagnostic>) {
     let mut occupied = BTreeMap::<(ModuleId, Namespace, String), Span>::new();
-    for definition in definitions {
+    for (index, definition) in resolution.definitions.iter().enumerate() {
         let (Some(namespace), Some(name)) = (definition.namespace, definition.name.as_ref()) else {
             continue;
         };
         if definition.module_binding {
             occupied.insert(
                 (definition.module, namespace, name.clone()),
-                definition.span.clone(),
+                resolution.definition_span(index).clone(),
             );
         }
     }
     let mut external_aliases = BTreeSet::new();
-    for import in imports {
+    for (index, import) in resolution.imports.iter().enumerate() {
         if import.namespace == Namespace::External {
             if !external_aliases.insert((import.module, import.alias.clone()))
                 || occupied
                     .keys()
                     .any(|(module, _, name)| *module == import.module && name == &import.alias)
             {
-                push_import_conflict(import, diagnostics);
+                push_import_conflict(import, resolution.import_span(index), diagnostics);
             }
             continue;
         }
         let key = (import.module, import.namespace, import.alias.clone());
-        if occupied.insert(key, import.span.clone()).is_some() {
-            push_import_conflict(import, diagnostics);
+        if occupied
+            .insert(key, resolution.import_span(index).clone())
+            .is_some()
+        {
+            push_import_conflict(import, resolution.import_span(index), diagnostics);
         }
     }
 }
 
-fn push_import_conflict(import: &ResolvedImport, diagnostics: &mut Vec<Diagnostic>) {
+fn push_import_conflict(import: &ResolvedImport, span: &Span, diagnostics: &mut Vec<Diagnostic>) {
     diagnostics.push(Diagnostic::error(
         DiagnosticCode::ImportConflict,
         format!("导入别名 `{}` 与当前模块已有名称冲突", import.alias),
-        Some(import.span.clone()),
+        Some(span.clone()),
     ));
 }

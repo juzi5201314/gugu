@@ -1,9 +1,8 @@
 use super::*;
 
-#[test]
-fn windows_command_line_round_trips_empty_quotes_slashes_and_surrogates() {
+pub(super) fn windows_command_line_round_trips_empty_quotes_slashes_and_surrogates() {
     let (hir, bodies) = super::super::harness::runtime_bodies_for(TargetName::X86_64Windows);
-    let mut h = Harness::from_bodies(&hir, &bodies);
+    let mut h = Harness::from_bodies(hir, bodies);
     let mut m = vec![0; 131072];
     let command = r#""C:\app name\probe.exe" "" "a b" "x\"y" "tail\\" "汉字🙂" "$();""#;
     let bytes: Vec<_> = command
@@ -56,9 +55,7 @@ fn windows_command_line_round_trips_empty_quotes_slashes_and_surrogates() {
     }
 }
 
-#[test]
-fn environment_names_reject_invalid_bytes_before_any_native_call() {
-    let output = protocol(TargetName::X86_64Linux);
+pub(super) fn environment_names_reject_invalid_bytes_before_any_native_call(output: &Protocol) {
     let mut h = output.harness();
     let mut m = vec![0; 1048576];
     for bytes in [&b""[..], b"A=B", b"A\0B", b"A", b"a", &[255]] {
