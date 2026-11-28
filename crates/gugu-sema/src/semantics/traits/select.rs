@@ -201,8 +201,18 @@ impl Model<'_> {
                 ));
             }
         }
+        if self.forbids_float_remainder(ty, interface) {
+            return Err(self.error(0, "浮点不能实现 Rem 或 RemAssign"));
+        }
         Ok(selected)
     }
+    pub(super) fn forbids_float_remainder(&self, ty: &Ty, interface: &TraitRef) -> bool {
+        let definition = &self.traits.interfaces[interface.id];
+        definition.definition.is_none()
+            && matches!(ty, Ty::Float(_))
+            && matches!(definition.name.as_str(), "Rem" | "RemAssign")
+    }
+
     pub(super) fn builtin_trait(&self, ty: &Ty, interface: &TraitRef) -> bool {
         let definition = &self.traits.interfaces[interface.id];
         if definition.definition.is_some() {
@@ -266,12 +276,10 @@ impl Model<'_> {
                     | "Sub"
                     | "Mul"
                     | "Div"
-                    | "Rem"
                     | "AddAssign"
                     | "SubAssign"
                     | "MulAssign"
                     | "DivAssign"
-                    | "RemAssign"
             ),
             Ty::String => matches!(name, "Add" | "AddAssign"),
             _ => false,

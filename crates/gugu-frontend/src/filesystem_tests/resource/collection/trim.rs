@@ -30,10 +30,15 @@ fn trim(harness: &mut ResourceHarness<'_>, memory: &mut Vec<u8>) -> u64 {
     )[0]
 }
 
-#[test]
+pub(super) fn run_all() {
+    pressure_decommit_preserves_failed_mapping_and_recommits_reused_block();
+    large_object_mapping_charges_heap_partition_without_file_subtotal();
+    region_allocation_commits_data_and_reset_removes_only_payload();
+    pressure_decommit_rejects_leases_candidates_objects_and_active_allocator();
+}
+
 fn pressure_decommit_preserves_failed_mapping_and_recommits_reused_block() {
-    let (hir, bodies) = runtime_bodies();
-    let mut harness = ResourceHarness::from_bodies(&hir, &bodies);
+    let mut harness = runtime_harness();
     harness.gc_config = CONFIG;
     harness.block_budget = 32768;
     let (mut memory, _, record) = empty_block();
@@ -86,10 +91,8 @@ fn pressure_decommit_preserves_failed_mapping_and_recommits_reused_block() {
     );
 }
 
-#[test]
 fn large_object_mapping_charges_heap_partition_without_file_subtotal() {
-    let (hir, bodies) = runtime_bodies();
-    let mut harness = ResourceHarness::from_bodies(&hir, &bodies);
+    let mut harness = runtime_harness();
     harness.gc_config = CONFIG;
     harness.block_budget = 32768;
     let (mut memory, _) = graph_memory();
@@ -119,10 +122,8 @@ fn large_object_mapping_charges_heap_partition_without_file_subtotal() {
     );
 }
 
-#[test]
 fn region_allocation_commits_data_and_reset_removes_only_payload() {
-    let (hir, bodies) = runtime_bodies();
-    let mut harness = ResourceHarness::from_bodies(&hir, &bodies);
+    let mut harness = runtime_harness();
     harness.gc_config = CONFIG;
     harness.block_budget = 32768;
     harness.reserve_result = 131072;
@@ -159,9 +160,7 @@ fn region_allocation_commits_data_and_reset_removes_only_payload() {
     assert!(harness.decommitted.is_empty());
 }
 
-#[test]
 fn pressure_decommit_rejects_leases_candidates_objects_and_active_allocator() {
-    let output = compile();
     let (original, meta, record) = empty_block();
     // incoming、allocator、scanner、evacuation、candidate、state、commit、live line、object、TLAB、pressure。
     for (address, value) in [
@@ -177,7 +176,7 @@ fn pressure_decommit_rejects_leases_candidates_objects_and_active_allocator() {
         (PROCESSOR + 3520, ARENA as u32),
         (PROCESSOR + 3888, 0),
     ] {
-        let mut harness = ResourceHarness::new(&output);
+        let mut harness = runtime_harness();
         harness.gc_config = CONFIG;
         harness.block_budget = 32768;
         let mut memory = original.clone();

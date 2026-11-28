@@ -12,6 +12,7 @@ test-support = []
 blake3 = "1"
 serde.workspace = true
 serde_json.workspace = true
+smallvec.workspace = true
 
 gugu-base = { path = "../gugu-base" }
 gugu-gir = { path = "../gugu-gir" }

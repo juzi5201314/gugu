@@ -13,9 +13,7 @@ fn setup(h: &mut Harness<'_>, m: &mut Vec<u8>) -> (u64, u64) {
     (control, node)
 }
 
-#[test]
-fn linux_pipe_consumes_short_completion_before_cancellation() {
-    let output = protocol(TargetName::X86_64Linux);
+pub(super) fn linux_pipe_consumes_short_completion_before_cancellation(output: &Protocol) {
     let mut h = output.harness();
     let mut m = vec![0; 1048576];
     let (control, node) = setup(&mut h, &mut m);
@@ -32,9 +30,7 @@ fn linux_pipe_consumes_short_completion_before_cancellation() {
     assert!(h.script.is_empty());
 }
 
-#[test]
-fn windows_cancel_keeps_overlapped_request_until_terminal_completion() {
-    let output = protocol(TargetName::X86_64Windows);
+pub(super) fn windows_cancel_keeps_overlapped_request_until_terminal_completion(output: &Protocol) {
     for closing in [false, true] {
         let mut h = output.harness();
         let mut m = vec![0; 1048576];
@@ -88,9 +84,7 @@ fn windows_cancel_keeps_overlapped_request_until_terminal_completion() {
     }
 }
 
-#[test]
-fn pipe_round_robin_reaches_cancelled_tail_beyond_service_budget() {
-    let output = protocol(TargetName::X86_64Linux);
+pub(super) fn pipe_round_robin_reaches_cancelled_tail_beyond_service_budget(output: &Protocol) {
     let mut h = output.harness();
     let mut m = vec![0; 1048576];
     let (_, tail) = setup(&mut h, &mut m);
@@ -107,9 +101,9 @@ fn pipe_round_robin_reaches_cancelled_tail_beyond_service_budget() {
     assert!(h.calls.is_empty(), "未提交取消不占 blocking credit");
 }
 
-#[test]
-fn pipe_eof_short_write_and_broken_pipe_have_distinct_terminal_results() {
-    let output = protocol(TargetName::X86_64Linux);
+pub(super) fn pipe_eof_short_write_and_broken_pipe_have_distinct_terminal_results(
+    output: &Protocol,
+) {
     for (operation, count, error) in [(3, 0, 0), (4, 3, 0), (4, 0, 32)] {
         let mut h = output.harness();
         let mut m = vec![0; 1048576];

@@ -659,6 +659,10 @@ fn run_compile(file: Option<PathBuf>, options: &GlobalArgs, check_only: bool) ->
         return 2;
     }
     let source = file;
+    #[expect(
+        clippy::disallowed_methods,
+        reason = "CLI build/check 需要完整编译结果和镜像计划"
+    )]
     let compilation = Compiler::with_artifacts(&EMBEDDED_ARTIFACTS)
         .compile(CompileRequest::single_file_path(source.clone(), target));
     print_compilation(&compilation, check_only, options, target);
@@ -829,6 +833,10 @@ pub(crate) fn compile_package(
                 .with_generated_modules(output.modules.clone())
                 .with_native_link(output.native_link());
         }
+        #[expect(
+            clippy::disallowed_methods,
+            reason = "CLI build 需要完整编译结果和镜像计划"
+        )]
         let compilation = compiler.compile(request);
         // 头行只属于 text 输出；json 与 json-diagnostic-short 保持纯事件流。
         if !options.quiet && format == OutputFormat::Text {

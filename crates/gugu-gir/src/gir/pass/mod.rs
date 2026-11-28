@@ -130,8 +130,9 @@ pub fn run(
         }
         stats.passes += 1;
     }
-    world.fingerprint = super::world_fingerprint(
+    world.fingerprint = super::world_fingerprint_cached(
         &world.bodies,
+        &world.body_fingerprints,
         &world.fragments,
         world.hir_fingerprint,
         &world.placement,

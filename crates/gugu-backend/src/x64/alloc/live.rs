@@ -40,7 +40,6 @@ use std::ops::Range;
 
 use super::super::copies::Copy;
 use super::super::inst::{Inst, Operand};
-use super::super::layout;
 use super::super::lower::Lowered;
 use super::super::reg::{Clobbers, FRAME_SLOT_BASE, Gpr, Reg};
 use super::super::select::{self, SelectedFunction, SiteKind};
@@ -271,7 +270,7 @@ pub fn analyze(body: &Body, selected: &SelectedFunction) -> Result<LiveInfo, All
         // 寄存器与溢出槽都会被后续值复用，φ/返回搬运随即读到别人的值。
         if last > first {
             let point = points.last().expect("站点至少一个点位");
-            for edge in terminator_edges(body, &body.blocks[lir].terminator) {
+            for edge in body.blocks[lir].terminator.edges(&body.switch_cases) {
                 if body.edges[edge.index()].unwind {
                     // unwind 边的实参只在异常路径上有意义，把它们当作正常路径的使用会让
                     // 未定义于该路径的值被判为活跃。异常路径的活跃性由 `visit_site` 覆盖。
@@ -312,8 +311,7 @@ pub fn analyze(body: &Body, selected: &SelectedFunction) -> Result<LiveInfo, All
     let normalized = crate::regalloc::live::analyze(crate::regalloc::live::Program {
         successors: (0..body.blocks.len())
             .map(|index| {
-                layout::successors(body, BlockId(index as u32))
-                    .iter()
+                body.successors(BlockId(crate::lir::body::id(index)))
                     .map(|id| id.index())
                     .collect()
             })
@@ -738,30 +736,6 @@ fn anchor_coverage(
         }
     }
     Ok(())
-}
-/// 终结符的全部出边；与 `layout::successors` 覆盖同一组边，但保留边本身。
-fn terminator_edges(body: &Body, terminator: &Terminator) -> Vec<crate::lir::body::EdgeId> {
-    match terminator {
-        Terminator::Jump(edge) => vec![*edge],
-        Terminator::Branch { yes, no, .. } => vec![*yes, *no],
-        Terminator::Switch {
-            cases, otherwise, ..
-        } => {
-            let mut edges: Vec<crate::lir::body::EdgeId> = body.switch_cases
-                [crate::lir::body::range(cases)]
-            .iter()
-            .map(|(_, edge)| *edge)
-            .collect();
-            edges.push(*otherwise);
-            edges
-        }
-        Terminator::Invoke { normal, unwind, .. } => vec![*normal, *unwind],
-        Terminator::Return { .. }
-        | Terminator::ResumePanic { .. }
-        | Terminator::TailCall { .. }
-        | Terminator::Trap { .. }
-        | Terminator::Unreachable { .. } => Vec::new(),
-    }
 }
 
 /// 把调用点 outgoing 区里的指针字记到对应的 `call` 点位上。

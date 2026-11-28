@@ -8,7 +8,7 @@ description = "Gugu project model: manifests, workspaces, dependency resolution,
 blake3 = "1"
 flate2 = "1"
 serde.workspace = true
-sha2 = "0.10"
+sha2.workspace = true
 tar = "0.4"
 toml.workspace = true
 gugu-base = { path = "../gugu-base" }

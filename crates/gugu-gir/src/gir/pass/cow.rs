@@ -2,7 +2,6 @@
 use super::super::body::{BlockId, LocalId, ResourceActionKind, Rvalue, StatementKind};
 use super::{Editor, LocalSet, Outcome};
 use crate::Diagnostic;
-use std::collections::BTreeMap;
 
 pub fn run(editor: &mut Editor) -> Result<Outcome, Diagnostic> {
     let mut changed = remove_lease_pairs(editor);
@@ -57,10 +56,30 @@ fn remove_lease_pairs(editor: &mut Editor) -> bool {
 }
 
 fn remove_dead_copies(editor: &mut Editor) -> Result<bool, Diagnostic> {
-    let (generated_by_block, kill) = block_transfer(editor);
-    let live_in = liveness(editor, &generated_by_block, &kill);
+    let blocks = editor.live_blocks();
+    let has_cow = blocks.iter().any(|&block| {
+        let block_data = editor.block(block).expect("活跃 block");
+        !block_data.cleanup
+            && block_data.statements.iter().any(|&index| {
+                matches!(
+                    &editor.statement(index).kind,
+                    StatementKind::Assign(place, Rvalue::CowSnapshot(source))
+                        if place.is_local() && place.local != source.local
+                )
+            })
+    });
+    if !has_cow {
+        return Ok(false);
+    }
+    let block_slots = blocks
+        .iter()
+        .map(|block| block.index() + 1)
+        .max()
+        .unwrap_or(0);
+    let (generated_by_block, kill) = block_transfer(editor, &blocks, block_slots);
+    let live_in = liveness(editor, &blocks, block_slots, &generated_by_block, &kill);
     let mut changed = false;
-    for block in editor.live_blocks() {
+    for block in blocks {
         if editor.block(block).expect("活跃 block").cleanup {
             // cleanup 序列由 `cleanup_sequences` verifier 逐条重建，不能删除动作。
             continue;
@@ -95,14 +114,20 @@ fn remove_dead_copies(editor: &mut Editor) -> Result<bool, Diagnostic> {
     Ok(changed)
 }
 
-fn block_transfer(editor: &Editor) -> (BTreeMap<BlockId, LocalSet>, BTreeMap<BlockId, LocalSet>) {
-    let mut generated_by_block = BTreeMap::new();
-    let mut kill = BTreeMap::new();
-    for block in editor.live_blocks() {
+fn block_transfer(
+    editor: &Editor,
+    blocks: &[BlockId],
+    block_slots: usize,
+) -> (Vec<LocalSet>, Vec<LocalSet>) {
+    // BlockId 是稠密连续下标，按 Vec 索引替代 BTreeMap 避免逐块树查。
+    let mut generated_by_block = vec![LocalSet::new(); block_slots];
+    let mut kill = vec![LocalSet::new(); block_slots];
+    for &block in blocks {
         let mut generated = LocalSet::new();
         let mut killed = LocalSet::new();
+        let mut reads = LocalSet::new();
         for (_, statement) in editor.statements(block) {
-            let mut reads = LocalSet::new();
+            reads.clear();
             super::statement_reads(statement, &mut reads);
             for read in reads.iter() {
                 if !killed.contains(read) {
@@ -113,45 +138,39 @@ fn block_transfer(editor: &Editor) -> (BTreeMap<BlockId, LocalSet>, BTreeMap<Blo
                 killed.insert(defined);
             }
         }
-        generated_by_block.insert(block, generated);
-        kill.insert(block, killed);
+        generated_by_block[block.index()] = generated;
+        kill[block.index()] = killed;
     }
     (generated_by_block, kill)
 }
 
 fn liveness(
     editor: &Editor,
-    generated_by_block: &BTreeMap<BlockId, LocalSet>,
-    kill: &BTreeMap<BlockId, LocalSet>,
-) -> BTreeMap<BlockId, LocalSet> {
-    let blocks = editor.live_blocks();
-    let mut live_in: BTreeMap<BlockId, LocalSet> = blocks
-        .iter()
-        .map(|block| (*block, LocalSet::new()))
-        .collect();
+    blocks: &[BlockId],
+    block_slots: usize,
+    generated_by_block: &[LocalSet],
+    kill: &[LocalSet],
+) -> Vec<LocalSet> {
+    let mut live_in = vec![LocalSet::new(); block_slots];
     let mut out = LocalSet::new();
     let mut terminator_reads = LocalSet::new();
     loop {
         let mut changed = false;
-        for block in &blocks {
+        for &block in blocks {
             out.clear();
-            for successor in editor.terminator(*block).successors() {
-                if let Some(successor_live) = live_in.get(&successor) {
+            for successor in editor.terminator(block).successors() {
+                if let Some(successor_live) = live_in.get(successor.index()) {
                     out.union_with(successor_live);
                 }
             }
-            if let Some(generated) = generated_by_block.get(block) {
-                out.union_with(generated);
-            }
-            if let Some(kill) = kill.get(block) {
-                out.subtract(kill);
-            }
+            out.union_with(&generated_by_block[block.index()]);
+            out.subtract(&kill[block.index()]);
             // 终结符读取的值也必须活跃。
             terminator_reads.clear();
-            terminator_locals(editor, *block, &mut terminator_reads);
+            terminator_locals(editor, block, &mut terminator_reads);
             out.union_with(&terminator_reads);
-            if live_in[block] != out {
-                live_in.insert(*block, out.clone());
+            if live_in[block.index()] != out {
+                live_in[block.index()] = out.clone();
                 changed = true;
             }
         }
@@ -161,10 +180,10 @@ fn liveness(
     }
 }
 
-fn live_out(editor: &Editor, block: BlockId, live_in: &BTreeMap<BlockId, LocalSet>) -> LocalSet {
+fn live_out(editor: &Editor, block: BlockId, live_in: &[LocalSet]) -> LocalSet {
     let mut out = LocalSet::new();
     for successor in editor.terminator(block).successors() {
-        if let Some(successor_live) = live_in.get(&successor) {
+        if let Some(successor_live) = live_in.get(successor.index()) {
             out.union_with(successor_live);
         }
     }

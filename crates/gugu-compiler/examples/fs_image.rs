@@ -19,6 +19,7 @@ fn main() {
             NativeImport::function(library, symbol)
         })
         .collect();
+    #[expect(clippy::disallowed_methods, reason = "示例要写出可执行文件系统镜像")]
     let compilation = Compiler::with_artifacts(&gugu_compiler::EMBEDDED_ARTIFACTS).compile(
         CompileRequest::single_file("main.gg", text, target).with_native_link(NativeLink {
             imports,
