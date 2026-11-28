@@ -508,7 +508,7 @@ impl Builder<'_> {
         }
         self.loops.push(LoopFrame {
             scope,
-            header,
+            continue_target: header,
             exit,
             value: dest,
         });
@@ -597,7 +597,7 @@ impl Builder<'_> {
         self.bind_pattern(payload, pattern)?;
         self.loops.push(LoopFrame {
             scope,
-            header,
+            continue_target: header,
             exit,
             value: None,
         });
@@ -643,6 +643,7 @@ impl Builder<'_> {
         let header = self.fresh(false);
         let exit = self.fresh(false);
         let body_block = self.fresh(false);
+        let advance = self.fresh(false);
         self.goto(header);
         self.switch_to(header);
         let cond = self.temp(self.primitives.bool_ty);
@@ -666,24 +667,26 @@ impl Builder<'_> {
         }
         self.loops.push(LoopFrame {
             scope: self.expr_scope(id),
-            header,
+            continue_target: advance,
             exit,
             value: None,
         });
         let _ = self.emit_expr(body)?;
         if !self.terminated() {
-            let one =
-                self.const_operand(self.owner.locals[local.index()].ty, ConstValue::Integer(1));
-            self.assign(
-                Place::local(iv),
-                Rvalue::BinaryOp {
-                    op: BinaryOp::Add,
-                    left: copy_of(iv),
-                    right: one,
-                },
-            );
-            self.goto(header);
+            self.goto(advance);
         }
+        // 正常结束与 continue 完成清理后共用推进块，不能绕过游标更新。
+        self.switch_to(advance);
+        let one = self.const_operand(self.owner.locals[local.index()].ty, ConstValue::Integer(1));
+        self.assign(
+            Place::local(iv),
+            Rvalue::BinaryOp {
+                op: BinaryOp::Add,
+                left: copy_of(iv),
+                right: one,
+            },
+        );
+        self.goto(header);
         self.loops.pop();
         self.switch_to(exit);
         self.init_stores.truncate(init_depth);
@@ -714,6 +717,7 @@ impl Builder<'_> {
         let header = self.fresh(false);
         let exit = self.fresh(false);
         let body_block = self.fresh(false);
+        let advance = self.fresh(false);
         self.goto(header);
         self.switch_to(header);
         let cond = self.temp(self.primitives.bool_ty);
@@ -743,23 +747,25 @@ impl Builder<'_> {
         self.bind_pattern(element, pattern)?;
         self.loops.push(LoopFrame {
             scope: self.expr_scope(id),
-            header,
+            continue_target: advance,
             exit,
             value: None,
         });
         let _ = self.emit_expr(body)?;
         if !self.terminated() {
-            let one = self.const_operand(int, ConstValue::Integer(1));
-            self.assign(
-                Place::local(index),
-                Rvalue::BinaryOp {
-                    op: BinaryOp::Add,
-                    left: copy_of(index),
-                    right: one,
-                },
-            );
-            self.goto(header);
+            self.goto(advance);
         }
+        self.switch_to(advance);
+        let one = self.const_operand(int, ConstValue::Integer(1));
+        self.assign(
+            Place::local(index),
+            Rvalue::BinaryOp {
+                op: BinaryOp::Add,
+                left: copy_of(index),
+                right: one,
+            },
+        );
+        self.goto(header);
         self.loops.pop();
         self.switch_to(exit);
         let dest = self.temp(self.expr_ty(id));
@@ -1000,7 +1006,7 @@ impl Builder<'_> {
                 .iter()
                 .rev()
                 .find(|frame| frame.scope == scope)
-                .map(|frame| frame.header),
+                .map(|frame| frame.continue_target),
             hir::ExitTarget::Try(scope) => {
                 if let Some(frame) = self.tries.iter().rev().find(|frame| frame.scope == scope)
                     && let (Some(slot), Some(value)) = (frame.value, value)

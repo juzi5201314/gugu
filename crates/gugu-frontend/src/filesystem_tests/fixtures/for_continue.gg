@@ -1,0 +1,104 @@
+fn range_count(n: int) int {
+    let count = 0
+    for i in 0..n {
+        count += 1
+        continue
+    }
+    count
+}
+
+fn range_skip(n: int) int {
+    let count = 0
+    for i in 0..n {
+        if i == 2 { continue }
+        count += 1
+    }
+    count
+}
+
+fn array_skip(skip: int) int {
+    let total = 0
+    for value in [1, 2, 3, 4] {
+        if value == skip { continue }
+        total += value
+    }
+    total
+}
+
+fn slice_skip(values: &[int], skip: int) int {
+    let total = 0
+    for value in values {
+        if value == skip { continue }
+        total += value
+    }
+    total
+}
+
+fn slice_case(skip: int) int {
+    let values = [1, 2, 3, 4]
+    slice_skip(&values, skip)
+}
+
+fn nested(n: int) int {
+    let total = 0
+    for i in 0..n {
+        if i == 1 { continue }
+        for j in 0..n {
+            if j == 1 { continue }
+            total += i * 10 + j
+        }
+    }
+    total
+}
+
+fn range_cleanup(n: int) int {
+    let total = 0
+    for i in 0..n {
+        defer { total += i + 1 }
+        if i == 2 { continue }
+        total += 10
+    }
+    total
+}
+
+fn array_cleanup(skip: int) int {
+    let total = 0
+    for value in [1, 2, 3, 4] {
+        defer { total += value }
+        if value == skip { continue }
+        total += 10
+    }
+    total
+}
+
+fn while_continue(n: int) int {
+    let i = 0
+    let count = 0
+    while i < n {
+        i += 1
+        if i == 2 { continue }
+        count += 1
+    }
+    count
+}
+
+fn range_break(n: int) int {
+    let count = 0
+    for i in 0..n {
+        if i == 2 { break }
+        count += 1
+    }
+    count
+}
+
+fn main() {
+    _ = range_count(5)
+    _ = range_skip(5)
+    _ = array_skip(2)
+    _ = slice_case(2)
+    _ = nested(3)
+    _ = range_cleanup(5)
+    _ = array_cleanup(2)
+    _ = while_continue(5)
+    _ = range_break(5)
+}

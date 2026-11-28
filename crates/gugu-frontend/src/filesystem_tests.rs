@@ -10,6 +10,7 @@ mod debug_builders;
 mod docs_examples;
 mod dyn_erasure;
 mod float_formatting;
+mod for_continue;
 mod formatting;
 mod harness;
 mod hashing;

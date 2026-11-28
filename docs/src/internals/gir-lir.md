@@ -203,6 +203,8 @@ HIR同样提供保持源码臂优先级的 pattern matrix。GIR把它编译成�
 
 构造器把 HIR `CleanupPlan` intern 成共享 cleanup block：相同 `(chain, action 序列, destination)` 复用入口，终点不同的链不能共用。每个出口重新降低 defer body，表达式缓存不跨清理出口复用。`break` / `continue` 按循环表达式自身的 scope 查找控制流帧，不能使用嵌套块的 scope；目标丢失时报 invariant。`defer ret` 的 `Flag` 出口以 `Assign`+`SwitchInt` 守卫，`Chain` 出口以 `DeferChainPush`/`Pop`/`Action`/`Env` 消费。隐式返回走 `Owner.return_plan` 再 `Return`。`LocalId(0)` 是返回槽，参数按 HIR 绑定顺序，其余为用户 local 与临时值。
 
+循环帧显式记录 `continue` 目标：`while` / `loop` 指向头块，普通迭代器 `for` 指向调用 `next()` 的头块；Range、数组和切片的原生 `for` 指向独立的游标推进块。循环体正常结束与 `continue` 的清理链都在推进块汇合，递增一次后才返回条件块；即使循环体以无条件 `continue` 终止，也必须生成该推进块。`break` 的清理链直接连接退出块。
+
 `AbstractAnalysis` 在 generic body 上求固定点，证明写入 `AnalysisWorldV1.proofs`。单态化替换仍由 `InstantiateGir` 从 HIR 收集边；不得从 HIR 再造一份平行分析 CFG。
 
 ### 值传递与 placement 展开

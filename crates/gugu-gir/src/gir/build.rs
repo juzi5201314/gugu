@@ -42,7 +42,7 @@ struct PendingBlock {
 
 struct LoopFrame {
     scope: hir::ScopeId,
-    header: BlockId,
+    continue_target: BlockId,
     exit: BlockId,
     value: Option<LocalId>,
 }
