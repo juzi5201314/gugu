@@ -1,0 +1,7 @@
+//! #112：不同浮点常量的加法。
+use std.io.{println}
+fn main() {
+    let x = 1.5
+    let y = 2.25
+    println(x + y)
+}

@@ -1,0 +1,7 @@
+//! #112：无符号整数最大值不影响镜像启动。
+use std.io.{println}
+fn main() {
+    println("before")
+    let u: uint = 18446744073709551615
+    println(u)
+}

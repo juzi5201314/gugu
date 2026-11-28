@@ -1,0 +1,7 @@
+//! #112：转换前的默认 int 字面量越界必须在编译期拒绝。
+use std.io.{println}
+fn main() {
+    println("before")
+    let u = uint(18446744073709551615)
+    println(u)
+}

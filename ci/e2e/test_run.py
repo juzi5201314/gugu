@@ -74,3 +74,42 @@ class RunCaseTests(unittest.TestCase):
         self.run_case(inputs=inputs)
         executions = self.process.call_args_list[1:]
         self.assertEqual([call.args[0][1:] for call in executions], [list(args) for args in inputs])
+
+
+class CompileFailureTests(unittest.TestCase):
+    def setUp(self):
+        self.process = self.enterContext(patch.object(run.subprocess, "run"))
+        self.image_exists = self.enterContext(patch.object(Path, "exists", return_value=False))
+        self.enterContext(redirect_stdout(io.StringIO()))
+        self.enterContext(patch.object(run.sys, "stderr", Mock(buffer=io.BytesIO())))
+        self.diagnostic = "整数字面量超出目标类型范围"
+        self.process.return_value = subprocess.CompletedProcess(
+            [], 1, stdout=self.diagnostic.encode("utf-8"),
+        )
+
+    def run_case(self):
+        run.run_compile_failure(
+            Path("gugu"), "aarch64-macos", Path("scratch"), "invalid", self.diagnostic,
+        )
+
+    def test_expected_diagnostic_does_not_execute_an_image(self):
+        self.run_case()
+        self.assertEqual(self.process.call_count, 1)
+
+    def test_success_or_crash_is_not_a_compile_diagnostic(self):
+        for status in (0, -11):
+            with self.subTest(status=status):
+                self.process.return_value.returncode = status
+                with self.assertRaisesRegex(SystemExit, "预期编译失败"):
+                    self.run_case()
+
+    def test_unrelated_diagnostic_fails(self):
+        self.process.return_value.stdout = b"another error\n"
+        with self.assertRaisesRegex(SystemExit, "预期编译失败"):
+            self.run_case()
+        self.assertEqual(run.sys.stderr.buffer.getvalue(), b"another error\n")
+
+    def test_compile_failure_must_not_emit_an_image(self):
+        self.image_exists.return_value = True
+        with self.assertRaisesRegex(SystemExit, "不应生成可执行镜像"):
+            self.run_case()

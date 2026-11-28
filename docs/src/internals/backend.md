@@ -729,6 +729,11 @@ tail-area 检查和指针参数的栈图都复用同一 ABI placement，不按�
 该路径不依赖数据常量池。回归同时覆盖两个不同浮点常量的栈上拷贝、加法、乘法与
 `u64::MAX` 的无符号转换，并检查相应源程序生成的 Mach-O 启动载荷及入口参数中的 main RVA。
 
+`ci/e2e/fixtures/float_constants_{copy,add,mul,compare}.gg` 分别保留 #112 的独立程序形态，
+`uint_max.gg` 与 `uint_high_bit.gg` 验证合法无符号常量；四个目标的原生 E2E 均检查退出码与精确输出。
+`uint_conversion_out_of_range.gg` 保留原报告的转换写法，要求编译期报告整数字面量越界且不生成镜像。
+macOS 验证使用 `macos-15` ARM64 runner，经过实际 Mach-O 加载与运行时启动路径。
+
 ### A64 ARMv8.0 原子 lowering（4d.2）
 
 原子 load/store、exchange、fetch add/sub/and/or/xor、强 CAS 与 fence 复用既有

@@ -13,14 +13,32 @@ FIXTURES = Path(__file__).resolve().parent / "fixtures"
 TARGETS = ("x86_64-linux", "x86_64-windows", "aarch64-linux", "aarch64-macos")
 
 
-def run_case(gugu, target, scratch, name, expected_status, inputs=((),)):
+def build_case(gugu, target, scratch, name, **options):
     print(f"编译 {name} ({target})", flush=True)
-    subprocess.run(
+    return subprocess.run(
         [gugu, "build", "--target", target, "--target-dir", scratch,
          "--cache-dir", scratch / "cache", FIXTURES / f"{name}.gg"],
-        check=True,
         timeout=180,
+        **options,
     )
+
+
+def run_compile_failure(gugu, target, scratch, name, diagnostic):
+    result = build_case(
+        gugu, target, scratch, name, check=False,
+        stdout=subprocess.PIPE, stderr=subprocess.STDOUT,
+    )
+    if result.returncode != 1 or diagnostic.encode("utf-8") not in result.stdout:
+        sys.stderr.buffer.write(result.stdout)
+        raise SystemExit(f"{name}: 预期编译失败并报告 {diagnostic}")
+    suffix = ".exe" if target == "x86_64-windows" else ""
+    if (scratch / f"{name}{suffix}").exists():
+        raise SystemExit(f"{name}: 编译失败不应生成可执行镜像")
+    print(f"通过 {name}: 编译期拒绝，未生成镜像", flush=True)
+
+
+def run_case(gugu, target, scratch, name, expected_status, inputs=((),)):
+    build_case(gugu, target, scratch, name, check=True)
     suffix = ".exe" if target == "x86_64-windows" else ""
     executable = scratch / f"{name}{suffix}"
     if os.name != "nt":
@@ -48,6 +66,7 @@ def run_case(gugu, target, scratch, name, expected_status, inputs=((),)):
         )
         sys.stderr.buffer.writelines(diff)
         raise SystemExit(f"{name}: 标准输出不一致")
+    print(f"通过 {name}: 退出码 {expected_status}，标准输出匹配", flush=True)
 
 
 def main():
@@ -59,8 +78,18 @@ def main():
     gugu = args.gugu.resolve()
     with tempfile.TemporaryDirectory(prefix="gugu-e2e-") as directory:
         scratch = Path(directory)
+        run_compile_failure(
+            gugu, args.target, scratch, "uint_conversion_out_of_range",
+            "整数字面量超出目标类型范围",
+        )
         for name, status in (
             ("hello", 0),
+            ("float_constants_copy", 0),
+            ("float_constants_add", 0),
+            ("float_constants_mul", 0),
+            ("float_constants_compare", 0),
+            ("uint_max", 0),
+            ("uint_high_bit", 0),
             ("sum", 7),
             ("collections", 0),
             ("formatting", 0),

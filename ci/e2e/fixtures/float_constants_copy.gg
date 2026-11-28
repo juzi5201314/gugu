@@ -1,0 +1,8 @@
+//! #112：不同浮点常量后的独立拷贝。
+use std.io.{println}
+fn main() {
+    let x = 1.5
+    let y = 2.25
+    let z = x
+    println(z)
+}
