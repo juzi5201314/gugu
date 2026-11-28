@@ -13,6 +13,7 @@ mod harness;
 mod hashing;
 mod network;
 mod normalization;
+mod panic;
 mod platform;
 mod printing;
 mod process;

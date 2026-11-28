@@ -876,6 +876,14 @@ pub fn panic_unwind(message: *byte, len: uint, path: *byte, path_len: uint, line
             }
         }
         store_word(state + 752, 2)
+        // 完成记录已经自持消息；交回共享调度槽前结束本次展开并撤去旧栈指针。
+        store_word(state + 704, 0)
+        store_word(state + 712, 0)
+        store_word(state + 720, 0)
+        store_word(state + 728, 0)
+        store_word(state + 736, 0)
+        store_word(state + 744, 0)
+        store_word(state + 104, 0)
         std.runtime.context_restore(
             std.mem.transmute[uint, *()](system_context_area(state)),
             std.mem.transmute[uint, *()](word(processor + 4088)),

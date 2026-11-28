@@ -101,6 +101,8 @@ a64 沿用同一 cold 表与状态区偏移，但三处约定不同：A64Context
 
 子协程 panic 不外展开到进程：`panic_unwind` 机器片段带第七个内部整数参数（runtime 状态区地址，r8），主协程照旧打印报告并 `process_exit(1)`；子协程把 panic 物化为调度 bump 堆上的记录 `{消息 ptr,len, 位置 ptr,len, line, column}`，消息与位置字节原地复制到记录尾部——调度 bump 堆不被 GC 扫描，动态串必须随记录自持才不会在回收后悬空。记录写回结果车道并置 `panic_result`，payload_state 只保留 spawn 标记后按完成路径发布。`panic_result` 的取值标记未处理计数的归属：已登记等待者为 1（不计数），归属测试子树组为 2 并 `group+8` 计数交给 runner 判定，无等待者且无组归属为 3、按未处理分离 panic 立即打印并 `state+768` 计数。`join_wait`/`select` 取走 panic 记录时 `join_deliver`/`commit_case` 返回状态 2，LIR 对 `JoinWait` 完成无条件调用 `join_panic` 取回句柄（非 panic 提前返回 0），`take_result` 在 panic 分支结清 `panic_result` 并按其归属值减回 `group+8` 或 `state+768`——已登记等待者的值 1 不动任何计数，避免把无归属 panic 误算成后代归属或反向抵销其它未处理记录；`Join.wait` 的 `Err` 载荷即该 Panic 句柄，`JoinPanic` glue 因此按 `JoinWait` demand 同步实例化。测试子树组记录为两车道 `{pending, panics}`：`subtree_group_new` 在处理器堆分配，`subtree_group_attach` 挂接到当前协程后 spawn 使子协程继承并把 pending 加一、普通协程组为零不记账；协程结束 pending 减一，等待侧以 `subtree_group_pending` 排空、`subtree_group_panics` 读取失败归属。组记录不回收，随调度堆区释放。
 
+子协程的 panic 完成记录与未处理计数就绪后，`panic_unwind` 在 `context_restore` 之前清除 `state+704..752` 的六字临时参数和 `state+104` 的展开标志，避免共享调度槽把下一协程的 panic 误判为展开再入；清理过程中标志保持置位，二次 panic 仍是 fatal。
+
 `std/runtime/coroutine.gg` 的 `#[repr(C)]` record 经冻结 HIR、具体 GIR 与真实布局器形成后，逐字段同 machine layout 交叉验证；不重新读取源码推测 offset。契约同时携带 layout 目录、栈策略和实际 x86_64 context 片段，任一大小、对齐、字段偏移或代码版本不匹配都以 `E0058` 停止下游。hot 内的 atomic 存储车道仍为一个机器字，普通 Gugu 字段访问不能替代其 acquire/release machine intrinsic。
 
 `state` 低 4 bit 是 lifecycle：

@@ -150,6 +150,8 @@ panic 展开进入 defer 或资源清理时，必须保留该清理路径所需�
 
 每个子协程只有一个完成记录：正常返回保存 `Ok(T)`，panic 展开完成保存 `Err(Panic)`。任意 `Join.wait()` 都从记录产生对应的语义值；第一次成功读取 `Err` 即把 panic 标记为已处理，重复读取不重复打印，也不改变退出类别。
 
+子协程完成 panic 展开并交回调度器后，后续协程的独立 panic 必须正常进入自己的展开路径；只有尚未结束的展开期间再次 panic 才属于 `PanicDuringUnwind`。
+
 完成记录的寿命独立于协程栈。协程先完成自己的 defer，将完整返回值或 panic payload 按值传递规则发布为受追踪的完成记录，再归还旧栈；保留或复制 `Join` 只能延长该记录与结果的寿命。记录不能保留指向已归还栈的引用，重复读取仍须执行结果类型规定的语义复制。
 
 分离协程 panic 时打印一份未处理 panic 报告并结束该协程；主协程仍运行时不因此立即终止进程。主协程已经返回、runtime 正在 `Waiting` 时，分离协程 panic 会把自然退出类别改为 `UnhandledPanic`。主协程 panic 立即终止进程。展开期间 defer 再 panic 属于 `PanicDuringUnwind` fatal。
