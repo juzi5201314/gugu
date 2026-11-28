@@ -222,6 +222,41 @@ fn lock_graph_rejects_absolute_path_and_unknown_edges() {
 }
 
 #[test]
+fn lock_paths_reject_drive_prefixes_on_every_host() {
+    for (path, valid) in [
+        ("C:dep", false),
+        ("d:dep", false),
+        ("C:/dep", false),
+        ("d:/dep", false),
+        ("C:", false),
+        ("../dep", true),
+        ("dep", true),
+        (".", true),
+    ] {
+        let text = format!(
+            "version = 1\n[[package]]\nname = \"dep\"\nversion = \"1.0.0\"\nsource = \"path+{path}\"\ndependencies = []\nfeatures = {{ normal = [], test = [], build = [] }}\n"
+        );
+        let result = LockGraph::from_toml(&text);
+        if valid {
+            let lock = result.expect("允许锁文件相对路径");
+            assert_eq!(
+                lock.packages[0].id.source(),
+                &PackageSource::Path { path: path.into() },
+            );
+            assert!(lock.to_toml().is_ok());
+        } else {
+            assert!(
+                result
+                    .expect_err("拒绝锁文件盘符前缀")
+                    .to_string()
+                    .contains("锁文件 path source 不是规范相对路径"),
+                "{path}",
+            );
+        }
+    }
+}
+
+#[test]
 fn git_source_selects_locked_commit_and_skips_yanked_candidate() {
     let root = TempDir::new().expect("tempdir");
     let app = package(

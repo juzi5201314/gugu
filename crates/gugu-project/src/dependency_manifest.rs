@@ -11,6 +11,7 @@ use super::super::{
 };
 use super::{
     dependency_model::*,
+    has_windows_drive_prefix,
     semver::{Version, VersionReq},
 };
 
@@ -286,7 +287,11 @@ fn parse_dependency(
         ));
     }
     let source = if let Some(path) = path {
-        if Path::new(path).is_absolute() || path.contains('\\') || path.contains('\0') {
+        if Path::new(path).is_absolute()
+            || has_windows_drive_prefix(path)
+            || path.contains('\\')
+            || path.contains('\0')
+        {
             return Err(invalid_manifest(
                 manifest_path,
                 format!("依赖 `{alias}` 的 path 不是规范相对路径"),
@@ -437,5 +442,44 @@ fn invalid_manifest(path: &Path, message: impl Into<String>) -> ProjectError {
     ProjectError::InvalidManifest {
         path: path.to_path_buf(),
         message: message.into(),
+    }
+}
+
+#[test]
+fn dependency_paths_reject_drive_prefixes_on_every_host() {
+    for (path, valid) in [
+        ("C:dep", false),
+        ("d:dep", false),
+        ("C:/dep", false),
+        ("d:/dep", false),
+        ("C:", false),
+        ("../dep", true),
+        ("./dep", true),
+        ("dep", true),
+    ] {
+        let value = toml::Value::Table(toml::map::Map::from_iter([(
+            "path".to_owned(),
+            toml::Value::String(path.to_owned()),
+        )]));
+        let result = parse_dependency(
+            "dep",
+            &value,
+            DependencyDomain::Normal,
+            None,
+            Path::new("."),
+            Path::new("gugu.toml"),
+        );
+        if valid {
+            assert_eq!(
+                result.expect("允许清单相对路径").source,
+                DependencySource::Path { path: path.into() },
+            );
+        } else {
+            assert!(
+                matches!(result, Err(ProjectError::InvalidManifest { message, .. })
+                    if message.contains("path 不是规范相对路径")),
+                "{path}",
+            );
+        }
     }
 }

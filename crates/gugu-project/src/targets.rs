@@ -291,11 +291,16 @@ fn discover_directory_targets(
                 package: manifest.to_path_buf(),
                 message: format!("target 入口 `{}` 越过 package 根", path.display()),
             })?
-            .to_path_buf();
+            .to_str()
+            .ok_or_else(|| ProjectError::TargetDiscovery {
+                package: manifest.to_path_buf(),
+                message: "target 入口必须是 UTF-8".to_owned(),
+            })?
+            .replace(std::path::MAIN_SEPARATOR, "/");
         targets.push(explicit_target(
             root,
             kind,
-            Some(relative_path),
+            Some(PathBuf::from(relative_path)),
             Some(name),
             Vec::new(),
             harness,

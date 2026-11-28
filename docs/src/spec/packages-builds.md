@@ -125,6 +125,8 @@ workspace 共享根目录的 `gugu.lock` 和 `target/`。在根执行命令时�
 
 同名的文件形式与目录形式同时存在是错误。`auto-lib`、`auto-bins`、`auto-tests`、`auto-benches`、`auto-examples` 和 `auto-build` 可以分别关闭自动发现。显式 target 路径相对 package 根；两个 target 不能拥有同一 target 名与种类。显式 `path` 可直接位于 package 根（如 `main.gg`），其源码根为 package 根本身。target 自动发现与冲突检查会忽略构建输出目录 `target` 及隐藏目录。
 
+自动发现的 target 入口先按宿主目录分隔符转换为 `/` 分隔的 package 相对路径，再执行入口校验；显式清单中的 `path` 必须直接使用 `/`，在 Windows 宿主上也不能写反斜杠。
+
 `[lib]` 最多一个，默认名是 package 短名把 `-` 换成 `_`。`artifacts = ["gugu"]` 表示它作为其它 Gugu package 的普通依赖入口；还可以包含 `staticlib`、`cdylib`，把该 lib 中的 `pub extern "C"` 导出写成平台静态库或共享库。`staticlib` / `cdylib` 只稳定 C ABI，不形成可在运行时加载新 Gugu 类型的动态库。
 
 `[[bin]]`、`[[test]]`、`[[bench]]`、`[[example]]` 至少接受 `name`、`path`、`required-features`。Test target 始终使用语言内建测试 harness。Bench target 默认 `harness = true` 并收集 `#[bench]`；可以显式写 `harness = false`，此时它是必须提供 main 的普通 benchmark 可执行程序。Example 是普通可执行入口，只有显式选择或相应工具命令才运行。`required-features` 列出的 feature 没有全部启用时，该 target 不进入默认选择（lib+bin 或 all-targets）；显式按名选择时也失败，必须先用 `--features`/`--all-features` 启用。请求未在当前 package 声明的 feature 属于命令行错误（退出码 2）。
@@ -167,6 +169,8 @@ parser_dev = { git = "https://example.com/acme/parser.git", branch = "next" }
 ```
 
 `version`、`path`、`git` 是 source 选择；`path`/`git` 可以同时带 registry `package + version` 作为发布回退。`git` 的 `rev`、`tag`、`branch` 最多写一个；锁文件总是记录解析后的完整 commit 与规范 tree hash。发布归档允许 Git 依赖，但必须显式写不可变 `rev`；tag、branch 和裸仓库默认分支在发布时是错误。Path 依赖发布时必须同时存在 registry package/version 回退，打包后移除本地 path 覆盖。
+
+清单依赖 `path` 与锁文件 path source 在所有宿主上都拒绝 ASCII 盘符前缀，包括 `C:dep` 这类依赖当前盘符目录的路径和 `C:/dep` 这类绝对路径；`../dep` 等普通相对路径仍按既定基址解析。
 
 同一个 package ID 可以被多个别名引用，但只解析和编译一次。依赖图中同一 owner/name 的不兼容版本可以并存；源码若要直接使用多个版本，必须给每个版本不同别名。别名只改变名称解析入口，不改变 package ID、类型身份或锁文件节点。
 
