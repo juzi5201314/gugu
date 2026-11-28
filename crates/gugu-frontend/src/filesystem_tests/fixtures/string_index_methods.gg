@@ -1,0 +1,24 @@
+use std.io.{println}
+
+fn main() {
+    let text = "aé中😀"
+    let first: Option[byte] = text.byte_at(0)
+    let scalar: Option[char] = text.char_at(3)
+    match first { Some(value) => println(value), None => println("none") }
+    match text.byte_at(2) { Some(value) => println(value), None => println("none") }
+    match scalar { Some(value) => println(value), None => println("none") }
+    match text.char_at(4) { Some(value) => println(value), None => println("none") }
+    match text.byte_at(text.len()) { Some(value) => println(value), None => println("none") }
+    match text.char_at(99) { Some(value) => println(value), None => println("none") }
+    match text.byte_at(99) { Some(value) => println(value), None => println("none") }
+    match "".char_at(0) { Some(value) => println(value), None => println("none") }
+    match "".byte_at(0) { Some(value) => println(value), None => println("none") }
+    let long = "abcdefghijklmnop😀"
+    match long.char_at(16) { Some(value) => println(value), None => println("none") }
+    match long.byte_at(16) { Some(value) => println(value), None => println("none") }
+}
+
+#[used]
+fn negative_byte() { _ = "".byte_at(-1) }
+#[used]
+fn negative_scalar() { _ = "".char_at(-1) }

@@ -14,6 +14,39 @@ fn run_case(compiled: &super::Compilation, entry: &str) -> String {
 }
 
 #[test]
+fn string_index_methods_lower_with_scalar_byte_and_panic_semantics() {
+    let compiled = Compiler::shared().compile_to_lir(CompileRequest::single_file(
+        "main.gg",
+        include_str!("fixtures/string_index_methods.gg"),
+        TargetName::X86_64Linux,
+    ));
+    assert!(
+        compiled.is_success(),
+        "{:?}",
+        compiled.diagnostics().items()
+    );
+    assert_eq!(
+        run_case(&compiled, "main"),
+        "97\n169\n😀\nnone\nnone\nnone\nnone\nnone\nnone\n😀\n240\n"
+    );
+    for (entry, expected) in [
+        ("negative_byte", "string byte offset must not be negative"),
+        (
+            "negative_scalar",
+            "string scalar index must not be negative",
+        ),
+    ] {
+        let error = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+            run_case(&compiled, entry);
+        }))
+        .expect_err("负索引必须 panic，空字符串也不例外");
+        let message = error.downcast_ref::<String>().expect("运行时 panic 诊断");
+        assert!(message.contains("Runtime(Panic)"), "{message}");
+        assert!(message.contains(expected), "{message}");
+    }
+}
+
+#[test]
 fn string_methods_and_copy_isolation_contracts() {
     let source = r#"
 use std.io.{println}
