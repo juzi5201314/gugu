@@ -49,6 +49,7 @@ class RunCaseTests(unittest.TestCase):
     def test_unexpected_exit_status_fails(self):
         with self.assertRaisesRegex(SystemExit, "退出码"):
             self.run_case(status=7)
+        self.assertEqual(run.sys.stderr.buffer.getvalue(), b"ok\n")
 
     def test_output_comparison_preserves_line_endings(self):
         self.expected.return_value = b"ok\r\n"

@@ -33,6 +33,7 @@ def run_case(gugu, target, scratch, name, expected_status, inputs=((),)):
             [executable, *args], stdout=subprocess.PIPE, timeout=30, check=False,
         )
         if result.returncode != expected_status:
+            sys.stderr.buffer.write(result.stdout)
             raise SystemExit(
                 f"{name}: 预期退出码 {expected_status}，实际为 {result.returncode}"
             )
