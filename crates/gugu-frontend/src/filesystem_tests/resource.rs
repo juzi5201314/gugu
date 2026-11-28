@@ -1,5 +1,5 @@
 //! 资源终结、计数、关闭与账本回收执行真实 LIR；平台操作和调度由固定钩子控制。
-use super::harness::runtime_bodies;
+use super::harness::{runtime_bodies, runtime_bodies_for};
 use super::{Compilation, CompileRequest, Compiler, TargetName};
 use crate::lir::body::{Body, CallTarget, Op, Symbol};
 
@@ -10,6 +10,16 @@ mod directory;
 mod foreign;
 mod join;
 mod snapshot;
+
+fn runtime_harness() -> ResourceHarness<'static> {
+    let (hir, bodies) = runtime_bodies();
+    ResourceHarness::from_bodies(hir, bodies)
+}
+
+fn runtime_harness_for(target: TargetName) -> ResourceHarness<'static> {
+    let (hir, bodies) = runtime_bodies_for(target);
+    ResourceHarness::from_bodies(hir, bodies)
+}
 
 const CELL: u64 = 128;
 const CONTROL: u64 = 256;
@@ -353,9 +363,38 @@ fn memory() -> Vec<u8> {
 }
 
 #[test]
-fn last_lease_waits_for_operation_then_closes_and_reclaims_once() {
-    let output = compile();
-    let mut harness = ResourceHarness::new(&output);
+fn resource_lifecycle_admission_and_directory_contracts() {
+    let output = compile_fs_api();
+    last_lease_waits_for_operation_then_closes_and_reclaims_once(&output);
+    explicit_close_is_shared_idempotent_and_preserves_error(&output);
+    gc_finalization_releases_resource_leaf_once_and_skips_forwarded_copy(&output);
+    gc_finalization_nested_program_resumes_without_managed_allocation(&output);
+    running_cancellation_retains_credit_until_worker_exits(&output);
+    completed_request_wins_over_unobserved_cancellation(&output);
+    queued_cancellation_and_start_failure_return_credit_once(&output);
+    full_worker_pool_keeps_waiter_queued_until_credit_is_returned(&output);
+    reclaim_unlinks_middle_tail_and_head_and_drains_ledger(&output);
+    runtime_mapping_ledger_charges_only_successful_platform_operations(&output);
+    pressure_hysteresis_defers_gc_and_allows_one_cycle_per_episode(&output);
+    pressure_threshold_does_not_overflow_at_largest_memory_limit(&output);
+    startup_environment_reads_gc_target_and_memory_limit_keys(&output);
+    startup_environment_reads_diagnostics_and_backtrace_keys(&output);
+    file_pool_initialization_does_not_allocate_worker_stacks(&output);
+    worker_stack_is_reused_then_trimmed_only_after_thread_exit(&output);
+    pressure_reuses_completed_stack_for_waiter_before_trimming(&output);
+    admission::run_all(&output);
+    directory::run_all(&output);
+    snapshot::blocking_snapshot_tracks_waiting_inflight_completion_and_stack_cache(&output);
+}
+
+fn compile_fs_api() -> Compilation {
+    let output = Compiler::shared().compile_to_lir(fs_api_request());
+    assert!(output.is_success(), "{:?}", output.diagnostics().items());
+    output
+}
+
+fn last_lease_waits_for_operation_then_closes_and_reclaims_once(output: &Compilation) {
+    let mut harness = ResourceHarness::new(output);
     let mut memory = memory();
     harness.run("resource", "acquire_control", &[CONTROL], &mut memory);
     assert_eq!(
@@ -391,11 +430,9 @@ fn last_lease_waits_for_operation_then_closes_and_reclaims_once() {
     harness.run("native_memory", "verify_drained", &[PROCESSOR], &mut memory);
 }
 
-#[test]
-fn explicit_close_is_shared_idempotent_and_preserves_error() {
-    let output = compile();
+fn explicit_close_is_shared_idempotent_and_preserves_error(output: &Compilation) {
     for error in [0, 5] {
-        let mut harness = ResourceHarness::new(&output);
+        let mut harness = ResourceHarness::new(output);
         harness.completion_error = error;
         let mut memory = memory();
         harness.run("resource", "acquire_control", &[CONTROL], &mut memory);
@@ -439,11 +476,9 @@ fn resource_object_memory() -> Vec<u8> {
     memory
 }
 
-#[test]
-fn gc_finalization_releases_resource_leaf_once_and_skips_forwarded_copy() {
-    let output = compile();
+fn gc_finalization_releases_resource_leaf_once_and_skips_forwarded_copy(output: &Compilation) {
     for flags in [RESOURCE_FLAG, RESOURCE_FLAG | FORWARDED_FLAG, 0] {
-        let mut harness = ResourceHarness::new(&output);
+        let mut harness = ResourceHarness::new(output);
         let mut memory = resource_object_memory();
         put(&mut memory, OBJECT, flags);
         for _ in 0..2 {
@@ -472,9 +507,7 @@ fn gc_finalization_releases_resource_leaf_once_and_skips_forwarded_copy() {
     }
 }
 
-#[test]
-fn gc_finalization_nested_program_resumes_without_managed_allocation() {
-    let (hir, bodies) = super::harness::runtime_bodies();
+fn gc_finalization_nested_program_resumes_without_managed_allocation(output: &Compilation) {
     // Switch 活跃分支中的 Repeat 释放两个槽，然后父程序继续释放第三个槽。
     let mut repeated = vec![21, 1, 2, 1];
     repeated.extend_from_slice(&4u32.to_le_bytes());
@@ -487,7 +520,7 @@ fn gc_finalization_nested_program_resumes_without_managed_allocation() {
     program.extend_from_slice(&1u32.to_le_bytes());
     program.extend_from_slice(&[0, 20, 24, 1, 0]);
     for tag in [0, 1] {
-        let mut harness = ResourceHarness::from_bodies(&hir, &bodies);
+        let mut harness = ResourceHarness::new(output);
         // 此 harness 不接受托管分配边界；资源遍历取地址产生的盒会立即失败。
         let mut memory = resource_object_memory();
         let descriptor = TYPE_SECTION + 128;
@@ -546,10 +579,8 @@ fn request_memory() -> Vec<u8> {
     memory
 }
 
-#[test]
-fn running_cancellation_retains_credit_until_worker_exits() {
-    let (hir, bodies) = runtime_bodies();
-    let mut harness = ResourceHarness::from_bodies(&hir, &bodies);
+fn running_cancellation_retains_credit_until_worker_exits(output: &Compilation) {
+    let mut harness = ResourceHarness::new(output);
     let mut memory = request_memory();
     harness.run("fs_platform", "service", &[PROCESSOR], &mut memory);
     assert_eq!(word(&memory, REQUEST + 120), 1);
@@ -569,10 +600,8 @@ fn running_cancellation_retains_credit_until_worker_exits() {
     assert_eq!(harness.woken, vec![HOT]);
 }
 
-#[test]
-fn completed_request_wins_over_unobserved_cancellation() {
-    let (hir, bodies) = runtime_bodies();
-    let mut harness = ResourceHarness::from_bodies(&hir, &bodies);
+fn completed_request_wins_over_unobserved_cancellation(output: &Compilation) {
+    let mut harness = ResourceHarness::new(output);
     let mut memory = request_memory();
     harness.poll_complete = true;
     put(&mut memory, REQUEST + 64, 7);
@@ -583,11 +612,9 @@ fn completed_request_wins_over_unobserved_cancellation() {
     assert_eq!(harness.woken, vec![HOT]);
 }
 
-#[test]
-fn queued_cancellation_and_start_failure_return_credit_once() {
-    let output = compile();
+fn queued_cancellation_and_start_failure_return_credit_once(output: &Compilation) {
     for (cancelled, error) in [(true, 0), (false, 11)] {
-        let mut harness = ResourceHarness::new(&output);
+        let mut harness = ResourceHarness::new(output);
         harness.start_error = error;
         let mut memory = request_memory();
         put(&mut memory, REQUEST + 104, 0);
@@ -625,10 +652,8 @@ fn queued_cancellation_and_start_failure_return_credit_once() {
     }
 }
 
-#[test]
-fn full_worker_pool_keeps_waiter_queued_until_credit_is_returned() {
-    let (hir, bodies) = runtime_bodies();
-    let mut harness = ResourceHarness::from_bodies(&hir, &bodies);
+fn full_worker_pool_keeps_waiter_queued_until_credit_is_returned(output: &Compilation) {
+    let mut harness = ResourceHarness::new(output);
     let mut memory = request_memory();
     put(&mut memory, CANCEL, 0);
     for slot in 0..8 {
@@ -657,10 +682,8 @@ fn full_worker_pool_keeps_waiter_queued_until_credit_is_returned() {
     assert!(harness.woken.is_empty(), "提交成功仍要等待完成");
 }
 
-#[test]
-fn reclaim_unlinks_middle_tail_and_head_and_drains_ledger() {
-    let (hir, bodies) = runtime_bodies();
-    let mut harness = ResourceHarness::from_bodies(&hir, &bodies);
+fn reclaim_unlinks_middle_tail_and_head_and_drains_ledger(output: &Compilation) {
+    let mut harness = ResourceHarness::new(output);
     let mut memory = memory();
     let nodes = [CONTROL, 1024, 2048];
     put(&mut memory, PROCESSOR + 3968, 3 * 4096);
@@ -696,11 +719,9 @@ fn reclaim_unlinks_middle_tail_and_head_and_drains_ledger() {
     harness.run("native_memory", "verify_drained", &[PROCESSOR], &mut memory);
 }
 
-#[test]
-fn runtime_mapping_ledger_charges_only_successful_platform_operations() {
-    let output = compile();
+fn runtime_mapping_ledger_charges_only_successful_platform_operations(output: &Compilation) {
     for commit_error in [0, 12] {
-        let mut harness = ResourceHarness::new(&output);
+        let mut harness = ResourceHarness::new(output);
         let mut memory = vec![0; 16384];
         put(&mut memory, HOT + 16, PROCESSOR);
         harness.run(
@@ -750,10 +771,8 @@ fn runtime_mapping_ledger_charges_only_successful_platform_operations() {
     }
 }
 
-#[test]
-fn pressure_hysteresis_defers_gc_and_allows_one_cycle_per_episode() {
-    let (hir, bodies) = runtime_bodies();
-    let mut harness = ResourceHarness::from_bodies(&hir, &bodies);
+fn pressure_hysteresis_defers_gc_and_allows_one_cycle_per_episode(output: &Compilation) {
+    let mut harness = ResourceHarness::new(output);
     let mut memory = vec![0; 16384];
     put(&mut memory, PROCESSOR + 3952, 100);
     for used in [84, 85] {
@@ -847,10 +866,8 @@ fn pressure_hysteresis_defers_gc_and_allows_one_cycle_per_episode() {
     assert_eq!(word(&memory, PROCESSOR + 3888), 0);
 }
 
-#[test]
-fn pressure_threshold_does_not_overflow_at_largest_memory_limit() {
-    let (hir, bodies) = runtime_bodies();
-    let mut harness = ResourceHarness::from_bodies(&hir, &bodies);
+fn pressure_threshold_does_not_overflow_at_largest_memory_limit(output: &Compilation) {
+    let mut harness = ResourceHarness::new(output);
     let mut memory = vec![0; 16384];
     let threshold = ((u128::from(u64::MAX) * 85).div_ceil(100)) as u64;
     put(&mut memory, PROCESSOR + 3952, u64::MAX);
@@ -869,11 +886,9 @@ fn pressure_threshold_does_not_overflow_at_largest_memory_limit() {
     }
 }
 
-#[test]
-fn startup_environment_reads_gc_target_and_memory_limit_keys() {
-    let output = compile();
+fn startup_environment_reads_gc_target_and_memory_limit_keys(output: &Compilation) {
     for (limit, expected) in [("1MiB", 1048576), ("off", 0)] {
-        let mut harness = ResourceHarness::new(&output);
+        let mut harness = ResourceHarness::new(output);
         let mut memory = vec![0; 16384];
         let entries = [
             "A=1".to_owned(),
@@ -896,21 +911,19 @@ fn startup_environment_reads_gc_target_and_memory_limit_keys() {
     }
     // 整个可访问区域只有一个 NUL，键比较不得进行跨终止符的 word 读取。
     for name in ["is_gc_target_key", "is_memory_limit_key"] {
-        let mut harness = ResourceHarness::new(&output);
+        let mut harness = ResourceHarness::new(output);
         let mut memory = vec![0];
         assert_eq!(harness.run("core", name, &[0], &mut memory), vec![0]);
     }
 }
 
-#[test]
-fn startup_environment_reads_diagnostics_and_backtrace_keys() {
-    let output = compile();
+fn startup_environment_reads_diagnostics_and_backtrace_keys(output: &Compilation) {
     for (diagnostics, backtrace, expected) in [
         ("json", "full", (1, 2)),
         ("both", "0", (2, 0)),
         ("text", "1", (0, 1)),
     ] {
-        let mut harness = ResourceHarness::new(&output);
+        let mut harness = ResourceHarness::new(output);
         let mut memory = vec![0; 16384];
         let entries = [
             "A=1".to_owned(),
@@ -932,7 +945,7 @@ fn startup_environment_reads_diagnostics_and_backtrace_keys() {
         assert_eq!(word(&memory, 512 + 64), expected.1);
     }
     // 变量缺失时使用规范默认值 text=0 与 triggering=1。
-    let mut harness = ResourceHarness::new(&output);
+    let mut harness = ResourceHarness::new(output);
     let mut memory = vec![0; 16384];
     harness.run(
         "core",
@@ -948,10 +961,8 @@ const STACK_SLOT: u64 = POOL + 64 + 8 * 128;
 const STACK_BASE: u64 = 12288;
 const STACK_BYTES: u64 = 65536;
 
-#[test]
-fn file_pool_initialization_does_not_allocate_worker_stacks() {
-    let (hir, bodies) = runtime_bodies();
-    let mut harness = ResourceHarness::from_bodies(&hir, &bodies);
+fn file_pool_initialization_does_not_allocate_worker_stacks(output: &Compilation) {
+    let mut harness = ResourceHarness::new(output);
     let mut memory = request_memory();
     put(&mut memory, PROCESSOR + 4024, 0);
     assert_eq!(
@@ -965,10 +976,8 @@ fn file_pool_initialization_does_not_allocate_worker_stacks() {
     }
 }
 
-#[test]
-fn worker_stack_is_reused_then_trimmed_only_after_thread_exit() {
-    let (hir, bodies) = runtime_bodies();
-    let mut harness = ResourceHarness::from_bodies(&hir, &bodies);
+fn worker_stack_is_reused_then_trimmed_only_after_thread_exit(output: &Compilation) {
+    let mut harness = ResourceHarness::new(output);
     let mut memory = request_memory();
     put(&mut memory, CANCEL, 0);
     harness.run("fs_platform", "stack_for", &[POOL, 0], &mut memory);
@@ -998,10 +1007,8 @@ fn worker_stack_is_reused_then_trimmed_only_after_thread_exit() {
     harness.run("native_memory", "verify_drained", &[PROCESSOR], &mut memory);
 }
 
-#[test]
-fn pressure_reuses_completed_stack_for_waiter_before_trimming() {
-    let (hir, bodies) = runtime_bodies();
-    let mut harness = ResourceHarness::from_bodies(&hir, &bodies);
+fn pressure_reuses_completed_stack_for_waiter_before_trimming(output: &Compilation) {
+    let mut harness = ResourceHarness::new(output);
     let mut memory = request_memory();
     put(&mut memory, CANCEL, 0);
     harness.run("fs_platform", "stack_for", &[POOL, 0], &mut memory);
@@ -1021,12 +1028,10 @@ fn pressure_reuses_completed_stack_for_waiter_before_trimming() {
     assert!(harness.released.is_empty());
 }
 
-fn compile() -> Compilation {
-    let output = Compiler::shared().compile(CompileRequest::single_file(
+fn fs_api_request() -> CompileRequest {
+    CompileRequest::single_file(
         "main.gg",
         include_str!("../../../gugu-compiler/tests/fixtures/fs_api.gg"),
         TargetName::X86_64Linux,
-    ));
-    assert!(output.is_success(), "{:?}", output.diagnostics().items());
-    output
+    )
 }

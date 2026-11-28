@@ -32,7 +32,7 @@ mod type_aliases;
 mod unsafety;
 
 pub(super) fn accepts(source: &str) -> bool {
-    let c = Compiler::shared().compile(CompileRequest::single_file(
+    let c = Compiler::shared().compile_sema_for_test(CompileRequest::single_file(
         "main.gg",
         source,
         TargetName::X86_64Linux,
@@ -44,7 +44,7 @@ pub(super) fn accepts(source: &str) -> bool {
 }
 
 #[test]
-fn discarded_if_without_else_is_accepted_in_nested_statement_positions() {
+fn if_without_else_statement_and_value_position_contracts() {
     assert!(accepts(
         "fn stmt_block(a: int) { { if a > 3 { panic(\"a\") } }\n _ = a }\n\
          fn nested_if(a: int) { if a > 0 { if a > 1 { panic(\"b\") } }\n _ = a }\n\
@@ -55,10 +55,6 @@ fn discarded_if_without_else_is_accepted_in_nested_statement_positions() {
          loop { if a > 0 { break } } }\n\
          fn main() {}"
     ));
-}
-
-#[test]
-fn value_used_if_without_else_is_still_rejected_through_blocks() {
     assert!(!accepts(
         "fn f(b: bool) int { let x = { if b { 1 } }\n x }\nfn main() {}"
     ));
@@ -670,12 +666,12 @@ fn runtime_checks_survive_queries_and_reach_the_backend_plan() {
     assert_eq!(operand_type(*float), &Ty::Float(64));
     assert_eq!(operand_type(*scalar), &Ty::int());
     let compiler = Compiler::shared();
-    let first = compiler.compile(CompileRequest::single_file(
+    let first = compiler.compile_full_for_test(CompileRequest::single_file(
         "main.gg",
         "fn main() { let x = 1 }",
         TargetName::X86_64Linux,
     ));
-    let second = compiler.compile(CompileRequest::single_file(
+    let second = compiler.compile_full_for_test(CompileRequest::single_file(
         "main.gg",
         "fn main() { let x = 2 }",
         TargetName::X86_64Linux,
@@ -692,7 +688,7 @@ fn failed_cached_queries_rebind_source_locations_and_stop_lowering() {
     let compiler = Compiler::new();
     let source = "fn main() { let x: int\n _ = x }";
     for _ in 0..2 {
-        let failed = compiler.compile(CompileRequest::single_file(
+        let failed = compiler.compile_full_for_test(CompileRequest::single_file(
             "main.gg",
             source,
             TargetName::X86_64Linux,

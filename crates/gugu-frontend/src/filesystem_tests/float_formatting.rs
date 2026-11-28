@@ -12,15 +12,24 @@ fn compiled(name: &str) -> &'static Compilation {
     output.get_or_init(|| {
         let mut source = String::new();
         let mut main = String::from("fn main() {\n");
-        for (index, spec) in ["", "?", "e", "E", ".2", ".0?", ".20", ".2e", ".2E", ".2?", "*>12.2", "+08.2"].iter().enumerate() {
-            source.push_str(&format!("fn render{width}_{index}(bits: uint) string {{\nlet v = unsafe {{ {cast} }}\nf\"{{v:{spec}}}\"\n}}\n"));
+        for (index, spec) in [
+            "", "?", "e", "E", ".2", ".0?", ".20", ".2e", ".2E", ".2?", "*>12.2", "+08.2",
+        ]
+        .iter()
+        .enumerate()
+        {
+            source.push_str(&format!(
+                "fn render{width}_{index}(bits: uint) string {{\nlet v = unsafe {{ {cast} }}\nf\"{{v:{spec}}}\"\n}}\n"
+            ));
             main.push_str(&format!("_ = render{width}_{index}(0)\n"));
         }
-        source.push_str(&format!("fn dynamic(bits: uint, width: int, precision: int) string {{\nlet v = unsafe {{ {cast} }}\nf\"{{v:width$.precision$}}|{{v:width$.precision$e}}\"\n}}\n"));
+        source.push_str(&format!(
+            "fn dynamic(bits: uint, width: int, precision: int) string {{\nlet v = unsafe {{ {cast} }}\nf\"{{v:width$.precision$}}|{{v:width$.precision$e}}\"\n}}\n"
+        ));
         main.push_str("_ = dynamic(0, 0, 0)\n");
         source.push_str(&main);
         source.push_str("}\n");
-        let output = Compiler::shared().compile(CompileRequest::single_file(
+        let output = Compiler::shared().compile_to_lir(CompileRequest::single_file(
             "main.gg",
             &source,
             TargetName::X86_64Linux,
@@ -30,182 +39,218 @@ fn compiled(name: &str) -> &'static Compilation {
     })
 }
 
-fn check(name: &str, bits: u64, expected: &[String]) {
-    let output = compiled(name);
+fn check_with(
+    harness: &mut Harness<'_>,
+    memory: &mut Vec<u8>,
+    name: &str,
+    bits: u64,
+    expected: &[String],
+) {
     for (index, expected) in expected.iter().enumerate() {
-        let name = format!("{name}_{index}");
-        let mut harness = Harness::new(output);
-        let mut memory = vec![0; 262144];
-        let result = harness.invoke("main.gg", &name, &[bits], &mut memory);
+        let fn_name = format!("{name}_{index}");
+        harness.reset_for_next_call(memory);
+        let result = harness.invoke("main.gg", &fn_name, &[bits], memory);
         let start = result[0] as usize;
         let actual = std::str::from_utf8(&memory[start..start + result[1] as usize]).unwrap();
-        assert_eq!(actual, expected, "{name} bits={bits:x}");
+        assert_eq!(actual, expected, "{fn_name} bits={bits:x}");
     }
 }
 
-macro_rules! cases {
-    ($name:ident, $render:literal, $ty:ty, $($value:expr),+ $(,)?) => {
-        #[test]
-        fn $name() {
-            for v in [$($value as $ty),+] {
-                // Gugu suppresses zero padding for non-finite values.
-                let padded = if v.is_finite() { format!("{v:+08.2}") } else { format!("{v:+8.2}") };
-                check($render, v.to_bits() as u64, &[
-                    format!("{v}"), format!("{v:?}"), format!("{v:e}"), format!("{v:E}"),
-                    format!("{v:.2}"), format!("{v:.0?}"), format!("{v:.20}"),
-                    format!("{v:.2e}"), format!("{v:.2E}"), format!("{v:.2?}"),
-                    format!("{v:*>12.2}"), padded]);
-            }
-        }
-    }
-}
-
-#[test]
-fn float_dynamic_counts() {
-    for (name, bits, expected) in [
-        (
-            "render32",
-            0.1f32.to_bits() as u64,
-            format!("{0:12.20}|{0:12.20e}", 0.1f32),
-        ),
-        (
+fn check_f64_values(values: &[f64]) {
+    let output = compiled("render64");
+    let mut harness = Harness::new(output);
+    let mut memory = vec![0; 262144];
+    for &v in values {
+        // Gugu suppresses zero padding for non-finite values.
+        let padded = if v.is_finite() {
+            format!("{v:+08.2}")
+        } else {
+            format!("{v:+8.2}")
+        };
+        check_with(
+            &mut harness,
+            &mut memory,
             "render64",
-            0.1f64.to_bits(),
-            format!("{0:12.20}|{0:12.20e}", 0.1f64),
-        ),
-    ] {
-        let mut harness = Harness::new(compiled(name));
-        let mut memory = vec![0; 262144];
-        let result = harness.invoke("main.gg", "dynamic", &[bits, 12, 20], &mut memory);
-        let actual =
-            std::str::from_utf8(&memory[result[0] as usize..(result[0] + result[1]) as usize])
-                .unwrap();
-        assert_eq!(actual, expected);
+            v.to_bits(),
+            &[
+                format!("{v}"),
+                format!("{v:?}"),
+                format!("{v:e}"),
+                format!("{v:E}"),
+                format!("{v:.2}"),
+                format!("{v:.0?}"),
+                format!("{v:.20}"),
+                format!("{v:.2e}"),
+                format!("{v:.2E}"),
+                format!("{v:.2?}"),
+                format!("{v:*>12.2}"),
+                padded,
+            ],
+        );
     }
 }
 
-#[test]
-#[should_panic(expected = "Runtime(Panic)")]
-fn float_negative_precision_panics() {
-    let mut harness = Harness::new(compiled("render64"));
-    harness.invoke(
-        "main.gg",
-        "dynamic",
-        &[0, 0, u64::MAX],
-        &mut vec![0; 262144],
+fn check_f32_values(values: &[f32]) {
+    let output = compiled("render32");
+    let mut harness = Harness::new(output);
+    let mut memory = vec![0; 262144];
+    for &v in values {
+        let padded = if v.is_finite() {
+            format!("{v:+08.2}")
+        } else {
+            format!("{v:+8.2}")
+        };
+        check_with(
+            &mut harness,
+            &mut memory,
+            "render32",
+            v.to_bits() as u64,
+            &[
+                format!("{v}"),
+                format!("{v:?}"),
+                format!("{v:e}"),
+                format!("{v:E}"),
+                format!("{v:.2}"),
+                format!("{v:.0?}"),
+                format!("{v:.20}"),
+                format!("{v:.2e}"),
+                format!("{v:.2E}"),
+                format!("{v:.2?}"),
+                format!("{v:*>12.2}"),
+                padded,
+            ],
+        );
+    }
+}
+
+fn assert_dynamic_panic(precision: u64) {
+    let error = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+        let mut harness = Harness::new(compiled("render64"));
+        harness.invoke(
+            "main.gg",
+            "dynamic",
+            &[0, 0, precision],
+            &mut vec![0; 262144],
+        );
+    }))
+    .expect_err("非法动态精度必须触发 Runtime(Panic)");
+    let message = error
+        .downcast_ref::<String>()
+        .map(String::as_str)
+        .or_else(|| error.downcast_ref::<&str>().copied())
+        .unwrap_or("");
+    assert!(
+        message.contains("Runtime(Panic)"),
+        "意外 panic 消息：{message}"
     );
 }
 
 #[test]
-#[should_panic(expected = "Runtime(Panic)")]
-fn float_overflowing_precision_panics() {
+fn float64_formatting_contracts() {
+    check_f64_values(&[
+        0.0,
+        -0.0,
+        1.0,
+        0.1,
+        0.3,
+        1.0 / 3.0,
+        1e15,
+        1e16,
+        1e17,
+        1e21,
+        1e-7,
+        f64::MIN_POSITIVE,
+        f64::from_bits(1),
+        f64::EPSILON,
+        f64::NAN,
+        -f64::NAN,
+        f64::INFINITY,
+        f64::NEG_INFINITY,
+        0.125,
+        2.5,
+        3.5,
+        9.999,
+        2.0,
+        1024.0,
+        0.0001,
+        0.00001,
+        1e23,
+        f64::from_bits(1e15f64.to_bits() - 1),
+        f64::from_bits(1e15f64.to_bits() + 1),
+        f64::from_bits(1e16f64.to_bits() - 1),
+        f64::from_bits(1e16f64.to_bits() + 1),
+        f64::from_bits(1e17f64.to_bits() - 1),
+        f64::from_bits(1e17f64.to_bits() + 1),
+    ]);
     let mut harness = Harness::new(compiled("render64"));
-    harness.invoke(
+    let mut memory = vec![0; 262144];
+    let result = harness.invoke(
         "main.gg",
         "dynamic",
-        &[0, 0, i64::MAX as u64],
-        &mut vec![0; 262144],
+        &[0.1f64.to_bits(), 12, 20],
+        &mut memory,
     );
+    let actual =
+        std::str::from_utf8(&memory[result[0] as usize..(result[0] + result[1]) as usize]).unwrap();
+    assert_eq!(actual, format!("{0:12.20}|{0:12.20e}", 0.1f64));
+    assert_dynamic_panic(u64::MAX);
+    assert_dynamic_panic(i64::MAX as u64);
 }
 
-cases!(float64_zero, "render64", f64, 0.0, -0.0);
-cases!(float64_fractions, "render64", f64, 1.0, 0.1, 0.3, 1.0 / 3.0);
-cases!(
-    float64_decimal_boundaries,
-    "render64",
-    f64,
-    1e15,
-    1e16,
-    1e17,
-    1e21,
-    1e-7
-);
-cases!(float64_min_normal, "render64", f64, f64::MIN_POSITIVE);
-cases!(float64_subnormal, "render64", f64, f64::from_bits(1));
-cases!(float64_extreme_max, "render64", f64, f64::MAX);
-cases!(float64_extreme_min, "render64", f64, f64::MIN);
-cases!(float64_epsilon, "render64", f64, f64::EPSILON);
-cases!(
-    float64_special,
-    "render64",
-    f64,
-    f64::NAN,
-    -f64::NAN,
-    f64::INFINITY,
-    f64::NEG_INFINITY
-);
-cases!(float64_rounding, "render64", f64, 0.125, 2.5, 3.5, 9.999);
-cases!(
-    float64_powers,
-    "render64",
-    f64,
-    2.0,
-    1024.0,
-    0.0001,
-    0.00001,
-    1e23
-);
-cases!(
-    float64_neighbors_15,
-    "render64",
-    f64,
-    f64::from_bits(1e15f64.to_bits() - 1),
-    f64::from_bits(1e15f64.to_bits() + 1)
-);
-cases!(
-    float64_neighbors_16,
-    "render64",
-    f64,
-    f64::from_bits(1e16f64.to_bits() - 1),
-    f64::from_bits(1e16f64.to_bits() + 1)
-);
-cases!(
-    float64_neighbors_17,
-    "render64",
-    f64,
-    f64::from_bits(1e17f64.to_bits() - 1),
-    f64::from_bits(1e17f64.to_bits() + 1)
-);
-cases!(float32_zero, "render32", f32, 0.0, -0.0);
-cases!(float32_fractions, "render32", f32, 1.0, 0.1, 0.3, 1.0 / 3.0);
-cases!(
-    float32_decimal_boundaries,
-    "render32",
-    f32,
-    1e15,
-    1e16,
-    1e17,
-    1e21,
-    1e-7
-);
-cases!(float32_min_normal, "render32", f32, f32::MIN_POSITIVE);
-cases!(float32_subnormal, "render32", f32, f32::from_bits(1));
-cases!(float32_extremes, "render32", f32, f32::MAX, f32::MIN);
-cases!(float32_epsilon, "render32", f32, f32::EPSILON);
-cases!(
-    float32_special,
-    "render32",
-    f32,
-    f32::NAN,
-    -f32::NAN,
-    f32::INFINITY,
-    f32::NEG_INFINITY
-);
-cases!(float32_rounding, "render32", f32, 0.125, 2.5, 3.5, 9.999);
-cases!(
-    float32_powers,
-    "render32",
-    f32,
-    2.0,
-    1024.0,
-    0.0001,
-    0.00001,
-    1e23
-);
-cases!(
-    float32_neighbors,
-    "render32",
-    f32,
-    f32::from_bits(1.0f32.to_bits() - 1),
-    f32::from_bits(1.0f32.to_bits() + 1)
-);
+#[test]
+fn float64_max_formatting() {
+    check_f64_values(&[f64::MAX]);
+}
+
+#[test]
+fn float64_min_formatting() {
+    check_f64_values(&[f64::MIN]);
+}
+
+#[test]
+fn float32_formatting_contracts() {
+    check_f32_values(&[
+        0.0,
+        -0.0,
+        1.0,
+        0.1,
+        0.3,
+        1.0 / 3.0,
+        1e15,
+        1e16,
+        1e17,
+        1e21,
+        1e-7,
+        f32::MIN_POSITIVE,
+        f32::from_bits(1),
+        f32::MAX,
+        f32::MIN,
+        f32::EPSILON,
+        f32::NAN,
+        -f32::NAN,
+        f32::INFINITY,
+        f32::NEG_INFINITY,
+        0.125,
+        2.5,
+        3.5,
+        9.999,
+        2.0,
+        1024.0,
+        0.0001,
+        0.00001,
+        1e23,
+        f32::from_bits(1.0f32.to_bits() - 1),
+        f32::from_bits(1.0f32.to_bits() + 1),
+    ]);
+    let mut harness = Harness::new(compiled("render32"));
+    let mut memory = vec![0; 262144];
+    let result = harness.invoke(
+        "main.gg",
+        "dynamic",
+        &[0.1f32.to_bits() as u64, 12, 20],
+        &mut memory,
+    );
+    let actual =
+        std::str::from_utf8(&memory[result[0] as usize..(result[0] + result[1]) as usize]).unwrap();
+    assert_eq!(actual, format!("{0:12.20}|{0:12.20e}", 0.1f32));
+}

@@ -2,6 +2,7 @@ use std::{
     cmp::Ordering,
     fmt,
     path::{Component, Path, PathBuf},
+    sync::Arc,
 };
 
 /// 单个源码文件允许的最大字节数（不含终止符）。
@@ -195,14 +196,21 @@ pub struct LineColumn {
     pub column: u32,
 }
 
-/// 固定一次编译可见的 UTF-8 源码字节和逻辑路径。
-#[derive(Clone, Debug, Eq, PartialEq)]
-pub struct SourceSnapshot {
+#[derive(Debug, Eq, PartialEq)]
+struct SourceSnapshotData {
     logical_path: String,
     path: PathBuf,
     content: String,
     content_hash: [u8; 32],
     line_starts: Vec<u32>,
+}
+
+/// 固定一次编译可见的 UTF-8 源码字节和逻辑路径。
+///
+/// 内部以 `Arc` 共享不可变快照数据，使内建源码前缀跨会话安装时零拷贝克隆。
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct SourceSnapshot {
+    data: Arc<SourceSnapshotData>,
 }
 
 impl SourceSnapshot {
@@ -225,11 +233,13 @@ impl SourceSnapshot {
         })?;
         let line_starts = build_line_starts(bytes);
         Ok(Self {
-            path: PathBuf::from(&logical_path),
-            logical_path,
-            content: content.to_owned(),
-            content_hash: *blake3::hash(bytes).as_bytes(),
-            line_starts,
+            data: Arc::new(SourceSnapshotData {
+                path: PathBuf::from(&logical_path),
+                logical_path,
+                content: content.to_owned(),
+                content_hash: *blake3::hash(bytes).as_bytes(),
+                line_starts,
+            }),
         })
     }
 
@@ -240,60 +250,62 @@ impl SourceSnapshot {
 
     /// 返回 package-relative 的规范逻辑路径。
     pub fn logical_path(&self) -> &str {
-        &self.logical_path
+        &self.data.logical_path
     }
 
     /// 返回逻辑路径的 `Path` 视图。
     pub fn path(&self) -> &Path {
-        &self.path
+        &self.data.path
     }
 
     /// 返回不可变源码文本。
     pub fn content(&self) -> &str {
-        &self.content
+        &self.data.content
     }
 
     /// 返回源码原始字节。
     pub fn bytes(&self) -> &[u8] {
-        self.content.as_bytes()
+        self.data.content.as_bytes()
     }
 
     /// 返回 BLAKE3-256 内容摘要。
     pub fn content_hash(&self) -> [u8; 32] {
-        self.content_hash
+        self.data.content_hash
     }
 
     /// 返回按 UTF-8 字节排列的规范行首表。
     pub fn line_starts(&self) -> &[u32] {
-        &self.line_starts
+        &self.data.line_starts
     }
 
     /// 把半开字节偏移映射为 1-based 行列。
     pub fn line_column(&self, offset: usize) -> Result<LineColumn, SpanError> {
-        if offset > self.content.len() {
+        let content = self.content();
+        if offset > content.len() {
             return Err(SpanError::OutOfBounds {
-                path: self.logical_path.clone(),
+                path: self.data.logical_path.clone(),
                 start: checked_u32(offset),
                 end: checked_u32(offset),
-                length: checked_u32(self.content.len()),
+                length: checked_u32(content.len()),
             });
         }
         let line = self
+            .data
             .line_starts
             .partition_point(|&start| start as usize <= offset)
             - 1;
-        let line_start = self.line_starts[line] as usize;
+        let line_start = self.data.line_starts[line] as usize;
         // 列号按该行的 Unicode 标量计：字节偏移必须先落在字符边界，
         // 再统计行首到偏移之间的标量个数（自增列偏移不使用偏移差值）。
-        if offset != line_start && !self.content.is_char_boundary(offset) {
+        if offset != line_start && !content.is_char_boundary(offset) {
             return Err(SpanError::OutOfBounds {
-                path: self.logical_path.clone(),
+                path: self.data.logical_path.clone(),
                 start: checked_u32(offset),
                 end: checked_u32(offset),
-                length: checked_u32(self.content.len()),
+                length: checked_u32(content.len()),
             });
         }
-        let column = self.content[line_start..offset].chars().count();
+        let column = content[line_start..offset].chars().count();
         Ok(LineColumn {
             line: checked_u32(line + 1),
             column: checked_u32(column + 1),
@@ -383,28 +395,30 @@ impl Span {
         end: usize,
         expansion: ExpansionId,
     ) -> Result<Self, SpanError> {
-        if start > end || end > snapshot.content.len() {
+        if start > end || end > snapshot.data.content.len() {
             return Err(SpanError::OutOfBounds {
-                path: snapshot.logical_path.clone(),
+                path: snapshot.data.logical_path.clone(),
                 start: checked_u32(start),
                 end: checked_u32(end),
-                length: checked_u32(snapshot.content.len()),
+                length: checked_u32(snapshot.data.content.len()),
             });
         }
         // span 端点必须落在字符边界：字节偏移不得把多字节标量切开。
-        if !snapshot.content.is_char_boundary(start) || !snapshot.content.is_char_boundary(end) {
+        if !snapshot.data.content.is_char_boundary(start)
+            || !snapshot.data.content.is_char_boundary(end)
+        {
             return Err(SpanError::OutOfBounds {
-                path: snapshot.logical_path.clone(),
+                path: snapshot.data.logical_path.clone(),
                 start: checked_u32(start),
                 end: checked_u32(end),
-                length: checked_u32(snapshot.content.len()),
+                length: checked_u32(snapshot.data.content.len()),
             });
         }
         let position = snapshot.line_column(start)?;
         Ok(Self {
             file,
             table,
-            path: snapshot.path.clone(),
+            path: snapshot.data.path.clone(),
             start: checked_u32(start),
             end: checked_u32(end),
             expansion,
@@ -549,17 +563,19 @@ pub struct SourceMap {
 impl SourceMap {
     /// 按规范逻辑路径排序并建立稠密文件 ID。
     pub fn new(mut snapshots: Vec<SourceSnapshot>) -> Result<Self, SourceMapError> {
-        snapshots.sort_by(|left, right| left.logical_path.cmp(&right.logical_path));
+        snapshots.sort_by(|left, right| left.data.logical_path.cmp(&right.data.logical_path));
         for pair in snapshots.windows(2) {
-            if pair[0].logical_path == pair[1].logical_path {
-                return Err(SourceMapError::DuplicatePath(pair[0].logical_path.clone()));
+            if pair[0].data.logical_path == pair[1].data.logical_path {
+                return Err(SourceMapError::DuplicatePath(
+                    pair[0].data.logical_path.clone(),
+                ));
             }
         }
         checked_u32(snapshots.len());
         let path_index = snapshots
             .iter()
             .enumerate()
-            .map(|(index, snapshot)| (snapshot.logical_path.clone(), index as u32))
+            .map(|(index, snapshot)| (snapshot.data.logical_path.clone(), index as u32))
             .collect();
         Ok(Self {
             table: SourceTableId::from_content(&snapshots),
@@ -612,7 +628,7 @@ impl SourceMap {
         self.path_index = snapshots
             .iter()
             .enumerate()
-            .map(|(index, snapshot)| (snapshot.logical_path.clone(), index as u32))
+            .map(|(index, snapshot)| (snapshot.data.logical_path.clone(), index as u32))
             .collect();
         self.snapshots = snapshots;
         Ok(())
@@ -629,7 +645,7 @@ impl SourceMap {
         prefix: impl IntoIterator<Item = SourceSnapshot>,
     ) -> Result<(), SourceMapError> {
         let mut user = std::mem::take(&mut self.snapshots);
-        user.sort_by(|left, right| left.logical_path.cmp(&right.logical_path));
+        user.sort_by(|left, right| left.data.logical_path.cmp(&right.data.logical_path));
         let combined: Vec<SourceSnapshot> = prefix.into_iter().collect();
         let mut paths: Vec<&str> = combined.iter().map(SourceSnapshot::logical_path).collect();
         paths.sort_unstable();
@@ -642,7 +658,7 @@ impl SourceMap {
             .find(|snapshot| !builtin_paths.insert(snapshot.logical_path()))
         {
             return Err(SourceMapError::DuplicatePath(
-                duplicate.logical_path.clone(),
+                duplicate.data.logical_path.clone(),
             ));
         }
         let mut combined = combined;

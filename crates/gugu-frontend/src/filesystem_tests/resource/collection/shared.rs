@@ -1,10 +1,14 @@
 //! 固定共享槽执行真实身份/guard/GC 逻辑；平台只返回预先登记的映射。
 use super::*;
 
-#[test]
+pub(super) fn run_runtime_contracts() {
+    shared_trim_resumes_bounded_scan_and_new_work_revokes_confirmation();
+    pressure_service_waits_for_resource_return_and_drains_both_caches();
+    pressure_reclaims_empty_shared_table_and_clears_reclaimable_bytes();
+}
+
 fn shared_trim_resumes_bounded_scan_and_new_work_revokes_confirmation() {
-    let (hir, bodies) = runtime_bodies();
-    let mut harness = ResourceHarness::from_bodies(&hir, &bodies);
+    let mut harness = runtime_harness();
     harness.block_budget = 32768;
     let (mut memory, _) = graph_memory();
     let base = 131072;
@@ -47,10 +51,8 @@ fn shared_trim_resumes_bounded_scan_and_new_work_revokes_confirmation() {
     }
 }
 
-#[test]
 fn pressure_service_waits_for_resource_return_and_drains_both_caches() {
-    let (hir, bodies) = runtime_bodies();
-    let mut harness = ResourceHarness::from_bodies(&hir, &bodies);
+    let mut harness = runtime_harness();
     harness.block_budget = 32768;
     let (mut memory, _) = graph_memory();
     harness.reserve_script.push_back(73728);
@@ -100,10 +102,8 @@ fn pressure_service_waits_for_resource_return_and_drains_both_caches() {
     assert_eq!(memory, before);
 }
 
-#[test]
 fn pressure_reclaims_empty_shared_table_and_clears_reclaimable_bytes() {
-    let (hir, bodies) = runtime_bodies();
-    let mut harness = ResourceHarness::from_bodies(&hir, &bodies);
+    let mut harness = runtime_harness();
     harness.gc_config = CONFIG;
     harness.block_budget = 32768;
     let (mut memory, _) = graph_memory();
@@ -143,7 +143,7 @@ fn pressure_reclaims_empty_shared_table_and_clears_reclaimable_bytes() {
 
 #[test]
 fn shared_access_and_root_keep_payload_then_generation_rejects_stale_handle() {
-    let output = Compiler::shared().compile(CompileRequest::single_file(
+    let output = Compiler::shared().compile_to_lir(CompileRequest::single_file(
         "main.gg",
         include_str!("../../../../../gugu-compiler/tests/fixtures/shared_pin.gg"),
         TargetName::X86_64Linux,

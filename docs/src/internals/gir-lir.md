@@ -315,6 +315,12 @@ monomorphic GIR 必须按以下顺序处理；pass 可以在没有匹配机会�
 
 ## LIR
 
+### dyn 擦除与 vtable shim
+
+`Rvalue::DynErase` 不调用 runtime 擦除入口。LIR 直接按源类型 descriptor 在 LocalHeap 分配载荷对象，把已经按语言复制语义形成的源值移入该对象，再把数据指针和 `Symbol::Vtable { interface, concrete }` 的 metadata 指针写入 16 byte 胖对；fat pair 仍是 `(0, GcHeap)`、`(8, Metadata)` 两条 ABI lane。mono vtable root 记录接口键、具体类型、`dyn` 类型键以及按 trait 槽顺序解析出的具体方法实例，冻结 `TypeUniverse` 后同一组合必须解析到同一方法表。
+
+函数体物化后为每个 vtable 方法生成 checked LIR shim，实例键由接口、具体类型与目标方法共同哈希。`self: &Self` shim 的签名与目标一致：它从 dyn 对象引用的字 0 取出载荷指针并调用目标。按值 `self` 的动态调用以胖对两条 lane 入栈；在载荷无 COW/resource 动作且直接 ABI 不超过 16 byte 时，shim 重新从载荷读取接收者车道并调用目标。其它按值 receiver 需要完整语义复制或间接 ABI 物化，当前必须在编译期拒绝，不能把 dyn data/vtable lane 错传给具体方法。后端把 shim 地址写进编译期 vtable blob；x64 与 A64 都不得再引用不存在的 `dynamic_erase` runtime glue。
+
 ### SSA 与 block 参数
 
 LIR 中每个普通值只定义一次。控制流合流使用 block 参数，不使用单独的 phi 指令：每条前驱边必须按目标 block 参数顺序提供实参。block 参数 0 若存在，固定为 memory token；其余参数按来源 `LocalId`、字段偏移和定义 block 顺序排序。

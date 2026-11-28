@@ -26,7 +26,7 @@ use super::super::inst::{Inst, LabelDefinition, LabelId, Mem, Operand, Scale, Se
 use super::super::layout;
 use super::super::lower::{self, Builder, LowerCtx, LoweringError, SiteValue};
 use super::super::reg::{Clobbers, FRAME_SLOT_BASE, Gpr, Reg, Xmm};
-use super::super::select::{self, SelectedBlock, SelectedFunction, SiteKind};
+use super::super::select::{self, SelectedBlock, SiteKind};
 use super::super::table::{self, Access, OperandKind};
 use super::super::verify;
 use super::frame::{self, FrameLayout};
@@ -85,7 +85,7 @@ pub struct Emit<'a> {
 )]
 pub fn rewrite(
     body: &Body,
-    selected: &SelectedFunction,
+    mut blocks: Vec<SelectedBlock>,
     live: &LiveInfo,
     values: &[ValueAllocation],
     frame: &FrameLayout,
@@ -103,7 +103,6 @@ pub fn rewrite(
         scratch_gpr: scratch_pool(frame),
         traffic: Cell::new(SpillTraffic::default()),
     };
-    let mut blocks = selected.blocks.clone();
     let entry_order = blocks
         .iter()
         .position(|block| block.id == body.entry)
@@ -423,7 +422,7 @@ fn rewrite_sequence(
     init_stores: &[(u32, bool)],
 ) -> Result<Option<Range<u32>>, AllocError> {
     let entries = live::site_plan(lowered)?;
-    let original_labels = lowered.sequence.labels.clone();
+    let mut labels = std::mem::take(&mut lowered.sequence.labels);
     let mut builder = Builder::with_labels(label_base);
     let mut region = None;
     if prepend || kind == SiteKind::Prologue {
@@ -441,7 +440,7 @@ fn rewrite_sequence(
         if kind == SiteKind::Prologue {
             // 复用站点原有的两个站内标签 id（`check` 与 `cold`）：标记 lowering 只登记
             // 这两个编号，`select` 的标签记账与这里重写后的编号必须一致。
-            for label in &original_labels {
+            for label in &labels {
                 if label.label.0 > 1 {
                     return Err(AllocError::new(format!(
                         "入口 StackCheck 站点标签 L{} 超出标记编号",
@@ -453,7 +452,6 @@ fn rewrite_sequence(
             return Ok(region);
         }
     }
-    let mut labels = original_labels;
     let mut pending = pending_stores(emit, lowered, &entries, &points)?;
     // 站点代码之前刷新逐根初始化写入：该站点若是安全点，位图必须已经反映此前的事件。
     emit_init_stores(&mut builder, init_stores);
@@ -467,14 +465,14 @@ fn rewrite_sequence(
                 }
             }
             None => {
-                let inst = lowered.sequence.instructions[entry.instructions.start as usize].clone();
+                let inst = &lowered.sequence.instructions[entry.instructions.start as usize];
                 let last = entry.instructions.end as usize == lowered.sequence.instructions.len();
                 if epilogue && last {
                     let start = builder.instruction_count();
                     frame::emit_epilogue(&mut builder, emit.frame)?;
                     region = Some(start..builder.instruction_count());
                 }
-                rewrite_instruction(emit, &mut builder, &inst, point, &mut pending).map_err(
+                rewrite_instruction(emit, &mut builder, inst, point, &mut pending).map_err(
                     |error| AllocError::new(format!("点位 {point} 的 {inst:?}：{error}")),
                 )?;
             }

@@ -336,7 +336,7 @@ fn second_decimal_point_is_invalid_number() {
 #[test]
 fn lex_errors_never_reach_image_plan() {
     use crate::{CompileRequest, Compiler, TargetName};
-    let compilation = Compiler::shared().compile(CompileRequest::single_file(
+    let compilation = Compiler::shared().compile_to_lir(CompileRequest::single_file(
         "broken.gg",
         r#""unterminated"#,
         TargetName::X86_64Linux,

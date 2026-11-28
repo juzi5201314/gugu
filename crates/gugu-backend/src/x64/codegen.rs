@@ -306,14 +306,56 @@ pub struct FragmentPayload {
 }
 
 impl FragmentPayload {
-    /// 重算 payload 指纹；`fingerprint` 字段参与规范字节时先清零。
+    /// 重算 payload 指纹；`fingerprint` 字段参与规范字节时按全零编码，不克隆整份片段。
     pub fn compute_fingerprint(&self) -> [u8; 32] {
-        let mut canonical = self.clone();
-        canonical.fingerprint = [0; 32];
-        hash_domain(
-            FRAGMENT_DOMAIN,
-            &crate::canonical::to_vec(&canonical).expect("机器片段编码"),
-        )
+        #[derive(Serialize)]
+        struct CanonicalRef<'a> {
+            schema: u32,
+            target: &'a String,
+            instance: [u8; 32],
+            encoder_fingerprint: [u8; 32],
+            symbol: &'a String,
+            symbols: &'a Vec<String>,
+            rel8_count: u32,
+            hot_block_count: u32,
+            cold_block_count: u32,
+            abi_integer_args: u32,
+            abi_float_args: u32,
+            abi_stack_slots: u32,
+            sret: bool,
+            frame: &'a FramePayload,
+            points: &'a Vec<PointPayload>,
+            values: &'a Vec<ValuePayload>,
+            stats: &'a StatsPayload,
+            sites: &'a Vec<SitePayload>,
+            bytes: &'a Vec<u8>,
+            relocations: &'a Vec<Relocation>,
+            fingerprint: [u8; 32],
+        }
+        let view = CanonicalRef {
+            schema: self.schema,
+            target: &self.target,
+            instance: self.instance,
+            encoder_fingerprint: self.encoder_fingerprint,
+            symbol: &self.symbol,
+            symbols: &self.symbols,
+            rel8_count: self.rel8_count,
+            hot_block_count: self.hot_block_count,
+            cold_block_count: self.cold_block_count,
+            abi_integer_args: self.abi_integer_args,
+            abi_float_args: self.abi_float_args,
+            abi_stack_slots: self.abi_stack_slots,
+            sret: self.sret,
+            frame: &self.frame,
+            points: &self.points,
+            values: &self.values,
+            stats: &self.stats,
+            sites: &self.sites,
+            bytes: &self.bytes,
+            relocations: &self.relocations,
+            fingerprint: [0; 32],
+        };
+        crate::canonical::hash_domain(FRAGMENT_DOMAIN, &view).expect("机器片段编码")
     }
 }
 
@@ -430,16 +472,28 @@ impl X64Fragments {
     }
 }
 
-/// 元数据 blob 内的链接期重定位：把符号的链接地址写进 blob 的指定字节偏移。
+/// blob 内符号引用的链接语义。
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub enum BlobRelocationKind {
+    /// 写符号的镜像 RVA；`.gugu.meta` 元数据使用这种目标无关表示。
+    Rva,
+    /// 写重定位后的镜像虚拟地址；vtable 入口会被机器间接调用直接解引用。
+    Absolute,
+}
+
+/// 只读 blob 内的链接期重定位：把符号的链接地址写进 blob 的指定字节偏移。
 ///
-/// 根记录的 `location` 是镜像内真实地址，只有布局后才知道；编译器产出的是稳定符号名，
-/// 由 writer 在 `defined_layout`/`assign_rvas` 之后回填，action key 因此不含运行地址。
+/// 编译器产出稳定符号名，由 writer 在布局之后回填，action key 因此不含运行地址。
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub struct BlobRelocation {
+    /// 目标只读 blob 名；常量、vtable 与 `.gugu.meta` 共用同一回填机制。
+    pub blob: String,
     /// blob 内字节偏移，必须 8 字节对齐且留足 8 字节。
     pub offset: u64,
     /// 已登记符号名（与代码重定位同一命名空间）。
     pub symbol: String,
+    /// 写入 RVA 还是可执行镜像虚拟地址。
+    pub kind: BlobRelocationKind,
 }
 
 /// C 导出入口没有 managed 栈图，用户代码通过另一个受管适配器执行。
@@ -966,13 +1020,13 @@ impl DataPool {
     }
 
     /// 全局数据池的镜像 blob 清单，按全局下标升序。
-    fn blobs(&self) -> Vec<(String, Vec<u8>)> {
+    fn into_blobs(self) -> Vec<(String, Vec<u8>)> {
         self.entries
-            .iter()
+            .into_iter()
             .enumerate()
             .map(|(index, bytes)| {
                 let index = u32::try_from(index).expect("常量数据下标适配 u32");
-                (super::mangle::const_symbol(index), bytes.clone())
+                (super::mangle::const_symbol(index), bytes)
             })
             .collect()
     }
@@ -980,6 +1034,61 @@ impl DataPool {
 
 /// 常量数据去重域；与 `mangle::data_key` 的输入（下标）不同，两者不会互相碰撞。
 const CONST_DATA_DOMAIN: &str = "gugu-const-data-v1";
+
+type VtableBlobs = (Vec<(String, Vec<u8>)>, Vec<BlobRelocation>);
+
+fn vtable_blobs(
+    fragments: &[FragmentPayload],
+    universe: &TypeUniverse,
+) -> Result<VtableBlobs, Vec<Diagnostic>> {
+    let mut referenced = std::collections::BTreeSet::new();
+    for fragment in fragments {
+        for relocation in &fragment.relocations {
+            if let RelocTarget::Lir(crate::lir::body::Symbol::Vtable {
+                interface,
+                concrete,
+            }) = relocation.target
+            {
+                referenced.insert((interface, concrete));
+            }
+        }
+    }
+    let mut blobs = Vec::new();
+    let mut relocations = Vec::new();
+    for (interface, concrete) in referenced {
+        let vtable = universe
+            .vtables
+            .iter()
+            .find(|vtable| {
+                vtable.interface == interface
+                    && universe
+                        .records
+                        .get(vtable.concrete as usize)
+                        .is_some_and(|record| record.key == concrete)
+            })
+            .ok_or_else(|| vec![invalid("vtable 引用不在冻结类型表")])?;
+        let name = super::mangle::mangle_symbol(&crate::lir::body::Symbol::Vtable {
+            interface,
+            concrete,
+        });
+        let bytes = vtable
+            .methods
+            .len()
+            .checked_mul(8)
+            .ok_or_else(|| vec![invalid("vtable 尺寸溢出")])?;
+        for (slot, method) in vtable.methods.iter().enumerate() {
+            let instance = crate::lir::vtable_shim::key(&interface, &concrete, &method.instance);
+            relocations.push(BlobRelocation {
+                blob: name.clone(),
+                offset: (slot * 8) as u64,
+                symbol: super::mangle::mangle_instance(&instance),
+                kind: BlobRelocationKind::Absolute,
+            });
+        }
+        blobs.push((name, vec![0; bytes.max(1)]));
+    }
+    Ok((blobs, relocations))
+}
 
 #[expect(
     clippy::too_many_arguments,
@@ -1012,6 +1121,10 @@ pub fn build(
     let metadata = super::metadata::build(lir, &fragments, sources, target, raw)?;
     let type_descriptors = type_descriptor_offsets(&fragments, universe)?;
     let globals = global_blocks(&fragments)?;
+    let (vtables, blob_relocations) = vtable_blobs(&fragments, universe)?;
+    let mut constant_blobs = constants.into_blobs();
+    constant_blobs.extend(vtables);
+    constant_blobs.sort_by(|left, right| left.0.cmp(&right.0));
     let native_exports = lir
         .exports()
         .iter()
@@ -1028,11 +1141,9 @@ pub fn build(
         entry_symbol,
         metadata,
         glues,
-        constants: constants.blobs(),
+        constants: constant_blobs,
         globals,
-        // 根记录生产者接入后，这里填入 `(记录 location 偏移, 静态块符号)`；当前无受管静态，
-        // 列表为空但仍进入指纹与 writer 路径，避免之后新增第二种回填机制。
-        blob_relocations: Vec::new(),
+        blob_relocations,
         type_descriptors,
         fingerprint: [0; 32],
     };
@@ -1066,18 +1177,19 @@ pub fn fragments(
     let lir_fingerprint = lir.fingerprint();
     let entries = super::installed::entries(prebuilt).map_err(|error| vec![error])?;
     let mut fragments = Vec::with_capacity(lir.bodies().len());
-    for (body, &from_table) in lir.bodies().iter().zip(lir.installed()) {
+    for (index, (body, &from_table)) in lir.bodies().iter().zip(lir.installed()).enumerate() {
         let recorded = if from_table {
             super::installed::decode(installed, entries, body, glues)
                 .map_err(|error| vec![error])?
         } else {
             None
         };
-        let fragment = match recorded {
-            Some(fragment) => fragment,
+        let (fragment, freshly_assembled) = match recorded {
+            Some(fragment) => (fragment, false),
             None => fragment_query(
                 lir_fingerprint,
                 body,
+                lir.body_fingerprint(index),
                 universe,
                 raw,
                 target,
@@ -1087,7 +1199,7 @@ pub fn fragments(
                 glues,
             )?,
         };
-        validate_fragment(&fragment, body, target, encoder)?;
+        validate_fragment(&fragment, body, target, encoder, !freshly_assembled)?;
         fragments.push(fragment);
     }
     Ok((contract, fragments))
@@ -1104,11 +1216,11 @@ pub fn record_fragment(
 ) -> Result<FragmentPayload, Vec<Diagnostic>> {
     let encoder = contract.fingerprint();
     let fragment = assemble_fragment(body, universe, raw, target, encoder, contract, glues)?;
-    validate_fragment(&fragment, body, target, encoder)?;
+    validate_fragment(&fragment, body, target, encoder, false)?;
     Ok(fragment)
 }
 
-/// 经 `CodegenFragment` query 现算或取缓存的单个片段。
+/// 经 `CodegenFragment` query 现算或取缓存的单个片段；返回 `(片段, 是否本次现算)`。
 #[expect(
     clippy::too_many_arguments,
     reason = "query 键由 LIR 指纹、编码器契约与运行时契约共同组成"
@@ -1116,6 +1228,7 @@ pub fn record_fragment(
 fn fragment_query(
     lir_fingerprint: [u8; 32],
     body: &Body,
+    body_fingerprint: [u8; 32],
     universe: &TypeUniverse,
     raw: &RuntimeRawContractV1,
     target: TargetName,
@@ -1123,13 +1236,14 @@ fn fragment_query(
     queries: &QueryEngine,
     sources: &SourceMap,
     glues: &RuntimeGlueBindings,
-) -> Result<FragmentPayload, Vec<Diagnostic>> {
+) -> Result<(FragmentPayload, bool), Vec<Diagnostic>> {
     let key = QueryKey::new(
         QueryKind::CodegenFragment,
         CODEGEN_SCHEMA,
         fragment_key(
             lir_fingerprint,
             body,
+            body_fingerprint,
             target,
             encoder,
             raw,
@@ -1165,8 +1279,9 @@ fn fragment_query(
     });
     let computed = computed.map_err(|error| restore_errors(error, sources))?;
     match fresh {
-        Some(fragment) => Ok(fragment),
+        Some(fragment) => Ok((fragment, true)),
         None => crate::canonical::from_slice(computed.payload())
+            .map(|fragment| (fragment, false))
             .map_err(|_| vec![invalid("缓存机器片段不是合法 schema")]),
     }
 }
@@ -1228,9 +1343,14 @@ fn type_descriptor_offsets(
 }
 
 /// 单个实例的片段 query key。
+#[expect(
+    clippy::too_many_arguments,
+    reason = "片段键覆盖 LIR 指纹、body 身份、目标、编码器与运行时契约"
+)]
 fn fragment_key(
     lir_fingerprint: [u8; 32],
     body: &Body,
+    body_fingerprint: [u8; 32],
     target: TargetName,
     encoder: [u8; 32],
     raw: &RuntimeRawContractV1,
@@ -1241,7 +1361,7 @@ fn fragment_key(
     canonical.push(u8::from(defer_poll));
     canonical.extend_from_slice(&lir_fingerprint);
     canonical.extend_from_slice(&body.instance);
-    canonical.extend_from_slice(&body.fingerprint());
+    canonical.extend_from_slice(&body_fingerprint);
     canonical.extend_from_slice(target.name().as_bytes());
     canonical.extend_from_slice(&encoder);
     canonical.extend_from_slice(&raw.scheduler().fingerprint());
@@ -1280,8 +1400,10 @@ fn world_fingerprint(world: &X64World) -> [u8; 32] {
         hasher.update(&bytes.to_le_bytes());
     }
     for relocation in &world.blob_relocations {
+        hasher.update(relocation.blob.as_bytes());
         hasher.update(&relocation.offset.to_le_bytes());
         hasher.update(relocation.symbol.as_bytes());
+        hasher.update(&[relocation.kind as u8]);
     }
     hasher.update(&world.contract.fingerprint());
     for fragment in &world.fragments {
@@ -1578,6 +1700,7 @@ fn validate_fragment(
     body: &Body,
     target: TargetName,
     encoder: [u8; 32],
+    verify_fingerprint: bool,
 ) -> Result<(), Vec<Diagnostic>> {
     if fragment.schema != CODEGEN_SCHEMA
         || fragment.target != target.name()
@@ -1586,7 +1709,7 @@ fn validate_fragment(
     {
         return Err(vec![invalid("机器片段没有绑定当前输入、目标或编码规则")]);
     }
-    if fragment.fingerprint != fragment.compute_fingerprint() {
+    if verify_fingerprint && fragment.fingerprint != fragment.compute_fingerprint() {
         return Err(vec![invalid("机器片段指纹与内容不一致")]);
     }
     let expected = expected_sites(body);

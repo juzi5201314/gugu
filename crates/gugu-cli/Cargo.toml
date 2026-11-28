@@ -20,3 +20,6 @@ serde.workspace = true
 serde_json.workspace = true
 tar.workspace = true
 toml.workspace = true
+
+[dev-dependencies]
+gugu-compiler = { path = "../gugu-compiler", features = ["test-support"] }

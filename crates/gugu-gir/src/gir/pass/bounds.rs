@@ -9,7 +9,7 @@ pub fn run(
     editor: &mut Editor,
     module: &hir::Module,
     analysis: &AnalysisWorldV1,
-    bodies: &[crate::gir::body::GirBody],
+    bodies: &gugu_base::SharedTable<crate::gir::body::GirBody>,
     generic_body: u32,
 ) -> Result<Outcome, Diagnostic> {
     let Some(owner_definition) = bodies.get(generic_body as usize).map(|body| body.owner) else {

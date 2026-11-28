@@ -8,8 +8,10 @@
 | --- | --- | --- | --- |
 | `x86_64-linux` | System V AMD64 | ELF（PT_INTERP + DT_NEEDED 动态导入） | 动态导入表/内建桩 |
 | `x86_64-windows` | Microsoft x64 | PE32+（AMD64） | IAT |
+| `aarch64-linux` | AAPCS64 | ELF64（AArch64） | syscall / 按需动态导入 |
+| `aarch64-macos` | Darwin AAPCS64 | Mach-O 64（arm64） | dyld / libSystem |
 
-`--target` 取以上目标名；默认宿主。双目标编译的 CompilerIdentity、镜像计划与 action key 各自独立。
+`--target` 取以上四个目标名；默认宿主。各目标编译的 CompilerIdentity、镜像计划与 action key 各自独立。
 
 ## 参数与返回槽位
 
