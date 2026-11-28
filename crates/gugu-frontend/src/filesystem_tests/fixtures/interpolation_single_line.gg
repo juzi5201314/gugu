@@ -1,0 +1,4 @@
+use std.io.{println}
+fn main() { let n = 42; println(f"{n}") }
+#[used]
+fn nested() { let n = 42; if true { println(f"{{{n + 1:04x}}}"); println(f"{if n == 42 { "yes" } else { "no" }}") } }

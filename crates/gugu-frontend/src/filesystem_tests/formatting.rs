@@ -2,6 +2,32 @@ use super::{CompileRequest, Compiler, TargetName, harness::Harness};
 use gugu_sema::string::{FormatSpec, ParsedCount, fmt, parse_format};
 
 #[test]
+fn single_line_interpolation_keeps_statement_and_brace_boundaries() {
+    let compiled = Compiler::shared().compile_to_lir(CompileRequest::single_file(
+        "main.gg",
+        include_str!("fixtures/interpolation_single_line.gg"),
+        TargetName::X86_64Linux,
+    ));
+    assert!(
+        compiled.is_success(),
+        "{:?}",
+        compiled.diagnostics().items()
+    );
+    for (entry, expected) in [
+        ("main", vec![(1, b"42\n".to_vec())]),
+        (
+            "nested",
+            vec![(1, b"{002b}\n".to_vec()), (1, b"yes\n".to_vec())],
+        ),
+    ] {
+        assert_eq!(
+            super::printing::invoke_compiled(&compiled, entry, &[], 262144),
+            expected
+        );
+    }
+}
+
+#[test]
 fn interpolation_binary_expressions_preserve_operator_dispatch_and_order() {
     assert_eq!(
         super::printing::output(include_str!("fixtures/interpolation_binary.gg"), &[]),
