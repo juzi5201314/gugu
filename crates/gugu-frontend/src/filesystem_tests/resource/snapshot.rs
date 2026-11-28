@@ -2,7 +2,7 @@
 use super::*;
 
 fn compile_stats() -> Compilation {
-    let output = Compiler::shared().compile(CompileRequest::single_file(
+    let output = Compiler::shared().compile_to_lir(CompileRequest::single_file(
         "main.gg",
         include_str!("../../../../gugu-compiler/tests/fixtures/runtime_stats.gg"),
         TargetName::X86_64Linux,
@@ -40,9 +40,25 @@ fn snapshot(
 }
 
 #[test]
+fn runtime_snapshot_and_callback_contracts() {
+    memory_snapshot_separates_uncommitted_reservation_and_file_subtotal();
+    coroutine_stack_ledger_preserves_failed_commit_and_retires_only_live_bytes();
+    shutdown_releases_all_cached_worker_stacks();
+    retired_stack_trim_respects_byte_budget_across_rounds();
+    pressure_retires_dead_stack_without_losing_join_result();
+    control_cache_trim_recommits_only_required_pages();
+    verified_morestack_entry_commits_and_publishes_larger_stack();
+    callback::run_runtime_contracts();
+}
+
+#[test]
+fn windows_aligned_reservation_contracts() {
+    windows_aligned_reservations_release_original_blocks_and_account_metadata();
+    windows_aligned_metadata_commit_failure_releases_unpublished_reservation();
+}
+
 fn memory_snapshot_separates_uncommitted_reservation_and_file_subtotal() {
-    let (hir, bodies) = runtime_bodies();
-    let mut harness = ResourceHarness::from_bodies(&hir, &bodies);
+    let mut harness = runtime_harness();
     let mut memory = vec![0; 16384];
     put(&mut memory, HOT + 16, PROCESSOR);
     harness.run(
@@ -137,10 +153,8 @@ fn memory_snapshot_separates_uncommitted_reservation_and_file_subtotal() {
     );
 }
 
-#[test]
 fn windows_aligned_reservations_release_original_blocks_and_account_metadata() {
-    let (hir, bodies) = super::super::harness::runtime_bodies_for(TargetName::X86_64Windows);
-    let mut harness = ResourceHarness::from_bodies(&hir, &bodies);
+    let mut harness = runtime_harness_for(TargetName::X86_64Windows);
     let mut memory = vec![0; 524288];
     put(&mut memory, HOT + 16, PROCESSOR);
     harness.reserve_result = 65536;
@@ -197,10 +211,8 @@ fn windows_aligned_reservations_release_original_blocks_and_account_metadata() {
     );
 }
 
-#[test]
 fn windows_aligned_metadata_commit_failure_releases_unpublished_reservation() {
-    let (hir, bodies) = super::super::harness::runtime_bodies_for(TargetName::X86_64Windows);
-    let mut harness = ResourceHarness::from_bodies(&hir, &bodies);
+    let mut harness = runtime_harness_for(TargetName::X86_64Windows);
     let mut memory = vec![0; 262144];
     put(&mut memory, HOT + 16, PROCESSOR);
     harness.reserve_result = 65536;
@@ -220,10 +232,8 @@ fn windows_aligned_metadata_commit_failure_releases_unpublished_reservation() {
     assert_eq!(word(&memory, PROCESSOR + 3936), 0);
 }
 
-#[test]
 fn coroutine_stack_ledger_preserves_failed_commit_and_retires_only_live_bytes() {
-    let output = compile_stats();
-    let mut harness = ResourceHarness::new(&output);
+    let mut harness = runtime_harness();
     let mut memory = vec![0; 16384];
     put(&mut memory, HOT + 16, PROCESSOR);
     harness.run(
@@ -262,10 +272,8 @@ fn coroutine_stack_ledger_preserves_failed_commit_and_retires_only_live_bytes() 
     assert!(harness.released.is_empty());
 }
 
-#[test]
 fn shutdown_releases_all_cached_worker_stacks() {
-    let (hir, bodies) = runtime_bodies();
-    let mut harness = ResourceHarness::from_bodies(&hir, &bodies);
+    let mut harness = runtime_harness();
     let mut memory = request_memory();
     put(&mut memory, REQUEST + 104, 0);
     let bytes = 9 * 65536 + 4096;
@@ -294,10 +302,8 @@ fn shutdown_releases_all_cached_worker_stacks() {
     }
 }
 
-#[test]
 fn retired_stack_trim_respects_byte_budget_across_rounds() {
-    let (hir, bodies) = runtime_bodies();
-    let mut harness = ResourceHarness::from_bodies(&hir, &bodies);
+    let mut harness = runtime_harness();
     let mut memory = vec![0; 196608];
     let node = 16384;
     let dead = 17408;
@@ -350,10 +356,8 @@ fn retired_stack_trim_respects_byte_budget_across_rounds() {
     }
 }
 
-#[test]
 fn pressure_retires_dead_stack_without_losing_join_result() {
-    let output = compile_stats();
-    let mut harness = ResourceHarness::new(&output);
+    let mut harness = runtime_harness();
     let mut memory = vec![0; 131072];
     let node = 16384;
     let dead = 17408;
@@ -573,10 +577,8 @@ fn public_stats_reads_runtime_state_without_scheduling_or_allocation() {
     assert!(harness.started.is_empty() && harness.reserved.is_empty() && harness.woken.is_empty());
 }
 
-#[test]
 fn control_cache_trim_recommits_only_required_pages() {
-    let output = compile_stats();
-    let mut harness = ResourceHarness::new(&output);
+    let mut harness = runtime_harness();
     let mut memory = vec![0; 196608];
     let base = 65536;
     put(&mut memory, HOT + 16, PROCESSOR);
@@ -628,10 +630,10 @@ fn control_cache_trim_recommits_only_required_pages() {
     assert_eq!(harness.committed.len(), 1);
 }
 
-#[test]
-fn blocking_snapshot_tracks_waiting_inflight_completion_and_stack_cache() {
-    let output = compile();
-    let mut harness = ResourceHarness::new(&output);
+pub(super) fn blocking_snapshot_tracks_waiting_inflight_completion_and_stack_cache(
+    output: &Compilation,
+) {
+    let mut harness = ResourceHarness::new(output);
     let mut memory = request_memory();
     put(&mut memory, PROCESSOR + 4024, 0);
     assert_eq!(
@@ -692,10 +694,8 @@ fn blocking_snapshot_tracks_waiting_inflight_completion_and_stack_cache() {
     assert_eq!(word(&memory, COLD + 480), 0);
 }
 
-#[test]
 fn verified_morestack_entry_commits_and_publishes_larger_stack() {
-    let (hir, bodies) = super::super::harness::runtime_bodies();
-    let mut harness = ResourceHarness::from_bodies(&hir, &bodies);
+    let mut harness = runtime_harness();
     let mut memory = vec![0; 16384];
     const SECTION: u64 = 512;
     const STATE: u64 = 1024;

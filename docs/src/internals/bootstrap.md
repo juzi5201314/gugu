@@ -17,7 +17,7 @@
 
 ### Build-time runtime artifact
 
-compiler 构建阶段由 `gugu-runtime-builder` 读取内建 `std/` 与 `runtime/` 源，按目标生成 `GUGURT01` artifact；`gugu-compiler`（façade）嵌入并校验 Linux/Windows bytes，`gugu-frontend` 不持有字节，只按目标接收注入的 `RuntimeArtifactProvider`。当前 artifact 固化 source blob 与 manifest，用户 frontend 仍解析这些固定源码；它不是已编译的 runtime fragment 容器。独立布局证据从 record 签名形成，不依赖 executable 闭包。
+compiler 构建阶段由 `gugu-runtime-builder` 读取内建 `std/` 与 `runtime/` 源，按目标生成 `GUGURT01` artifact；`gugu-compiler`（façade）嵌入并校验 Linux/Windows bytes，`gugu-frontend` 不持有字节，只按目标接收注入的 `RuntimeArtifactProvider`。artifact 固化 source blob、manifest 与已物化的内建派生表。frontend 按目标、物化表实际内容身份及层 revision 复用通过结构 verifier 的不可变解码基底；缓存身份覆盖表字节、指纹、模块顺序与 revision，不能只凭声明摘要命中。每次会话仍校验源码前缀与模块归属；名称与导入记录共享解码表，`Span` / `SourceTableId` 在独立会话 overlay 中重建；用户定义按稳定前缀之后的编号追加。独立布局证据从 record 签名形成，不依赖 executable 闭包。
 
 runtime 的契约入口为 record-only 根：用于原有 size/align/offset/managed 校验，不生成 executable body。runtime `#[used]` 不再隐式形成全局执行根；rt0 启动、登记机器片段的源目标与可达 GIR 操作产生的 glue 需求进入单态化固定点。用户的 `#[used]`、导出、入口和初始化语义不变。未引用的源 glue 缺少实例时不绑定，实际引用缺少目标仍是 invariant error。
 
@@ -91,6 +91,7 @@ crates/
 │   ├── build.rs                    build-time 物化：builder source 表 → 前端派生 → GUGURT01 bytes
 │   ├── src/lib.rs                  façade：嵌入 artifact、注入 provider、再导出前端 API
 │   ├── src/artifact.rs             目标专属 artifact 解码与 RuntimeArtifactProvider 实现
+│   ├── tests/integration/          合并集成回归二进制（ABI、网络、进程、文件系统、物化保真等）
 │   ├── tests/docs_links.rs         文档链接与章节锚点契约
 │   └── benches/                    手工验收二进制（编码、栈图、片段、协程上下文）
 ├── gugu-project/                   项目模型：只依赖 gugu-base
@@ -219,11 +220,14 @@ crates/
 ### 编译器测试构建
 
 `cargo nextest run --workspace` 使用当前 workspace 的测试构建配置：`opt-level = 3`、
-`debug = 1`，保留 `debug-assertions` 与 `overflow-checks`；不为验收切换新的 Cargo 构建 profile。
-构建时间与测试执行时间分别记录。`.config/nextest.toml` 使用 `test-threads = "num-cpus"`，
-调度槽数随可用 CPU 数伸缩，保持零重试与失败即停。重编译与协议用例按既有的 2/3/4/6 槽权重限制并发，
-不在多核机器上固定独占；六槽用例在 12 槽时最多两个并发，在六槽及以下独占。
-默认每个测试限时 3 秒，终止宽限期为 1 秒；整轮测试执行限时 120 秒。
+`debug = 0`，保留 `debug-assertions` 与 `overflow-checks`；`[profile.dev.build-override]`
+同步使用 `opt-level = 3` 与 `debug = 0`，使 build-dependencies 与目标产物共享依赖编译，
+且不为验收切换新的 Cargo 构建 profile。`gugu-compiler` 的常规集成回归合并为单一
+`tests/integration/` 二进制（与纯文档检查 `tests/docs_links.rs` 分离），避免每个集成测试
+文件重复链接 180+ MiB 嵌入制品。构建时间与测试执行时间分别记录。`.config/nextest.toml`
+使用 `test-threads = "num-cpus"`，调度槽数随可用 CPU 数伸缩，保持零重试与失败即停。重编译与
+协议用例按既有的 2/3/4/6 槽权重限制并发，不在多核机器上固定独占；六槽用例在 12 槽时最多两个
+并发，在六槽及以下独占。默认每个测试限时 3 秒，终止宽限期为 1 秒；整轮测试执行限时 120 秒。
 超时终止测试进程组并判失败，不仅打印 `SLOW`。
 CI 通过 `ci/nextest.toml` 的 `profile.ci` 继承调度槽数与权重，单项与整轮时限分别为 10 秒与 600 秒；整轮上限在套件规模已接近 300 秒后为容量余量放宽，单项时限不变。
 该时限同样适用于显式运行 `slow-tests`；不得用连续分片、提高超时、黑名单或削弱 fixture 掩盖不合格的耗时。
@@ -259,6 +263,8 @@ frontend
       ↓
 build-ir
       ↓
+codegen
+      ↓
 plan-backend
       ↓
 attach-runtime
@@ -269,6 +275,18 @@ emit-image
 ```
 
 节点状态只有 `pending`、`complete`、`skipped` 和 `failed`。成功路径的 `validate-image` 验证镜像计划，`emit-image` 在镜像字节生成后为 `complete`（落盘由宿主工具完成）。失败路径从第一个失败节点开始把下游节点标为 `skipped`，编排器不执行降级编译、不调用外部 assembler/linker，也不写出部分产物。
+
+回归测试使用 `Compiler::compile_sema_for_test`、`Compiler::compile_frontend_for_test`、
+`Compiler::compile_to_lir` 或 `Compiler::compile_full_for_test` 显式选择阶段。
+Clippy `disallowed_methods` 门禁禁止测试直接调用生产 `Compiler::compile`；需要完整后端的回归
+使用测试专用入口声明阶段需求。
+
+`compile_sema_for_test` 在语义检查、冻结 HIR 与文档/lint 诊断后结束，跳过 GIR、单态化与全程序分析；
+`compile_frontend_for_test` 在完成前端 GIR/单态化/分析/placement 后结束，跳过 LIR 与后端；
+`Compiler::compile_to_lir` 与 `Compiler::compile` 共用前置流水线，
+在 LIR 通过结构校验后结束。成功结果保留诊断、源码表、HIR、GIR 和 LIR，将 `build-ir`
+记为 `complete`、`codegen` 及下游记为 `skipped`。完整编译继续解析 runtime glue、派生
+GC metadata 和 runtime raw 契约，然后进入机器码生成与镜像规划。
 
 输入形态如下：
 

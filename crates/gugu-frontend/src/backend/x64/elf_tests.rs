@@ -1,4 +1,4 @@
-use super::codegen::BlobRelocation;
+use super::codegen::{BlobRelocation, BlobRelocationKind};
 use super::elf::{
     Blob, LinkRequest, ObjectReloc, ObjectSymbol, RelocKindCode, apply_relative, claim_slot,
     extract_archive, link, pack_archive, pc_rel32, reject_writable_executable,
@@ -62,8 +62,10 @@ fn metadata_blob_symbol_relocations_are_filled_at_link_time() {
         bytes: meta,
     });
     prepared.blob_relocations = vec![BlobRelocation {
+        blob: ".gugu.meta".to_owned(),
         offset: 8,
         symbol: "_start".to_owned(),
+        kind: BlobRelocationKind::Rva,
     }];
     let image = link(&prepared).expect("镜像");
     let at = image
@@ -76,8 +78,10 @@ fn metadata_blob_symbol_relocations_are_filled_at_link_time() {
 
     // 符号缺失必须失败，不能留零值让运行期读到无效地址。
     prepared.blob_relocations = vec![BlobRelocation {
+        blob: ".gugu.meta".to_owned(),
         offset: 8,
         symbol: "missing_symbol".to_owned(),
+        kind: BlobRelocationKind::Rva,
     }];
     let error = link(&prepared).expect_err("缺失符号必须失败");
     assert!(
@@ -586,7 +590,7 @@ fn archive_member_resolves_an_unresolved_c_symbol() {
 #[ignore = "slow full compilation"]
 fn panic_message_constant_reaches_the_image() {
     let source = "fn main() { panic(\"boom\") }";
-    let compilation = Compiler::shared().compile(CompileRequest::single_file(
+    let compilation = Compiler::shared().compile_full_for_test(CompileRequest::single_file(
         "main.gg",
         source,
         TargetName::X86_64Linux,
@@ -608,7 +612,7 @@ fn panic_message_constant_reaches_the_image() {
 #[ignore = "slow full compilation"]
 fn compiled_main_is_static_pie_without_interpreter() {
     let source = "fn main() {}";
-    let compilation = Compiler::shared().compile(CompileRequest::single_file(
+    let compilation = Compiler::shared().compile_full_for_test(CompileRequest::single_file(
         "main.gg",
         source,
         TargetName::X86_64Linux,
@@ -631,7 +635,7 @@ fn compiled_main_is_static_pie_without_interpreter() {
     assert!(bytes.windows(8).any(|window| window == b"GUGUSRC1"));
     let entry = plan.linux_entry_vaddr() as usize;
     assert_eq!(&bytes[entry..entry + 3], &[0x48, 0x8d, 0x1d]);
-    let again = Compiler::new().compile(CompileRequest::single_file(
+    let again = Compiler::new().compile_full_for_test(CompileRequest::single_file(
         "main.gg",
         source,
         TargetName::X86_64Linux,

@@ -639,11 +639,12 @@ fn check(self: &CancelToken) Result[(), Cancelled]
 
 ## 路径
 
-`std.path.OsString` 与 `Path` 是不可变、无损的跨平台值。Linux 保留任意非 NUL byte；Windows 保留合法 UTF-16。Path 的连接、替换文件名、父路径和扩展名操作返回新 Path，不修改原值。任何函数都只做字符串变换，不读取目录、不解析 `.` / `..`、不 canonicalize、不碰 symlink。
+`std.path.OsString` 与 `Path` 是不可变、无损的跨平台值。Linux 与 macOS 保留任意非 NUL byte；Windows 保留合法 UTF-16。Path 的连接、替换文件名、父路径和扩展名操作返回新 Path，不修改原值。任何函数都只做字符串变换，不读取目录、不解析 `.` / `..`、不 canonicalize、不碰 symlink。
 
 ```text
 fn OsString.from_string(value: string) Result[OsString, Error]
-fn OsString.from_bytes(value: Bytes) OsString
+#[cfg(any(os = "linux", os = "macos"))] fn OsString.from_bytes(value: Bytes) OsString
+#[cfg(os = "windows")] fn OsString.from_bytes(value: Bytes) Result[OsString, UnicodeError]
 fn OsString.from_units(value: &[u16]) Result[OsString, Error]
 fn OsString.to_bytes(self: &Self) Bytes
 fn OsString.to_units(self: &Self) Vec[u16]
@@ -675,17 +676,17 @@ fn UnicodeError.source(self: &Self) Option[&dyn Error]
 
 `UnicodeError` 属于 `std.path`，不是 `std.text`。`offset` 是原生 code unit 序号。`message()` 固定为 `"invalid unicode"`，`source()` 固定 `None`。`OsString.from_string` 与 `from_units` 的失败使用 `std.io.Error`。
 
-Linux 原生序列是字节，分隔符是 `0x2F`。`from_bytes` 原样保存，包括非法 UTF-8；`from_string` 拒绝含 `0x00` 的 string，返回 `InvalidInput`，否则无损。`from_units` 在 Linux 不可用，返回 `Unsupported`。`to_string` 只接受合法 UTF-8，失败 `offset` 是字节序号。
+Linux 与 macOS 原生序列是字节，分隔符是 `0x2F`。`from_bytes` 原样保存，包括非法 UTF-8；`from_string` 拒绝含 `0x00` 的 string，返回 `InvalidInput`，否则无损。`from_units` 在 Linux 与 macOS 不可用，返回 `Unsupported`。`to_string` 只接受合法 UTF-8，失败 `offset` 是字节序号。
 
 Windows 原生序列是 UTF-16 code unit，分隔符是 `0x005C` 与 `0x002F`。`from_string` 按 UTF-16 编码且拒绝输入中的 U+0000。`from_units` 拒绝 lone surrogate 与 U+0000，失败 `offset` 是 code unit 序号。`from_bytes` 在 Windows 先按严格 UTF-8 解码，失败返回 `UnicodeError` 而不是 `io.Error`。`to_string` 拒绝 lone surrogate。
 
-`is_absolute`：Linux 以 `/` 开头；Windows 以盘符加冒号加分隔符（`C:\`、`C:/`）或两个分隔符开头。其余都是 relative。`join`：`child` 为 absolute 时返回 `child` 的副本；否则父路径为空直接返回 child，父路径已以分隔符结尾时直接拼接，否则插入一个原生分隔符（Linux `/`，Windows `\`）。
+`is_absolute`：Linux 与 macOS 以 `/` 开头；Windows 以盘符加冒号加分隔符（`C:\`、`C:/`）或两个分隔符开头。其余都是 relative。`join`：`child` 为 absolute 时返回 `child` 的副本；否则父路径为空直接返回 child，父路径已以分隔符结尾时直接拼接，否则插入一个原生分隔符（Linux 与 macOS `/`，Windows `\`）。
 
-`components` 按分隔符切分，保留空组件，不删除 `.` 或 `..`。`parent` 去掉最后一个组件及其前导分隔符；结果为空或原路径没有分隔符时返回 `None`。根路径（Linux `/`，Windows `C:\` 或 `\\server`）的 parent 是 `None`。`file_name` 是最后一个非空组件；没有时 `None`。`extension` 是最后一个组件里最后一个 `.` 之后的部分，且点不能是组件首字符；无点、点在首字符或点在末尾都返回 `None`。`file_stem` 是去掉该扩展名及点后的部分。
+`components` 按分隔符切分，保留空组件，不删除 `.` 或 `..`。`parent` 去掉最后一个组件及其前导分隔符；结果为空或原路径没有分隔符时返回 `None`。根路径（Linux 与 macOS `/`，Windows `C:\` 或 `\\server`）的 parent 是 `None`。`file_name` 是最后一个非空组件；没有时 `None`。`extension` 是最后一个组件里最后一个 `.` 之后的部分，且点不能是组件首字符；无点、点在首字符或点在末尾都返回 `None`。`file_stem` 是去掉该扩展名及点后的部分。
 
 `with_file_name` 替换最后一个非空组件，没有组件时等价于 `join`。`with_extension` 替换最后一个组件的扩展名；空 `extension` 去掉点与扩展名；原组件没有扩展名时追加点与新扩展名。
 
-相等、`Ord` 与 hash 使用原生 code unit 序列。Linux 区分大小写与斜杠；Windows 分隔符比较前都规范化为 `\`，盘符与路径体按 UTF-16 code unit 做不区分大小写比较，不调用文件系统。有效 string 在两个目标上都能无损构造 Path。非 Unicode 路径的 `to_string` 返回错误；日志和 UI 可以显式使用 `to_string_lossy`。
+相等、`Ord` 与 hash 使用原生 code unit 序列。Linux 与 macOS 按 byte 区分大小写与斜杠；Windows 分隔符比较前都规范化为 `\`，盘符与路径体按 UTF-16 code unit 做不区分大小写比较，不调用文件系统。不含 U+0000 的 string 在已登记目标上都能无损构造 Path。非 Unicode 路径的 `to_string` 返回错误；日志和 UI 可以显式使用 `to_string_lossy`。
 
 ## 文件系统
 
@@ -1202,7 +1203,7 @@ fn SignalSubscription.dropped(self: &Self) uint
 
 `signals` 不能为空，重复项合并；默认队列容量为 16，显式容量必须大于 0。一个进程可以有多个订阅，每个订阅收到匹配信号的独立副本。相同信号在同一订阅尚未取走时合并，`occurrences` 饱和递增；计数饱和后的额外到达也计入 `dropped()`。不同信号各占一个队列项。队列满时不阻塞 OS 信号处理路径，新增事件计入 `dropped()`。`recv` 只挂起当前协程，`try_recv` 不阻塞；关闭且取尽队列后返回 `signal.Error::Closed`，未关闭但无事件时 `try_recv` 返回 `signal.Error::Empty`。最后一个 `SignalSubscription` 句柄 lease 释放等价于 `close()`。
 
-`std.panic.panic(message)` 是 `!` 返回的 lang item，必须带 `#[track_caller]`。它与 `catch` 共享当前协程的展开边界；未处理时由[运行时与运维语义](runtime.md)产生 `unhandled-panic` 报告。标准库不提供 Go 式 `recover`，也不提供可以抑制 fatal、替换默认报告或改变退出类别的全局 panic hook。被 `catch` 或 `Join.wait()` 处理的 panic 不自动写 runtime 报告。
+`std.panic.panic(message)` 是 `!` 返回的 lang item，必须带 `#[track_caller]`。它恰好接收一个 `string` 实参；其它类型或实参数量都是编译错误。它与 `catch` 共享当前协程的展开边界；未处理时由[运行时与运维语义](runtime.md)产生 `unhandled-panic` 报告。标准库不提供 Go 式 `recover`，也不提供可以抑制 fatal、替换默认报告或改变退出类别的全局 panic hook。被 `catch` 或 `Join.wait()` 处理的 panic 不自动写 runtime 报告。
 
 ```text
 #[track_caller]

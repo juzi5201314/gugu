@@ -257,7 +257,7 @@ fn run(
     let groups = request.resolve(frame.scratch_offset())?;
     let rewritten = rewrite::rewrite(
         body,
-        &selected,
+        selected.blocks,
         &live,
         &values,
         &frame,

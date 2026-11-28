@@ -35,7 +35,7 @@ fn program() -> Vec<u8> {
 #[test]
 fn nested_switch_reads_element_tag() {
     let (hir, bodies) = runtime_bodies();
-    let mut harness = ResourceHarness::from_bodies(&hir, &bodies);
+    let mut harness = ResourceHarness::from_bodies(hir, bodies);
     let mut memory = vec![0u8; 65536];
     let program = program();
     let mut descriptor = vec![2];

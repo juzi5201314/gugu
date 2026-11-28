@@ -175,7 +175,7 @@ fn parses_pattern_matrix_fixture() {
 #[test]
 fn malformed_source_never_reaches_image_plan() {
     use crate::{CompileRequest, Compiler, TargetName};
-    let compilation = Compiler::shared().compile(CompileRequest::single_file(
+    let compilation = Compiler::shared().compile_full_for_test(CompileRequest::single_file(
         "broken.gg",
         "fn main( {}",
         TargetName::X86_64Linux,

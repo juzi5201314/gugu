@@ -454,7 +454,7 @@ impl<'a> Model<'a> {
                         .items
                         .iter()
                         .enumerate()
-                        .find(|(_, i)| i.span == d.span)
+                        .find(|(_, item)| &item.span == self.names.definition_span(id.index()))
                     {
                         return Ok(DefRef {
                             module: d.module.index(),
@@ -468,10 +468,19 @@ impl<'a> Model<'a> {
         Err(self.error(module, format!("未解析名称 `{}`", path.join("."))))
     }
     pub fn form(&self, module: usize, id: TyId) -> Result<Ty, Diagnostic> {
+        self.form_with_context(module, id, &mut Vec::new())
+    }
+
+    pub(super) fn form_with_context(
+        &self,
+        module: usize,
+        id: TyId,
+        stack: &mut Vec<DefRef>,
+    ) -> Result<Ty, Diagnostic> {
         let arena = &self.modules[module].arena;
         let span = &arena.tys[usize::try_from(id.0).expect("类型下标")].span;
         let params = self.parameters_at(module, span);
-        self.form_inner(module, id, &params, &mut Vec::new())
+        self.form_inner(module, id, &params, stack)
     }
 
     pub(super) fn parameters_at(&self, module: usize, span: &crate::Span) -> BTreeMap<String, Ty> {
@@ -579,7 +588,7 @@ impl<'a> Model<'a> {
             )))),
             TyKind::Array { elem, len } => Ty::Array(
                 Box::new(self.form_inner(module, elem, params, stack)?),
-                self.array_length(module, len, params)?,
+                self.array_length_with_context(module, len, params, stack)?,
             ),
             TyKind::Tuple(ts) => {
                 let ts: Vec<_> = ts
@@ -671,7 +680,6 @@ impl<'a> Model<'a> {
                     if stack.contains(&def) {
                         return Err(self.error(module, "透明别名形成循环"));
                     }
-                    stack.push(def);
                     let ItemKind::TypeAlias {
                         ty: Some(ty),
                         generics,
@@ -689,9 +697,10 @@ impl<'a> Model<'a> {
                             bound.insert(self.name(def.module, name).to_owned(), t);
                         }
                     }
-                    let ty = self.form_inner(def.module, ty, &bound, stack)?;
+                    stack.push(def);
+                    let ty = self.form_inner(def.module, ty, &bound, stack);
                     stack.pop();
-                    ty
+                    ty?
                 }
             }
             TyKind::Chan(args) => {
@@ -728,15 +737,17 @@ impl<'a> Model<'a> {
                 else {
                     return Err(error);
                 };
-                self.array_length(def.module, value, &BTreeMap::new())
+                self.array_length_with_context(def.module, value, &BTreeMap::new(), stack)
                     .map(Ty::Const)
             }),
             GenericArg::Expr(expr) => {
                 match self.modules[module].arena.exprs[expr.0 as usize].kind {
                     ExprKind::Path(path) => self
                         .form_kind(module, TyKind::Path(path), params, stack)
-                        .or_else(|error| self.const_argument(module, expr, params, error)),
-                    _ => self.array_length(module, expr, params).map(Ty::Const),
+                        .or_else(|error| self.const_argument(module, expr, params, error, stack)),
+                    _ => self
+                        .array_length_with_context(module, expr, params, stack)
+                        .map(Ty::Const),
                 }
             }
         }

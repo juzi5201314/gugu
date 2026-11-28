@@ -1,4 +1,5 @@
 //! HIR 只保存已选择的语义操作与 owner-local 索引，不持有 token、AST 或可变名称环境。
+use gugu_base::shared_table::SharedTable;
 use serde::{Deserialize, Serialize};
 
 mod body;
@@ -87,17 +88,34 @@ pub enum DefinitionKind {
 pub struct Module {
     pub sources: Vec<Source>,
     pub expansions: Vec<Expansion>,
-    pub definitions: Vec<Definition>,
-    pub types: Vec<Type>,
-    pub aggregates: Vec<Aggregate>,
-    pub interfaces: Vec<Interface>,
-    pub implementations: Vec<Implementation>,
-    pub opaques: Vec<Opaque>,
+    pub definitions: SharedTable<Definition>,
+    pub types: SharedTable<Type>,
+    pub aggregates: SharedTable<Aggregate>,
+    pub interfaces: SharedTable<Interface>,
+    pub implementations: SharedTable<Implementation>,
+    pub opaques: SharedTable<Opaque>,
     pub owners: Vec<Owner>,
-    pub initialization: Vec<Initialization>,
-    pub linkage: Vec<Linkage>,
+    pub initialization: SharedTable<Initialization>,
+    pub linkage: SharedTable<Linkage>,
     pub entry: Option<DefId>,
     pub input_fingerprint: [u8; 32],
+}
+
+impl Module {
+    /// 把物化 HIR 的不可变表固化为共享前缀，之后只允许会话侧追加。
+    pub fn share(&mut self) {
+        self.types.share();
+        self.definitions.share();
+        self.aggregates.share();
+        self.interfaces.share();
+        self.implementations.share();
+        self.opaques.share();
+        self.initialization.share();
+        self.linkage.share();
+        for owner in &mut self.owners {
+            owner.share();
+        }
+    }
 }
 
 /// 只有完整 verifier 可以创建；反序列化得到的 Module 必须重新验证，不直接恢复此凭据。

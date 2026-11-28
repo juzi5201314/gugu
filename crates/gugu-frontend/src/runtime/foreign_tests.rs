@@ -204,7 +204,7 @@ fn c_string_rejects_interior_nul_and_scans_one_terminator() {
 #[test]
 fn compiled_foreign_sites_enter_the_runtime_contract() {
     let source = "extern \"C\" fn write(n: int) int\n#[ffi(leaf(stack = 16))] extern \"C\" fn leaf(n: int) int\n#[ffi(dirty_cpu)] extern \"C\" fn dirty(n: int) int\nfn main() { _ = write(1)\n _ = leaf(1)\n _ = dirty(1) }";
-    let compilation = Compiler::new().compile(
+    let compilation = Compiler::new().compile_full_for_test(
         CompileRequest::single_file("main.gg", source, TargetName::X86_64Linux)
             .with_native_link(linux_link(&["write", "leaf", "dirty"])),
     );
@@ -215,7 +215,7 @@ fn compiled_foreign_sites_enter_the_runtime_contract() {
     );
     // runtime 的 fs service 池常驻镜像并自带一处普通 bridge 站点；站点断言相对
     // 空程序基线增量判定。
-    let baseline = Compiler::new().compile(CompileRequest::single_file(
+    let baseline = Compiler::new().compile_full_for_test(CompileRequest::single_file(
         "main.gg",
         "fn main() {}",
         TargetName::X86_64Linux,
@@ -232,7 +232,7 @@ fn compiled_foreign_sites_enter_the_runtime_contract() {
     );
     assert_eq!(plan.foreign_leaf_sites(), baseline.foreign_leaf_sites() + 1);
     assert_eq!(plan.foreign_max_blocking_workers(), MAX_BLOCKING_WORKERS);
-    let again = Compiler::new().compile(
+    let again = Compiler::new().compile_full_for_test(
         CompileRequest::single_file("main.gg", source, TargetName::X86_64Linux)
             .with_native_link(linux_link(&["write", "leaf", "dirty"])),
     );

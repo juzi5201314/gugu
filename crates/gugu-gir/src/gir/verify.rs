@@ -6,18 +6,39 @@ use crate::hir::{self, CleanupAction};
 use std::collections::BTreeSet;
 
 pub fn verify(module: &hir::Module, body: &GirBody) -> Result<(), Diagnostic> {
-    structure(module, body)?;
+    verify_inner(module, None, body)
+}
+
+pub(crate) fn verify_for_owner(
+    module: &hir::Module,
+    owner: &hir::Owner,
+    body: &GirBody,
+) -> Result<(), Diagnostic> {
+    debug_assert_eq!(owner.definition, body.owner);
+    verify_inner(module, Some(owner), body)
+}
+
+fn verify_inner(
+    module: &hir::Module,
+    owner: Option<&hir::Owner>,
+    body: &GirBody,
+) -> Result<(), Diagnostic> {
+    structure(module, owner, body)?;
     statements(body)?;
     predecessors(body)?;
     storage(body)?;
-    cleanup_sequences(module, body)?;
+    cleanup_sequences(module, owner, body)?;
     suspend_cancelled(body)?;
     scoped_views(body)?;
     no_safepoint(body)?;
     Ok(())
 }
 
-fn structure(module: &hir::Module, body: &GirBody) -> Result<(), Diagnostic> {
+fn structure(
+    module: &hir::Module,
+    owner: Option<&hir::Owner>,
+    body: &GirBody,
+) -> Result<(), Diagnostic> {
     if body.revision != GIR_REVISION {
         return Err(gir_error("GIR revision 与规范不一致", None));
     }
@@ -27,14 +48,16 @@ fn structure(module: &hir::Module, body: &GirBody) -> Result<(), Diagnostic> {
     if body.locals.is_empty() || body.locals[0].kind != LocalKind::Return {
         return Err(gir_error("LocalId(0) 必须是返回槽", None));
     }
-    if body.expression_locals.len()
-        != module
-            .owners
-            .iter()
-            .find(|owner| owner.definition == body.owner)
-            .map(|owner| owner.expressions.len())
-            .unwrap_or(body.expression_locals.len())
-    {
+    let expected_expressions = owner
+        .or_else(|| {
+            module
+                .owners
+                .iter()
+                .find(|candidate| candidate.definition == body.owner)
+        })
+        .map(|owner| owner.expressions.len())
+        .unwrap_or(body.expression_locals.len());
+    if body.expression_locals.len() != expected_expressions {
         return Err(gir_error("GIR 表达式 local 表与 HIR owner 不对齐", None));
     }
     for (index, block) in body.blocks.iter().enumerate() {
@@ -236,12 +259,17 @@ fn walk_storage(
     Ok(())
 }
 
-fn cleanup_sequences(module: &hir::Module, body: &GirBody) -> Result<(), Diagnostic> {
-    let Some(owner) = module
-        .owners
-        .iter()
-        .find(|owner| owner.definition == body.owner)
-    else {
+fn cleanup_sequences(
+    module: &hir::Module,
+    owner: Option<&hir::Owner>,
+    body: &GirBody,
+) -> Result<(), Diagnostic> {
+    let Some(owner) = owner.or_else(|| {
+        module
+            .owners
+            .iter()
+            .find(|candidate| candidate.definition == body.owner)
+    }) else {
         return Err(gir_error("GIR body 没有对应 HIR owner", None));
     };
     for record in &body.exit_records {
