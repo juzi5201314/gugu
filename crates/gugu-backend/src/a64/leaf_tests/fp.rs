@@ -110,6 +110,42 @@ fn scalar_fp_arithmetic_constants_and_ieee_comparisons() {
 }
 
 #[test]
+fn distinct_fp_constants_and_full_width_uint_survive_copy_and_arithmetic() {
+    let mut f = Fixture::new(&[], &[Type::F64; 4]);
+    let x = constant(&mut f, Type::F64, 1.5_f64.to_bits());
+    let y = constant(&mut f, Type::F64, 2.25_f64.to_bits());
+    f.body.stack_slots.push(StackSlot {
+        local: 0,
+        bytes: 8,
+        align: 8,
+        roots: vec![],
+        descriptor: [0; 32],
+    });
+    let address = f.op(Op::StackAddr(SlotId(0)), &[], &[Type::Ptr])[0];
+    let access = crate::lir::body::Access {
+        alias: AliasClass::Stack(SlotId(0)),
+        align: 8,
+        volatile: false,
+    };
+    f.op(Op::Store(access.clone()), &[address, x], &[]);
+    let copy = f.op(Op::Load(access), &[address], &[Type::F64])[0];
+    let sum = f.op(Op::Float(FloatOp::Add), &[x, y], &[Type::F64])[0];
+    let product = f.op(Op::Float(FloatOp::Mul), &[x, y], &[Type::F64])[0];
+    let integer = f.constant(Type::I64, u64::MAX);
+    let unsigned = f.op(
+        Op::Convert(Conversion::IntToFloat { signed: false }),
+        &[integer],
+        &[Type::F64],
+    )[0];
+    f.ret(&[copy, sum, product, unsigned]);
+    let (_, fp, _) = vm::execute_fp(&f.compile(), &[], &[], None);
+    assert_eq!(
+        &fp[..4],
+        &[bits(1.5), bits(3.75), bits(3.375), bits(u64::MAX as f64)]
+    );
+}
+
+#[test]
 fn fp_conversions_preserve_bits_round_and_extend_narrow_integers() {
     for (source, target, signed, input, expected) in [
         (Type::I8, Type::F64, true, 255, bits(-1.0)),

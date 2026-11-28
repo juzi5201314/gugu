@@ -725,6 +725,10 @@ tail-area 检查和指针参数的栈图都复用同一 ABI placement，不按�
 默认测试解释已编码字节，覆盖 FP bank、SIMD 高半部、混合参数、压力、entry/poll
 和真实链接调用；不执行生成的 A64 机器码或 OS FFI。
 
+标量常量直接以 MOVZ/MOVN/MOVK 物化完整整数位型，浮点再通过 FMOV 写入 FP 车道；
+该路径不依赖数据常量池。回归同时覆盖两个不同浮点常量的栈上拷贝、加法、乘法与
+`u64::MAX` 的无符号转换，并检查相应源程序生成的 Mach-O 启动载荷及入口参数中的 main RVA。
+
 ### A64 ARMv8.0 原子 lowering（4d.2）
 
 原子 load/store、exchange、fetch add/sub/and/or/xor、强 CAS 与 fence 复用既有

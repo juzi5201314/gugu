@@ -1,0 +1,14 @@
+use std.io.{println}
+
+fn main() {
+    println("before")
+    let x = 1.5
+    let y = 2.25
+    let z = x
+    println(z)
+    println(x + y)
+    println(x * y)
+    println(x < y)
+    let u: uint = 18446744073709551615
+    println(u)
+}

@@ -112,6 +112,89 @@ fn aarch64_runtime_program_assembles() {
     assert!(output.image_plan().unwrap().linux_interpreter().is_empty());
 }
 
+#[test]
+fn aarch64_macos_numeric_constants_preserve_runtime_bindings() {
+    let output = compile(
+        include_str!("fixtures/a64_numeric_constants.gg"),
+        TargetName::Aarch64Macos,
+    );
+    let program = output.a64_program().expect("aarch64-macos 装配产物");
+    // 固定 safepoint 片段保留不可达的 callback 分支；这里只检查实际编译的函数体。
+    let unresolved = program
+        .world
+        .relocations
+        .iter()
+        .filter(|relocation| relocation.relocation.target == "__gugu_stub_exit")
+        .filter(|relocation| {
+            program.world.symbols.iter().any(|(symbol, at)| {
+                symbol.starts_with("__gugu_fn_")
+                    && at.section == relocation.at.section
+                    && at.offset <= relocation.at.offset
+                    && relocation.at.offset < at.offset + program.world.sizes[symbol]
+            })
+        })
+        .collect::<Vec<_>>();
+    assert!(
+        unresolved.is_empty(),
+        "数值常量不能引入退出桩：{unresolved:?}"
+    );
+    let image = &program.image;
+    let (text, _, _) = macho_section(image, "__text");
+    let (_, data, _) = macho_section(image, "__data");
+    let (_, params, _) = macho_section(image, "__rt0_params");
+    let main = text + program.world.entry.offset - crate::backend::macho::IMAGE_BASE;
+    let payload = data + program.world.symbols["__gugu_a64_payload"].offset;
+    let word = |offset: u64| u64::from_le_bytes(image[offset as usize..][..8].try_into().unwrap());
+    assert_eq!(
+        word(payload + std::mem::offset_of!(crate::runtime::entry::Rt0Payload, main_entry) as u64),
+        main,
+        "常量引起的布局变化不能偏移启动载荷中的 main 地址"
+    );
+    assert_eq!(
+        word(params + crate::runtime::entry::rt0_params::ENTRY as u64 * 8),
+        main
+    );
+}
+
+fn macho_section(image: &[u8], name: &str) -> (u64, u64, u64) {
+    let word = |offset: usize| u64::from_le_bytes(image[offset..][..8].try_into().unwrap());
+    let integer = |offset: usize| u32::from_le_bytes(image[offset..][..4].try_into().unwrap());
+    let mut command = 32;
+    for _ in 0..integer(16) {
+        if integer(command) == 0x19 {
+            for index in 0..integer(command + 64) as usize {
+                let section = command + 72 + index * 80;
+                let actual = std::str::from_utf8(&image[section..][..16])
+                    .unwrap()
+                    .trim_end_matches('\0');
+                if actual == name {
+                    return (
+                        word(section + 32),
+                        u64::from(integer(section + 48)),
+                        word(section + 40),
+                    );
+                }
+            }
+        }
+        command += integer(command + 4) as usize;
+    }
+    panic!("缺少 Mach-O 节 {name}");
+}
+
+#[test]
+fn aarch64_macos_rejects_out_of_range_int_before_uint_conversion() {
+    let output = Compiler::shared().compile_sema_for_test(CompileRequest::single_file(
+        "main.gg",
+        "fn main() { let u = uint(18446744073709551615)\n _ = u }",
+        TargetName::Aarch64Macos,
+    ));
+    assert!(!output.is_success());
+    assert!(output.diagnostics().items().iter().any(|diagnostic| {
+        diagnostic.message().contains("整数字面量超出目标类型范围")
+    }));
+    assert!(output.a64_program().is_none());
+}
+
 const DYN_PROGRAM: &str = r#"use std.io.{println}
 trait Describable {
     fn describe(self: &Self) string
