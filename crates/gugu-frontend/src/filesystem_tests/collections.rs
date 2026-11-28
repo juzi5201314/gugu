@@ -307,6 +307,23 @@ fn collections_aggregate_keys_and_structural_comparisons() {
 }
 
 #[test]
+fn chained_tuple_field_access_is_not_lexed_as_float() {
+    assert_eq!(
+        printed(
+            r#"
+            use std.io.{println}
+            fn main() {
+                let t = ((1, 2), (3, 4))
+                println(t.0.1)
+                println(t.1.0)
+            }
+            "#,
+        ),
+        "2\n3\n"
+    );
+}
+
+#[test]
 fn struct_patterns_with_rest_use_declared_field_positions() {
     assert_eq!(
         printed(

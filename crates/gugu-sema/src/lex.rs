@@ -266,7 +266,13 @@ impl<'a> Lexer<'a> {
             self.invalid_number(start, self.pos, "下划线不能出现在数字记号末尾");
             return;
         }
-        let float_dot = self.bytes.get(self.pos) == Some(&b'.')
+        let tuple_index = self
+            .buffer
+            .tokens
+            .last()
+            .is_some_and(|token| token.kind == TokenKind::Dot);
+        let float_dot = !tuple_index
+            && self.bytes.get(self.pos) == Some(&b'.')
             && self
                 .bytes
                 .get(self.pos + 1)
@@ -297,7 +303,7 @@ impl<'a> Lexer<'a> {
             self.finish_number(start, TokenKind::Float);
             return;
         }
-        if matches!(self.bytes.get(self.pos), Some(b'e' | b'E')) {
+        if !tuple_index && matches!(self.bytes.get(self.pos), Some(b'e' | b'E')) {
             if self.consume_exponent(start) {
                 self.finish_number(start, TokenKind::Float);
             }
