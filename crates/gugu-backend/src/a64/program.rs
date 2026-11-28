@@ -8,7 +8,7 @@ use super::{
     definitions::{runtime_definitions, runtime_imports},
     elf::{self, DynamicLink, Import, LinuxEntry, LinuxRuntime},
     foreign::Platform,
-    fragments::linux_import_slot_symbol,
+    fragments::{linux_import_slot_symbol, linux_import_stub, linux_import_stub_symbol},
     glue::{ForeignBindings, RuntimeBindings},
     macho::{self, DarwinEntry, DarwinRuntime},
     runtime::Catalog,
@@ -122,7 +122,7 @@ fn bindings() -> RuntimeBindings {
 }
 
 fn assemble(request: &ProgramRequest<'_>) -> Result<World, Error> {
-    let definitions = runtime_definitions(request.platform)
+    let mut definitions = runtime_definitions(request.platform)
         .into_iter()
         .chain(storage(request.cage_bytes))
         .collect::<Vec<_>>();
@@ -132,6 +132,29 @@ fn assemble(request: &ProgramRequest<'_>) -> Result<World, Error> {
     for import in request.imports {
         if !imports.iter().any(|known| known.name == import.name) {
             imports.push(import.clone());
+        }
+    }
+    if request.platform == Platform::Linux {
+        for import in &imports {
+            if import.kind != crate::NativeImportKind::Function {
+                continue;
+            }
+            let stub = linux_import_stub_symbol(&import.name);
+            if definitions
+                .iter()
+                .any(|definition| definition.symbol == stub)
+            {
+                continue;
+            }
+            definitions.push(Definition::fragment(stub, linux_import_stub(&import.name)));
+            definitions.push(Definition {
+                symbol: linux_import_slot_symbol(&import.name),
+                align: 8,
+                segment: Segment::Data,
+                content: SectionContent::Data(vec![0; 8]),
+                relocations: vec![],
+                pointers: vec![],
+            });
         }
     }
     let mut world = build_runtime(

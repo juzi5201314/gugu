@@ -53,3 +53,18 @@ fn a64_catalog_uses_canonical_frozen_runtime_definitions_not_names_or_aliases() 
     .unwrap_err();
     assert!(error.to_string().contains("frozen body differ"));
 }
+
+#[test]
+fn aarch64_leaf_extern_imports_build_for_linux_and_macos() {
+    let source = "#[ffi(leaf)]\nextern \"C\" fn getpid() i32\nfn main() { let _ = getpid() }";
+    for target in [TargetName::Aarch64Linux, TargetName::Aarch64Macos] {
+        let compilation =
+            Compiler::shared().compile(CompileRequest::single_file("main.gg", source, target));
+        assert!(
+            compilation.is_success(),
+            "{target}: {:?}",
+            compilation.diagnostics().items()
+        );
+        assert!(compilation.image_plan().is_some());
+    }
+}
