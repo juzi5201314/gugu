@@ -1,11 +1,20 @@
 //! 只发现 late 依赖，不执行分支；early 使用点不能通过绑定或函数隐藏阶段依赖。
-use super::super::model::Model;
+use super::super::model::{DefRef, Model};
 use crate::ast::*;
 use std::collections::BTreeSet;
 
 impl Model<'_> {
     pub fn depends_on_late(&self, module: usize, expression: ExprId) -> bool {
-        self.late_walk(module, expression, &mut BTreeSet::new())
+        self.depends_on_late_with_stack(module, expression, &[])
+    }
+
+    pub(super) fn depends_on_late_with_stack(
+        &self,
+        module: usize,
+        expression: ExprId,
+        const_stack: &[DefRef],
+    ) -> bool {
+        self.late_walk(module, expression, &mut BTreeSet::new(), const_stack)
     }
 
     fn late_walk(
@@ -13,6 +22,7 @@ impl Model<'_> {
         module: usize,
         expression: ExprId,
         seen: &mut BTreeSet<(usize, u32)>,
+        const_stack: &[DefRef],
     ) -> bool {
         if !seen.insert((module, expression.0)) {
             return false;
@@ -31,7 +41,7 @@ impl Model<'_> {
                             value: Some(value), ..
                         }
                         | ItemKind::Static { value, .. } => {
-                            return self.late_walk(def.module, value, seen);
+                            return self.late_walk(def.module, value, seen, const_stack);
                         }
                         _ => {}
                     }
@@ -48,7 +58,7 @@ impl Model<'_> {
                 match arena.exprs[base.0 as usize].kind {
                     ExprKind::Field { base, name } if self.name(module, name) == "as_int" => {
                         if self
-                            .constant_type(module, base)
+                            .constant_type_inner(module, base, &mut const_stack.to_vec())
                             .map_or(true, |ty| ty == super::super::Ty::TypeId)
                         {
                             return true;
@@ -60,7 +70,7 @@ impl Model<'_> {
                                 self.modules[def.module].arena.items[def.item.0 as usize].kind
                             && let FnBody::Block(body) | FnBody::Eq(body) =
                                 self.modules[def.module].arena.fns[function.0 as usize].body
-                            && self.late_walk(def.module, body, seen)
+                            && self.late_walk(def.module, body, seen, const_stack)
                         {
                             return true;
                         }
@@ -72,7 +82,7 @@ impl Model<'_> {
             ExprKind::Binary { lhs, rhs, op } => {
                 if matches!(op, BinOp::Lt | BinOp::Le | BinOp::Gt | BinOp::Ge)
                     && self
-                        .constant_type(module, lhs)
+                        .constant_type_inner(module, lhs, &mut const_stack.to_vec())
                         .is_ok_and(|ty| ty == super::super::Ty::TypeId)
                 {
                     return true;
@@ -160,6 +170,6 @@ impl Model<'_> {
         }
         children
             .into_iter()
-            .any(|child| self.late_walk(module, child, seen))
+            .any(|child| self.late_walk(module, child, seen, const_stack))
     }
 }

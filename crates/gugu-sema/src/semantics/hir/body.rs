@@ -164,42 +164,43 @@ impl<'b, 'f, 'm, 'a> BodyBuilder<'b, 'f, 'm, 'a> {
         let location = identity::location(compiler.sources, span)?;
         let output = hir::Owner {
             definition,
-            parameters: Vec::new(),
+            parameters: Vec::new().into(),
             body: hir::ExprId(0),
-            expressions: Vec::new(),
-            expression_types: Vec::new(),
-            statements: Vec::new(),
-            patterns: Vec::new(),
-            locals: Vec::new(),
+            expressions: Vec::new().into(),
+            expression_types: Vec::new().into(),
+            statements: Vec::new().into(),
+            patterns: Vec::new().into(),
+            locals: Vec::new().into(),
             scopes: vec![hir::Scope {
                 parent: None,
                 kind: hir::ScopeKind::Function,
                 location,
                 unwind_plan: 0,
-            }],
-            expression_ids: Vec::new(),
-            statement_ids: Vec::new(),
-            pattern_ids: Vec::new(),
-            scope_ids: Vec::new(),
-            arms: Vec::new(),
-            select_arms: Vec::new(),
-            fields: Vec::new(),
-            pattern_fields: Vec::new(),
-            string_parts: Vec::new(),
-            dispatches: Vec::new(),
-            adjustments: Vec::new(),
-            checks: Vec::new(),
-            captures: Vec::new(),
-            cleanup: Vec::new(),
-            cleanup_plans: Vec::new(),
-            cleanup_actions: Vec::new(),
+            }]
+            .into(),
+            expression_ids: Vec::new().into(),
+            statement_ids: Vec::new().into(),
+            pattern_ids: Vec::new().into(),
+            scope_ids: Vec::new().into(),
+            arms: Vec::new().into(),
+            select_arms: Vec::new().into(),
+            fields: Vec::new().into(),
+            pattern_fields: Vec::new().into(),
+            string_parts: Vec::new().into(),
+            dispatches: Vec::new().into(),
+            adjustments: Vec::new().into(),
+            checks: Vec::new().into(),
+            captures: Vec::new().into(),
+            cleanup: Vec::new().into(),
+            cleanup_plans: Vec::new().into(),
+            cleanup_actions: Vec::new().into(),
             return_plan: 0,
-            assembly: Vec::new(),
-            variadic_calls: Vec::new(),
-            borrow_constraints: Vec::new(),
+            assembly: Vec::new().into(),
+            variadic_calls: Vec::new().into(),
+            borrow_constraints: Vec::new().into(),
             input_fingerprint: compiler.checked.input_fingerprint,
-            foreign_calls: Vec::new(),
-            expression_inputs: Vec::new(),
+            foreign_calls: Vec::new().into(),
+            expression_inputs: Vec::new().into(),
         };
         let expression_map = vec![None; compiler.model.modules[module].arena.exprs.len()];
         let statement_map = vec![None; compiler.model.modules[module].arena.stmts.len()];
@@ -246,9 +247,9 @@ impl<'b, 'f, 'm, 'a> BodyBuilder<'b, 'f, 'm, 'a> {
                 })?
                 .adjustments = start..checked_id(self.output.adjustments.len())?;
         }
-        self.output.expressions = completed(self.expressions, "表达式")?;
-        self.output.statements = completed(self.statements, "语句")?;
-        self.output.patterns = completed(self.patterns, "模式")?;
+        self.output.expressions = completed(self.expressions, "表达式")?.into();
+        self.output.statements = completed(self.statements, "语句")?.into();
+        self.output.patterns = completed(self.patterns, "模式")?.into();
         self.output.input_fingerprint = owner_input_fingerprint(
             &self.compiler.output.definitions[self.output.definition.index()].key,
             &self.compiler.checked.input_fingerprint,

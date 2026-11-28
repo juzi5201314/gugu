@@ -104,6 +104,10 @@ fn main() {
     } else {
         TargetName::X86_64Linux
     };
+    #[expect(
+        clippy::disallowed_methods,
+        reason = "coroutine context bench 需要完整机器片段"
+    )]
     let compilation =
         Compiler::with_artifacts(&EMBEDDED_ARTIFACTS).compile(CompileRequest::single_file(
             "main.gg",

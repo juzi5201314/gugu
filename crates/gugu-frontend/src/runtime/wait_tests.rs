@@ -54,7 +54,7 @@ fn zero_demand_fingerprint(target: TargetName) -> [u8; 32] {
 #[test]
 #[cfg(feature = "slow-tests")]
 fn idle_program_reaches_image_plan_with_default_wait_contract() {
-    let idle = Compiler::shared().compile(CompileRequest::single_file(
+    let idle = Compiler::shared().compile_full_for_test(CompileRequest::single_file(
         "main.gg",
         "fn main() { let value = 1\n _ = value }",
         TargetName::X86_64Linux,
@@ -79,7 +79,7 @@ fn idle_program_reaches_image_plan_with_default_wait_contract() {
 fn assert_channel_demand_reaches_image_plan(target: TargetName) {
     let compiler = Compiler::shared();
     let compile = || {
-        compiler.compile(CompileRequest::single_file(
+        compiler.compile_full_for_test(CompileRequest::single_file(
             "main.gg",
             CHANNEL_SOURCE,
             target,
@@ -122,7 +122,7 @@ fn channel_demand_reaches_windows_image_plan() {
 #[cfg(feature = "slow-tests")]
 fn wait_frontend_gates_reject_before_image_plan() {
     let compiler = Compiler::shared();
-    let negative = compiler.compile(CompileRequest::single_file(
+    let negative = compiler.compile_full_for_test(CompileRequest::single_file(
         "main.gg",
         "fn main() { let c = chan[int](-1)\n _ = c }",
         TargetName::X86_64Linux,
@@ -137,7 +137,7 @@ fn wait_frontend_gates_reject_before_image_plan() {
             .any(|item| item.message().contains("channel 缓冲长度不能为负"))
     );
 
-    let illegal = compiler.compile(CompileRequest::single_file(
+    let illegal = compiler.compile_full_for_test(CompileRequest::single_file(
         "main.gg",
         "fn main() { let c = chan[int](1)\n select { c.try_send(1) => {} } }",
         TargetName::X86_64Linux,
@@ -166,7 +166,7 @@ fn select_expression_without_default_reaches_image_plan() {
         "fn main() {\n let a = chan[int](1)\n let b = chan[int](1)\n let r = select {\n let x = a.recv() => 0\n let y = b.recv() => 1\n }\n _ = r\n}",
         "fn main() {\n let a = async { 1 }\n let b = async { 2 }\n let r = select {\n let x = a.wait() => x\n let y = b.wait() => y\n }\n _ = r\n}",
     ] {
-        let compile = compiler.compile(CompileRequest::single_file(
+        let compile = compiler.compile_full_for_test(CompileRequest::single_file(
             "main.gg",
             source,
             TargetName::X86_64Linux,

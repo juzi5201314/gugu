@@ -36,7 +36,8 @@ fn evaluate_last_constant(source: &str) -> Result<ConstantValue, Diagnostic> {
         None,
     )
     .expect("名称解析成功");
-    let model = Model::new(&modules, &names, &Default::default()).expect("语义模型形成成功");
+    let model = Model::new(&modules, &names, &Default::default())
+        .map_err(|errors| errors.into_iter().next().expect("模型形成失败必须带诊断"))?;
     let value = modules[0]
         .arena
         .items
@@ -81,4 +82,28 @@ fn repeat_array_len_rejects_invalid_length_dependencies() {
     ] {
         assert!(evaluate_last_constant(source).is_err());
     }
+}
+
+#[test]
+fn repeat_array_len_rejects_indirect_constant_cycles() {
+    for source in [
+        "const COUNT: int = N\nconst N = [0; COUNT].len()\nconst OUTPUT: int = N",
+        "fn count() int = N\nconst N = [0; count()].len()\nconst OUTPUT: int = N",
+        "const COUNT: int = M\nconst M = N\nconst N = [0; COUNT].len()\nconst OUTPUT: int = N",
+        "const COUNT: int = if N < 2 { 3 } else { 4 }\nconst N = [0; COUNT].len()\nconst OUTPUT: int = N",
+        "const ARRAY: [int; N] = [0; 1]\nconst N = ARRAY.len()\nconst OUTPUT: int = N",
+        "type Items = [int; N]\nconst ARRAY: Items = [0; 1]\nconst N = ARRAY.len()\nconst OUTPUT: int = N",
+    ] {
+        let error = evaluate_last_constant(source).unwrap_err();
+        assert!(error.message().contains("循环"), "{error:?}");
+    }
+}
+
+#[test]
+fn array_len_preserves_acyclic_alias_length_dependencies() {
+    let source = "const SIZE: int = 3\ntype Items[T] = [T; SIZE]\nconst ARRAY: Items[int] = [0; SIZE]\nconst OUTPUT: int = ARRAY.len()";
+    assert_eq!(
+        evaluate_last_constant(source).unwrap(),
+        ConstantValue::Int(3)
+    );
 }

@@ -31,10 +31,14 @@ fn queued_memory(mask: u8) -> Vec<u8> {
     memory
 }
 
-#[test]
-fn pressure_admission_keeps_inflight_credit_and_resumes_fifo_after_drain() {
-    let (hir, bodies) = runtime_bodies();
-    let mut harness = ResourceHarness::from_bodies(&hir, &bodies);
+pub(super) fn run_all(output: &Compilation) {
+    pressure_admission_keeps_inflight_credit_and_resumes_fifo_after_drain(output);
+    pressure_admission_preserves_all_existing_workers(output);
+    cancelled_admission_waiters_leave_full_pool_without_waiting_for_worker(output);
+}
+
+fn pressure_admission_keeps_inflight_credit_and_resumes_fifo_after_drain(output: &Compilation) {
+    let mut harness = ResourceHarness::new(output);
     harness.block_budget = 1024;
     let mut memory = queued_memory(0);
     // 一个在途请求、四个排队请求；八个槽中仍有七个可用。
@@ -74,12 +78,10 @@ fn pressure_admission_keeps_inflight_credit_and_resumes_fifo_after_drain() {
     assert_eq!(word(&memory, POOL + 32), 0);
 }
 
-#[test]
-fn pressure_admission_preserves_all_existing_workers() {
-    let output = compile();
+fn pressure_admission_preserves_all_existing_workers(output: &Compilation) {
     for state in [1, 2] {
         for active in [1, 3, 8] {
-            let mut harness = ResourceHarness::new(&output);
+            let mut harness = ResourceHarness::new(output);
             let mut memory = queued_memory(0);
             for slot in active..8 {
                 put(&mut memory, REQUEST + slot * 128 + 104, 0);
@@ -100,11 +102,9 @@ fn pressure_admission_preserves_all_existing_workers() {
     }
 }
 
-#[test]
-fn cancelled_admission_waiters_leave_full_pool_without_waiting_for_worker() {
-    let output = compile();
+fn cancelled_admission_waiters_leave_full_pool_without_waiting_for_worker(output: &Compilation) {
     for mask in 0..16 {
-        let mut harness = ResourceHarness::new(&output);
+        let mut harness = ResourceHarness::new(output);
         let mut memory = queued_memory(mask);
         let (cancelled, live): (Vec<_>, Vec<_>) = WAITERS
             .iter()

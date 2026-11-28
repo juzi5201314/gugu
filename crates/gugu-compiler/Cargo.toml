@@ -5,6 +5,10 @@ edition = "2024"
 autobenches = false
 description = "Gugu compiler façade: frontend plus the embedded runtime artifact"
 
+[lib]
+test = false
+doctest = false
+
 [features]
 # 与前端同名开关：探针源是否进入 build-time artifact。
 runtime-gc-probes = [
@@ -13,18 +17,23 @@ runtime-gc-probes = [
 ]
 # 重负载/端到端用例的显式开关：默认关闭，避免默认套件编译和执行完整编译 fixture。
 slow-tests = ["gugu-frontend/slow-tests"]
+# 供 CLI 等上层 crate 的回归用例选择编译阶段。
+test-support = ["gugu-frontend/test-support"]
 
 [dependencies]
+bytes.workspace = true
 gugu-compiler-core = { path = "../gugu-compiler-core" }
 gugu-frontend = { path = "../gugu-frontend" }
 
 [dev-dependencies]
 gugu-backend = { path = "../gugu-backend" }
 gugu-base = { path = "../gugu-base" }
+gugu-frontend = { path = "../gugu-frontend", features = ["test-support"] }
 gugu-runtime-abi = { path = "../gugu-runtime-abi" }
 gugu-runtime-world = { path = "../gugu-runtime-world" }
 
 [build-dependencies]
+bytes.workspace = true
 gugu-compiler-core = { path = "../gugu-compiler-core" }
 gugu-frontend = { path = "../gugu-frontend" }
 gugu-runtime-builder = { path = "../gugu-runtime-builder" }

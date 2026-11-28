@@ -7,6 +7,8 @@ mod array_init;
 mod callable;
 #[cfg(feature = "slow-tests")]
 mod comptime;
+#[cfg(feature = "slow-tests")]
+mod discarded_if;
 mod expand;
 mod hir;
 #[cfg(feature = "slow-tests")]
@@ -30,7 +32,7 @@ mod type_aliases;
 mod unsafety;
 
 pub(super) fn accepts(source: &str) -> bool {
-    let c = Compiler::shared().compile(CompileRequest::single_file(
+    let c = Compiler::shared().compile_sema_for_test(CompileRequest::single_file(
         "main.gg",
         source,
         TargetName::X86_64Linux,
@@ -42,7 +44,7 @@ pub(super) fn accepts(source: &str) -> bool {
 }
 
 #[test]
-fn discarded_if_without_else_is_accepted_in_nested_statement_positions() {
+fn if_without_else_statement_and_value_position_contracts() {
     assert!(accepts(
         "fn stmt_block(a: int) { { if a > 3 { panic(\"a\") } }\n _ = a }\n\
          fn nested_if(a: int) { if a > 0 { if a > 1 { panic(\"b\") } }\n _ = a }\n\
@@ -53,10 +55,6 @@ fn discarded_if_without_else_is_accepted_in_nested_statement_positions() {
          loop { if a > 0 { break } } }\n\
          fn main() {}"
     ));
-}
-
-#[test]
-fn value_used_if_without_else_is_still_rejected_through_blocks() {
     assert!(!accepts(
         "fn f(b: bool) int { let x = { if b { 1 } }\n x }\nfn main() {}"
     ));
@@ -148,6 +146,32 @@ accept_cases! {
         "fn main() { let n: u128 = 340282366920938463463374607431768211455\n _ = n }";
     literal_bounds_and_signed_patterns_04: false,
         "fn main() { let n: u128 = 340282366920938463463374607431768211456 }";
+}
+
+#[cfg(feature = "slow-tests")]
+accept_cases! {
+    qualified_user_variants_do_not_use_prelude_constructors_00: true,
+        "enum Mine { Ok(int), Err(string) }\nenum Other { Some(int), None }\nfn main() { let x = Mine::Ok(42)\n let y = Other::Some(1)\n let z = Other::None\n match x { Mine::Ok(v) => { _ = v }, Mine::Err(e) => { _ = e } }\n _ = y\n _ = z\n let r: Result[int, string] = Result::Ok(1)\n let o: Option[int] = Option::Some(1)\n _ = r\n _ = o }";
+    qualified_user_variants_do_not_use_prelude_constructors_01: false,
+        "enum Mine { Ok(int), Err(string) }\nfn main() { _ = Mine::Ok(\"wrong\") }";
+    explicit_generic_variant_constructors_use_type_arguments_00: true,
+        "enum Either[L, R] { Left(L), Right(R) }\nenum E[T] { Unit, Tuple(T), Rec { x: T } }\nfn main() { let e = Either[int, string]::Left(42)\n match e { Either::Left(v) => { _ = v }, Either::Right(s) => { _ = s } }\n let a = E[int]::Unit\n let b = E[int]::Tuple(1)\n let c = E[int]::Rec { x: 2 }\n _ = a\n _ = b\n _ = c }";
+    explicit_generic_variant_constructors_use_type_arguments_01: false,
+        "enum Either[L, R] { Left(L), Right(R) }\nfn main() { _ = Either[int, string]::Left(\"wrong\") }";
+    explicit_generic_variant_constructors_use_type_arguments_02: false,
+        "enum Either[L, R] { Left(L), Right(R) }\nfn main() { _ = Either[int]::Left(42) }";
+    /* 显式构造器的普通类型参数拒绝 comptime 值实参：unit/tuple/struct 变体同样检查。*/
+    explicit_generic_variant_constructors_reject_comptime_for_type_03: false,
+        "enum E[T] { Unit }\nfn main() { _ = E[3]::Unit }";
+    explicit_generic_variant_constructors_reject_comptime_for_type_04: false,
+        "enum E[T] { Tuple(T) }\nfn main() { _ = E[3]::Tuple(1) }";
+    explicit_generic_variant_constructors_reject_comptime_for_type_05: false,
+        "enum E[T] { Rec { x: T } }\nfn main() { _ = E[3]::Rec { x: 1 } }";
+    /* comptime 参数拒绝类型实参；合法类型与 comptime 实参仍可按种类实例化。*/
+    explicit_generic_variant_constructors_check_argument_kinds_06: false,
+        "enum E[comptime N: int] { Unit }\nfn main() { _ = E[int]::Unit }";
+    explicit_generic_variant_constructors_check_argument_kinds_07: true,
+        "enum E[T, comptime N: int] { Unit, Tuple(T) }\nfn main() { let a = E[int, 3]::Unit\n let b = E[int, 3]::Tuple(1)\n _ = a\n _ = b }";
 }
 
 #[cfg(feature = "slow-tests")]
@@ -394,6 +418,21 @@ accept_cases! {
         "fn main() { let x: int\n while { x = 1\n false } {}\n _ = x }";
     condition_bindings_and_loop_initialization_follow_execution_04: false,
         "fn main() { let x: int\n while false { x = 1 }\n _ = x }";
+    condition_bindings_and_loop_initialization_follow_execution_05: true,
+        "fn main() { let v: Result[int, string] = Err(\"e\")\n if let Ok(x) = v { _ = x } else if let Err(e) = v { _ = e } }";
+    condition_bindings_and_loop_initialization_follow_execution_06: false,
+        "fn main() { let v: Result[int, string] = Err(\"e\")\n let n = if let Ok(x) = v { x } else if let Err(_) = v { 0 }\n _ = n }";
+    /* 语句位置丢弃整条 if-let 链时，分支尾值不统一类型。*/
+    condition_bindings_and_loop_initialization_follow_execution_07: true,
+        "fn main() { let v: Result[int, string] = Err(\"e\")\n if let Ok(x) = v { x } else if let Err(_) = v { 0 } }";
+    condition_bindings_and_loop_initialization_follow_execution_08: true,
+        "fn main() { let v: Result[int, string] = Err(\"e\")\n if let Ok(x) = v { x } else if let Err(e) = v { e } else { 1.0 }\n _ = 0 }";
+    condition_bindings_and_loop_initialization_follow_execution_09: true,
+        "fn main() { let v: Result[int, string] = Err(\"e\")\n let n = if let Ok(x) = v { x } else if let Err(_) = v { 0 } else { 0 }\n _ = n }";
+    condition_bindings_and_loop_initialization_follow_execution_10: false,
+        "fn main() { let v: Result[int, string] = Err(\"e\")\n let n = if let Ok(x) = v { x } else if let Err(e) = v { e } else { 1.0 }\n _ = n }";
+    condition_bindings_and_loop_initialization_follow_execution_11: true,
+        "fn main() { let v: Result[int, string] = Err(\"e\")\n if let Ok(x) = v { x } else { panic(\"e\") }\n _ = 0 }";
 }
 
 #[cfg(feature = "slow-tests")]
@@ -653,12 +692,12 @@ fn runtime_checks_survive_queries_and_reach_the_backend_plan() {
     assert_eq!(operand_type(*float), &Ty::Float(64));
     assert_eq!(operand_type(*scalar), &Ty::int());
     let compiler = Compiler::shared();
-    let first = compiler.compile(CompileRequest::single_file(
+    let first = compiler.compile_full_for_test(CompileRequest::single_file(
         "main.gg",
         "fn main() { let x = 1 }",
         TargetName::X86_64Linux,
     ));
-    let second = compiler.compile(CompileRequest::single_file(
+    let second = compiler.compile_full_for_test(CompileRequest::single_file(
         "main.gg",
         "fn main() { let x = 2 }",
         TargetName::X86_64Linux,
@@ -675,7 +714,7 @@ fn failed_cached_queries_rebind_source_locations_and_stop_lowering() {
     let compiler = Compiler::new();
     let source = "fn main() { let x: int\n _ = x }";
     for _ in 0..2 {
-        let failed = compiler.compile(CompileRequest::single_file(
+        let failed = compiler.compile_full_for_test(CompileRequest::single_file(
             "main.gg",
             source,
             TargetName::X86_64Linux,

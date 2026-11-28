@@ -194,9 +194,11 @@ fn global_options_parse_after_the_subcommand() {
 #[test]
 fn global_cli_values_override_config_values() {
     let mut config = ConfigValues::default();
-    config.apply(toml::from_str(
-        "[build]\ntarget = \"x86_64-windows\"\ntarget-dir = \"config-target\"\n[cache]\ndir = \"config-cache\"\n"
-    ).expect("valid config"));
+    let file = toml::from_str(
+        "[build]\ntarget = \"x86_64-windows\"\ntarget-dir = \"config-target\"\n[cache]\ndir = \"config-cache\"\n",
+    )
+    .expect("valid config");
+    config.apply(file, false);
     let raw = GlobalArgs {
         target: Some("x86_64-linux".to_owned()),
         cache_dir: Some(PathBuf::from("cli-cache")),
@@ -215,10 +217,10 @@ fn config_toml_fields_map_and_preserve_lower_layers() {
     )
     .expect("config TOML parses");
     let mut values = ConfigValues::default();
-    values.apply(config);
+    values.apply(config, false);
     let second = toml::from_str::<ConfigFile>("[build]\ntarget = \"x86_64-windows\"\n")
         .expect("second config parses");
-    values.apply(second);
+    values.apply(second, false);
     assert_eq!(values.target.as_deref(), Some("x86_64-windows"));
     assert_eq!(values.read_allows, [PathBuf::from("src/**")]);
 }
@@ -335,7 +337,7 @@ fn build_json_reports_routing_contract_keys() {
     let source =
         "fn main() {\n let value = 1\n let closure = fn() int { return value }\n _ = closure()\n }";
     let compilation = gugu_compiler::Compiler::with_artifacts(&gugu_compiler::EMBEDDED_ARTIFACTS)
-        .compile(gugu_compiler::CompileRequest::single_file(
+        .compile_full_for_test(gugu_compiler::CompileRequest::single_file(
             "main.gg",
             source,
             gugu_compiler::TargetName::X86_64Linux,
@@ -383,7 +385,7 @@ fn build_json_reports_provenance_contract_keys() {
     let source =
         "fn main() {\n let value = 1\n let closure = fn() int { return value }\n _ = closure()\n }";
     let compilation = gugu_compiler::Compiler::with_artifacts(&gugu_compiler::EMBEDDED_ARTIFACTS)
-        .compile(gugu_compiler::CompileRequest::single_file(
+        .compile_full_for_test(gugu_compiler::CompileRequest::single_file(
             "main.gg",
             source,
             gugu_compiler::TargetName::X86_64Linux,
@@ -442,7 +444,7 @@ fn build_json_reports_provenance_contract_keys() {
 fn build_json_reports_combining_contract_keys() {
     let source = "fn main() {\n}\n";
     let compilation = gugu_compiler::Compiler::with_artifacts(&gugu_compiler::EMBEDDED_ARTIFACTS)
-        .compile(gugu_compiler::CompileRequest::single_file(
+        .compile_full_for_test(gugu_compiler::CompileRequest::single_file(
             "main.gg",
             source,
             gugu_compiler::TargetName::X86_64Linux,
@@ -489,7 +491,7 @@ fn build_json_reports_combining_contract_keys() {
 fn build_json_reports_shared_heap_contract_keys() {
     let source = "fn main() {\n let channel = chan[fn() int](1)\n let value = 1\n let closure = fn() int { return value }\n channel.send(closure)\n _ = closure()\n }";
     let compilation = gugu_compiler::Compiler::with_artifacts(&gugu_compiler::EMBEDDED_ARTIFACTS)
-        .compile(gugu_compiler::CompileRequest::single_file(
+        .compile_full_for_test(gugu_compiler::CompileRequest::single_file(
             "main.gg",
             source,
             gugu_compiler::TargetName::X86_64Linux,
@@ -563,7 +565,7 @@ fn build_json_reports_shared_heap_contract_keys() {
     let local_only =
         "fn main() {\n let value = 1\n let closure = fn() int { return value }\n _ = closure()\n }";
     let compilation = gugu_compiler::Compiler::with_artifacts(&gugu_compiler::EMBEDDED_ARTIFACTS)
-        .compile(gugu_compiler::CompileRequest::single_file(
+        .compile_full_for_test(gugu_compiler::CompileRequest::single_file(
             "main.gg",
             local_only,
             gugu_compiler::TargetName::X86_64Linux,
@@ -600,7 +602,7 @@ fn build_json_reports_shared_heap_contract_keys() {
 fn build_json_reports_x64_fragment_keys() {
     let source = "fn main() {\n let index = 33\n let total = index * 7\n if total > 10 { _ = total / 3 }\n }";
     let compilation = gugu_compiler::Compiler::with_artifacts(&gugu_compiler::EMBEDDED_ARTIFACTS)
-        .compile(gugu_compiler::CompileRequest::single_file(
+        .compile_full_for_test(gugu_compiler::CompileRequest::single_file(
             "main.gg",
             source,
             gugu_compiler::TargetName::X86_64Linux,

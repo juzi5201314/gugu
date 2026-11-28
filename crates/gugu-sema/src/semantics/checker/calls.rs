@@ -83,9 +83,16 @@ impl Checker<'_, '_> {
                 }
                 return Ty::Never;
             }
-            if let Some(name) = parts.last()
-                && matches!(*name, "Some" | "Ok" | "Err")
-            {
+            let builtin_constructor = matches!(
+                parts.as_slice(),
+                ["Some"]
+                    | ["Option", "Some"]
+                    | ["Ok"]
+                    | ["Err"]
+                    | ["Result", "Ok"]
+                    | ["Result", "Err"]
+            );
+            if builtin_constructor && let Some(name) = parts.last() {
                 let wanted = match (expected, *name) {
                     (Some(Ty::Option(t)), "Some") | (Some(Ty::Result(t, _)), "Ok") => Some(&**t),
                     (Some(Ty::Result(_, e)), "Err") => Some(&**e),
@@ -118,7 +125,12 @@ impl Checker<'_, '_> {
                     ),
                 };
             }
-            if let Ok(Some((ty, ctor))) = self.model.constructor(self.module, &parts, expected) {
+            let explicit = self.explicit_constructor_type(path, &expr.span);
+            let constructor_expected = explicit.as_ref().or(expected);
+            if let Ok(Some((ty, ctor))) =
+                self.model
+                    .constructor(self.module, &parts, constructor_expected)
+            {
                 if ctor.record || ctor.fields.len() != args.len() {
                     self.error(
                         DiagnosticCode::InvalidExpression,

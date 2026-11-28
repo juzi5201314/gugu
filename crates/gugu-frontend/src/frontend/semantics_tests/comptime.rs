@@ -6,7 +6,7 @@ use crate::frontend::semantics::model::{Model, Ty};
 use crate::{CompileRequest, Compiler, DiagnosticCode, QueryEngine, TargetName};
 
 fn diagnostics_of(source: &str) -> Vec<DiagnosticCode> {
-    let compilation = Compiler::shared().compile(CompileRequest::single_file(
+    let compilation = Compiler::shared().compile_to_lir(CompileRequest::single_file(
         "main.gg",
         source,
         TargetName::X86_64Linux,
@@ -76,6 +76,24 @@ fn comptime_fstrings_apply_static_format_codes() {
             "缺少 {expected:?}：{values:?}"
         );
     }
+}
+
+#[test]
+fn comptime_fstrings_decode_text_escapes() {
+    let source =
+        "const LINE: string = f\"x\\ny\"\nconst ESCAPED: string = f\"a\\t\\\\b\"\nfn main() {}";
+    let output = frontend(&[("main.gg", source)], &QueryEngine::new()).expect("f-string 转义求值");
+    let values: Vec<_> = output
+        .semantics
+        .early_constants
+        .constants
+        .iter()
+        .filter(|entry| entry.key.expr == u32::MAX)
+        .map(|entry| entry.value.clone())
+        .collect();
+    use comptime::eval::ConstantValue;
+    assert!(values.contains(&ConstantValue::String("x\ny".to_owned())));
+    assert!(values.contains(&ConstantValue::String("a\t\\b".to_owned())));
 }
 
 #[test]
@@ -299,17 +317,17 @@ fn cyclic_and_unevaluable_initializers_still_fail_at_use_sites() {
 fn action_key_is_deterministic_and_input_sensitive() {
     let compiler = Compiler::new();
     let source = "const N: int = 4\nfn main() { let a = [0; N]\n _ = a }";
-    let first = compiler.compile(CompileRequest::single_file(
+    let first = compiler.compile_full_for_test(CompileRequest::single_file(
         "main.gg",
         source,
         TargetName::X86_64Linux,
     ));
-    let second = compiler.compile(CompileRequest::single_file(
+    let second = compiler.compile_full_for_test(CompileRequest::single_file(
         "main.gg",
         source,
         TargetName::X86_64Linux,
     ));
-    let changed = compiler.compile(CompileRequest::single_file(
+    let changed = compiler.compile_full_for_test(CompileRequest::single_file(
         "main.gg",
         "const N: int = 5\nfn main() { let a = [0; N]\n _ = a }",
         TargetName::X86_64Linux,

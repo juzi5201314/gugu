@@ -21,6 +21,8 @@ mod arguments;
 mod array_init;
 mod generics;
 #[cfg(test)]
+mod source_tests;
+#[cfg(test)]
 mod tests;
 
 /// ParseSource query 的 schema 版本。
@@ -358,46 +360,26 @@ impl Model<'_> {
         self.constant_type_inner(module, expr, &mut Vec::new())
     }
 
-    fn constant_path_type(
+    fn constant_receiver_definition(
         &self,
         module: usize,
         segments: &[&str],
-        stack: &mut Vec<DefRef>,
-    ) -> Result<Option<Ty>, Diagnostic> {
+    ) -> Option<(DefRef, usize)> {
         for end in (1..=segments.len()).rev() {
             let Ok(def) = self.resolve(module, &segments[..end]) else {
                 continue;
             };
-            if stack.contains(&def) {
-                return Err(self.error(module, "常量类型推断形成循环"));
+            if matches!(
+                self.modules[def.module].arena.items[def.item.0 as usize].kind,
+                ItemKind::Const { .. }
+            ) {
+                return Some((def, end));
             }
-            let item = &self.modules[def.module].arena.items[def.item.0 as usize].kind;
-            let mut ty = match item {
-                ItemKind::Const { ty: Some(ty), .. } | ItemKind::Static { ty, .. } => {
-                    self.form(def.module, *ty)?
-                }
-                ItemKind::Const {
-                    value: Some(value), ..
-                } => {
-                    stack.push(def);
-                    let ty = self.constant_type_inner(def.module, *value, stack);
-                    stack.pop();
-                    ty?
-                }
-                _ => continue,
-            };
-            for field in &segments[end..] {
-                let Some((_, next, _)) = self.find_field(&ty, field) else {
-                    return Err(self.error(module, "常量接收者缺少字段"));
-                };
-                ty = next;
-            }
-            return Ok(Some(ty));
         }
-        Ok(None)
+        None
     }
 
-    fn constant_type_inner(
+    pub(super) fn constant_type_inner(
         &self,
         module: usize,
         expr: ExprId,
@@ -450,7 +432,7 @@ impl Model<'_> {
                 .kind
                 {
                     ItemKind::Const { ty: Some(ty), .. } | ItemKind::Static { ty, .. } => {
-                        self.form(def.module, ty)
+                        self.form_with_context(def.module, ty, stack)
                     }
                     ItemKind::Const {
                         value: Some(value), ..
@@ -487,25 +469,20 @@ impl Model<'_> {
             }
             ExprKind::Repeat { elem, count } => {
                 let element = self.constant_type_inner(module, elem, stack)?;
-                // 在独立的长度求值前沿用当前类型推断栈检查依赖，避免循环常量重入。
-                self.constant_type_inner(module, count, stack)?;
+                // 长度求值继承当前依赖链，显式类型与函数调用也不能切断循环检测。
                 Ok(Ty::Array(
                     Box::new(element),
-                    self.array_length(module, count, &BTreeMap::new())?,
+                    self.array_length_with_context(module, count, &BTreeMap::new(), stack)?,
                 ))
             }
             ExprKind::Call { callee, .. } => {
                 match self.modules[module].arena.exprs[callee.0 as usize].kind {
                     ExprKind::Field { base, name } => {
-                        let receiver = self.constant_type_inner(module, base, stack)?;
-                        if self.name(module, name) == "len"
-                            && matches!(
-                                receiver.strip_refs(),
-                                Ty::String | Ty::Array(_, _) | Ty::Slice(_)
-                            )
-                        {
+                        // len 的结果类型不依赖数组长度；接收者与参数由求值路径校验。
+                        if self.name(module, name) == "len" {
                             return Ok(Ty::int());
                         }
+                        let receiver = self.constant_type_inner(module, base, stack)?;
                         if receiver != Ty::TypeId {
                             return Err(self.error(module, "无法形成常量调用类型"));
                         }
@@ -519,19 +496,14 @@ impl Model<'_> {
                         let segments = self.path(module, path);
                         if segments.len() >= 2
                             && segments[segments.len() - 1] == "len"
-                            && let Some(receiver) = self.constant_path_type(
-                                module,
-                                &segments[..segments.len() - 1],
-                                stack,
-                            )?
+                            && self
+                                .constant_receiver_definition(
+                                    module,
+                                    &segments[..segments.len() - 1],
+                                )
+                                .is_some()
                         {
-                            if matches!(
-                                receiver.strip_refs(),
-                                Ty::String | Ty::Array(_, _) | Ty::Slice(_)
-                            ) {
-                                return Ok(Ty::int());
-                            }
-                            return Err(self.error(module, "无法形成常量调用类型"));
+                            return Ok(Ty::int());
                         }
                         let def = self.resolve(module, &segments)?;
                         let signature = self.value_type(def)?;
@@ -549,7 +521,22 @@ impl Model<'_> {
     }
 
     pub fn constant_int(&self, module: usize, expression: ExprId) -> Result<i128, Diagnostic> {
-        match self.constant_value(module, expression, &Ty::int())? {
+        self.constant_int_with_context(module, expression, &[])
+    }
+
+    pub(in super::super) fn constant_int_with_context(
+        &self,
+        module: usize,
+        expression: ExprId,
+        const_stack: &[DefRef],
+    ) -> Result<i128, Diagnostic> {
+        match self.eval_early_const_with_context(
+            module,
+            expression,
+            &Ty::int(),
+            &BTreeMap::new(),
+            const_stack,
+        )? {
             ConstantValue::Int(value) => Ok(value),
             _ => Err(self.error(module, "需要整数常量")),
         }
@@ -581,7 +568,18 @@ impl Model<'_> {
         ty: &Ty,
         bindings: &BTreeMap<String, Option<ConstantValue>>,
     ) -> Result<ConstantValue, Diagnostic> {
-        if self.depends_on_late(module, expression) {
+        self.eval_early_const_with_context(module, expression, ty, bindings, &[])
+    }
+
+    fn eval_early_const_with_context(
+        &self,
+        module: usize,
+        expression: ExprId,
+        ty: &Ty,
+        bindings: &BTreeMap<String, Option<ConstantValue>>,
+        const_stack: &[DefRef],
+    ) -> Result<ConstantValue, Diagnostic> {
+        if self.depends_on_late_with_stack(module, expression, const_stack) {
             return Err(Diagnostic::error(
                 DiagnosticCode::LateComptime,
                 "late 值不能用于早期类型、布局、泛型实参或源码宏",
@@ -594,6 +592,7 @@ impl Model<'_> {
         }
         let mut state = EvalState::new(Domain::EARLY_CONST, self.eval_profile());
         state.embed = self.embed.as_ref();
+        state.const_stack.extend_from_slice(const_stack);
         if !bindings.is_empty() {
             let span = &self.modules[module].arena.exprs[expression.0 as usize].span;
             state.enter("const argument", span)?;
@@ -1131,9 +1130,9 @@ impl Model<'_> {
         for part in parts.as_slice(&arena.fstring_parts) {
             match *part {
                 FStringPart::Text { text, .. } => {
-                    let text = self.name(module, text);
+                    let text = string::decode_fstring_text(self.name(module, text));
                     state.alloc(u64::try_from(text.len()).expect("文本长度可编码"), &span)?;
-                    output.push_str(text);
+                    output.push_str(&text);
                 }
                 FStringPart::Interp { expr, spec, .. } => {
                     let value = self.value(module, expr, state)?;
@@ -1231,8 +1230,8 @@ impl Model<'_> {
         state.enter("<常量初始化>", &span)?;
         state.const_stack.push(def);
         let declared = match declared {
-            Some(ty) => self.form(def.module, ty),
-            None => self.constant_type(def.module, value),
+            Some(ty) => self.form_with_context(def.module, ty, &mut state.const_stack),
+            None => self.constant_type_inner(def.module, value, &mut state.const_stack),
         };
         let result = match declared {
             Ok(ty) => self
@@ -1256,12 +1255,12 @@ impl Model<'_> {
         let span = self.modules[module].arena.exprs[expression.0 as usize]
             .span
             .clone();
-        self.check_capability(module, &segments, &span, state)?;
         if segments.len() == 1
             && let Some(value) = state.lookup(segments[0], &span)?
         {
             return Ok(value);
         }
+        self.check_capability(module, &segments, &span, state)?;
         if let Some(member) = self.constant_member(module, path)? {
             if let MemberKind::Const {
                 value: Some(value), ..
@@ -1294,8 +1293,12 @@ impl Model<'_> {
         span: &crate::Span,
         state: &EvalState,
     ) -> Result<(), Diagnostic> {
-        let canonical =
-            lang_item_identity(segments).or_else(|| self.external_path(module, segments));
+        let canonical = lang_item_identity(segments)
+            .or_else(|| self.external_path(module, segments))
+            .or_else(|| {
+                self.canonical_item_path(module, segments)
+                    .filter(|path| path.starts_with("std.src."))
+            });
         let Some(canonical) = canonical else {
             return Ok(());
         };
@@ -1324,28 +1327,19 @@ impl Model<'_> {
         segments: &[&str],
         state: &mut EvalState,
     ) -> EvalResult<Option<ConstantValue>> {
-        for end in (1..=segments.len()).rev() {
-            let Ok(def) = self.resolve(module, &segments[..end]) else {
-                continue;
+        let Some((def, end)) = self.constant_receiver_definition(module, segments) else {
+            return Ok(None);
+        };
+        let mut receiver = self.item_const_value(def, state)?;
+        for field in &segments[end..] {
+            let ConstantValue::Struct(mut fields) = receiver else {
+                return Err(self.fail(module, expression, "comptime 方法接收者缺少字段"));
             };
-            if !matches!(
-                self.modules[def.module].arena.items[def.item.0 as usize].kind,
-                ItemKind::Const { .. }
-            ) {
-                continue;
-            }
-            let mut receiver = self.item_const_value(def, state)?;
-            for field in &segments[end..] {
-                let ConstantValue::Struct(mut fields) = receiver else {
-                    return Err(self.fail(module, expression, "comptime 方法接收者缺少字段"));
-                };
-                receiver = fields
-                    .remove(*field)
-                    .ok_or_else(|| self.fail(module, expression, "comptime 方法接收者缺少字段"))?;
-            }
-            return Ok(Some(receiver));
+            receiver = fields
+                .remove(*field)
+                .ok_or_else(|| self.fail(module, expression, "comptime 方法接收者缺少字段"))?;
         }
-        Ok(None)
+        Ok(Some(receiver))
     }
 
     fn builtin_method_value(
@@ -1456,6 +1450,9 @@ impl Model<'_> {
                 ConstantValue::ResultErr(payload)
             });
         }
+        if state.lookup(segments[0], &span)?.is_some() {
+            return Err(self.fail(module, expression, "comptime 局部值不是可调用函数"));
+        }
         self.check_capability(module, &segments, &span, state)?;
         if let Some(value) = self.src_builtin(module, expression, &segments, args, &span)? {
             return Ok(value);
@@ -1504,7 +1501,7 @@ impl Model<'_> {
         args: AstRange<ExprId>,
         span: &crate::Span,
     ) -> EvalResult<Option<ConstantValue>> {
-        let Some(canonical) = self.external_path(module, segments) else {
+        let Some(canonical) = self.canonical_item_path(module, segments) else {
             return Ok(None);
         };
         let kind = match canonical.as_str() {

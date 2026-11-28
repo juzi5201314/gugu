@@ -236,7 +236,6 @@ impl RuntimeCall {
             Self::BlockingIo { .. } => (false, true, false, true),
             Self::Spawn => (false, true, true, true),
             Self::ChannelNew
-            | Self::DynamicErase
             | Self::Concat
             | Self::DeferPush
             | Self::ArenaNew

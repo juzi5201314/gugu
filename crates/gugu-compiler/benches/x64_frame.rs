@@ -154,6 +154,10 @@ fn main() {
 fn run(scenario: &Scenario, target: TargetName) -> Result<(), String> {
     let generated = program(scenario);
     let source = scenario.source.unwrap_or(generated.as_str());
+    #[expect(
+        clippy::disallowed_methods,
+        reason = "x64 frame bench 需要完整后端帧布局结果"
+    )]
     let compilation = Compiler::with_artifacts(&EMBEDDED_ARTIFACTS)
         .compile(CompileRequest::single_file("main.gg", source, target));
     if !compilation.is_success() {
