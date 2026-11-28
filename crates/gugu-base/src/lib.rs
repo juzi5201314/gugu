@@ -9,6 +9,8 @@ pub mod canonical;
 pub mod diagnostics;
 pub mod hash;
 pub mod query;
+pub mod shared_table;
+pub use shared_table::SharedTable;
 pub mod source;
 pub mod target;
 #[cfg(test)]

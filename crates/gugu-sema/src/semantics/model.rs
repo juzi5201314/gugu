@@ -454,7 +454,7 @@ impl<'a> Model<'a> {
                         .items
                         .iter()
                         .enumerate()
-                        .find(|(_, i)| i.span == d.span)
+                        .find(|(_, item)| &item.span == self.names.definition_span(id.index()))
                     {
                         return Ok(DefRef {
                             module: d.module.index(),

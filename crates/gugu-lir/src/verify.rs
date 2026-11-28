@@ -8,8 +8,8 @@ pub mod resource_isolation;
 mod shared_access;
 
 use super::body::{
-    BlockId, Body, Definition, EdgeId, InstId, Origin, SafepointId, Terminator, Type, UseSite,
-    ValueId, id, range,
+    BlockId, Body, Definition, InstId, Origin, SafepointId, Terminator, Type, UseSite, ValueId, id,
+    range,
 };
 use super::pass::graph::Graph;
 use super::{invalid, invalid_raw};
@@ -139,14 +139,14 @@ fn structure(body: &Body, module: &hir::Module) -> Result<(), Diagnostic> {
         }
         terminator_ranges(body, &block.terminator)?;
         let mut valid = true;
-        edges(body, &block.terminator, |edge| {
+        for edge in block.terminator.edges(&body.switch_cases) {
             if let Some(count) = edge_uses.get_mut(edge.index()) {
                 *count += 1;
                 valid &= body.edges[edge.index()].from.index() == index;
             } else {
                 valid = false;
             }
-        });
+        }
         if !valid {
             return Err(invalid("terminator 的边引用或来源 block 不合法"));
         }
@@ -315,29 +315,6 @@ fn terminator_ranges(body: &Body, terminator: &Terminator) -> Result<(), Diagnos
         Ok(())
     } else {
         Err(invalid("终结符操作数或范围越界"))
-    }
-}
-
-pub(super) fn edges(body: &Body, terminator: &Terminator, mut visit: impl FnMut(EdgeId)) {
-    match terminator {
-        Terminator::Jump(edge) => visit(*edge),
-        Terminator::Branch { yes, no, .. } => {
-            visit(*yes);
-            visit(*no);
-        }
-        Terminator::Switch {
-            cases, otherwise, ..
-        } => {
-            for (_, edge) in &body.switch_cases[range(cases)] {
-                visit(*edge);
-            }
-            visit(*otherwise);
-        }
-        Terminator::Invoke { normal, unwind, .. } => {
-            visit(*normal);
-            visit(*unwind);
-        }
-        _ => {}
     }
 }
 
@@ -532,9 +509,9 @@ fn memory(body: &Body) -> Result<(), Diagnostic> {
             return Err(invalid("终结符没有消费当前 Mem"));
         }
         let mut valid = true;
-        edges(body, &block.terminator, |edge| {
-            valid &= body.args(&body.edges[edge.index()].arguments).first() == Some(&current)
-        });
+        for edge in block.terminator.edges(&body.switch_cases) {
+            valid &= body.args(&body.edges[edge.index()].arguments).first() == Some(&current);
+        }
         if !valid {
             return Err(invalid("后继边没有传递当前 Mem"));
         }

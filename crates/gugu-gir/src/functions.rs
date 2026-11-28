@@ -130,9 +130,9 @@ pub fn record(
             let mut artifact = RuntimeFunctionArtifactV1 {
                 stable_mono_key: digest_hex(&digest),
                 fingerprint: [0; 32],
-                analysis,
-                lir,
-                x64,
+                analysis: analysis.into(),
+                lir: lir.into(),
+                x64: x64.into(),
             };
             artifact.fingerprint = artifact.content_fingerprint();
             Ok(artifact)

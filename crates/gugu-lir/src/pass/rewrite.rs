@@ -85,21 +85,27 @@ pub enum Term {
 }
 
 impl Term {
-    /// 该终结符引用的边。
-    pub fn edges(&self) -> Vec<EdgeId> {
-        match self {
-            Self::Jump(edge) => vec![*edge],
-            Self::Branch { yes, no, .. } => vec![*yes, *no],
+    /// 按原顺序借用该终结符引用的边。
+    #[inline]
+    pub fn edges(&self) -> impl DoubleEndedIterator<Item = EdgeId> + Clone + '_ {
+        let (direct, cases, otherwise) = match self {
+            Self::Jump(edge) => ([Some(*edge), None], &[][..], None),
+            Self::Branch { yes, no, .. } => ([Some(*yes), Some(*no)], &[][..], None),
             Self::Switch {
                 cases, otherwise, ..
-            } => cases
-                .iter()
-                .map(|(_, edge)| *edge)
-                .chain([*otherwise])
-                .collect(),
-            Self::Invoke { normal, unwind, .. } => vec![*normal, *unwind],
-            _ => Vec::new(),
-        }
+            } => ([None; 2], cases.as_slice(), Some(*otherwise)),
+            Self::Invoke { normal, unwind, .. } => ([Some(*normal), Some(*unwind)], &[][..], None),
+            Self::Return { .. }
+            | Self::ResumePanic { .. }
+            | Self::TailCall { .. }
+            | Self::Trap { .. }
+            | Self::Unreachable { .. } => ([None; 2], &[][..], None),
+        };
+        direct
+            .into_iter()
+            .flatten()
+            .chain(cases.iter().map(|(_, edge)| *edge))
+            .chain(otherwise)
     }
     /// 该终结符读取的值（不含由 Invoke 定义的内存输出）。
     pub fn uses(&self) -> Vec<ValueId> {
@@ -447,12 +453,10 @@ impl Editor {
             .collect()
     }
 
-    pub fn successors(&self, block: BlockId) -> Vec<BlockId> {
+    pub fn successors(&self, block: BlockId) -> impl Iterator<Item = BlockId> + '_ {
         self.terminator(block)
             .edges()
-            .into_iter()
-            .filter_map(|edge| self.edge(edge).map(|edge| edge.to))
-            .collect()
+            .filter_map(move |edge| self.edge(edge).map(|edge| edge.to))
     }
 
     /// 迭代式支配树；存在不可达 block 时返回 `None`。
@@ -947,7 +951,7 @@ impl Editor {
 
     /// 合并 `a` 与它唯一后继 `b`。
     pub fn merge_blocks(&mut self, a: BlockId, b: BlockId) -> Result<(), Diagnostic> {
-        if self.successors(a) != [b] {
+        if !self.successors(a).eq([b]) {
             return Err(invalid("合并要求 a 的唯一后继是 b"));
         }
         let predecessors = self.predecessors(b);

@@ -12,9 +12,9 @@ fn record(tag: u32, data_bytes: u16, offset: u16, length: u16) -> Vec<u8> {
     bytes
 }
 
-#[test]
-fn windows_read_link_bounds_native_record_and_preserves_output_on_failure() {
-    let output = compile(TargetName::X86_64Windows);
+pub(super) fn windows_read_link_bounds_native_record_and_preserves_output_on_failure(
+    output: &Compilation,
+) {
     // 标签、数据长度、名称偏移/长度、实际返回字节数、输出容量、原生错误、预期错误。
     for (tag, data, offset, length, returned, capacity, native_error, error) in [
         (0xa000000c, 18, 2, 4, 26u32, 64, 0, 0),
@@ -33,7 +33,7 @@ fn windows_read_link_bounds_native_record_and_preserves_output_on_failure() {
         (0x12345678, 18, 2, 4, 26, 64, 0, 87),
     ] {
         let mut adapter = Adapter::new(
-            &output,
+            output,
             vec![
                 Reply::new(0, 42, 0)
                     .argument(1, INPUT)

@@ -188,8 +188,12 @@ fn alias(
         return Err(invalid("volatile effect 与 AliasClass 不一致"));
     }
     if let AliasClass::Stack(slot) = alias {
-        let roots = stack_origins(body, pointer);
-        if roots != [*slot] {
+        let matches_slot = match direct_stack_origin(body, pointer) {
+            DirectStackOrigin::Single(found) => found == *slot,
+            DirectStackOrigin::None => false,
+            DirectStackOrigin::Complex => stack_origins(body, pointer) == [*slot],
+        };
+        if !matches_slot {
             return Err(invalid("stack alias class 与真实 pointer 来源不一致"));
         }
     }
@@ -201,6 +205,26 @@ fn alias(
         ));
     }
     Ok(())
+}
+
+enum DirectStackOrigin {
+    None,
+    Single(SlotId),
+    Complex,
+}
+
+/// 零分配快路径：99% 的栈指针是直接 `Origin::Stack` 或短 `Origin::Derived` 链，
+/// 避免在每条 Load/Store/Call 实参上分配 `vec![false; body.values.len()]`。
+fn direct_stack_origin(body: &Body, mut value: ValueId) -> DirectStackOrigin {
+    for _ in 0..16 {
+        match body.values[value.index()].origin {
+            Origin::Stack(slot) => return DirectStackOrigin::Single(slot),
+            Origin::Derived(base) => value = base,
+            Origin::Merge => return DirectStackOrigin::Complex,
+            _ => return DirectStackOrigin::None,
+        }
+    }
+    DirectStackOrigin::Complex
 }
 
 pub(super) fn stack_origins(body: &Body, value: ValueId) -> Vec<SlotId> {
@@ -235,36 +259,86 @@ pub(super) fn stack_origins(body: &Body, value: ValueId) -> Vec<SlotId> {
     slots
 }
 
+fn has_stack_origin(body: &Body, value: ValueId) -> bool {
+    match direct_stack_origin(body, value) {
+        DirectStackOrigin::None => false,
+        DirectStackOrigin::Single(_) => true,
+        DirectStackOrigin::Complex => !stack_origins(body, value).is_empty(),
+    }
+}
+
 fn lifetimes(body: &Body, graph: &Graph) -> Result<(), Diagnostic> {
-    let mut input = vec![vec![true; body.stack_slots.len()]; body.blocks.len()];
+    let slot_count = body.stack_slots.len();
+    if slot_count == 0 {
+        // 无栈槽函数不存在栈槽寿命检查，只需校验 escaping_call 与 Return 栈引用规则。
+        for &block_id in &graph.order {
+            let block = &body.blocks[block_id.index()];
+            for instruction in &body.instructions[range(&block.instructions)] {
+                if let Op::Call(call) | Op::ForeignCall(call) = &instruction.op {
+                    escaping_call(body, call, body.args(&instruction.arguments))?;
+                }
+            }
+            match &block.terminator {
+                Terminator::Return { values, .. } => {
+                    for &value in body.args(values) {
+                        if body.values[value.index()].kind.provenance != Some(Provenance::Raw)
+                            && has_stack_origin(body, value)
+                        {
+                            return Err(invalid("Return 暴露当前 frame 的栈引用"));
+                        }
+                    }
+                }
+                Terminator::Invoke {
+                    arguments, call, ..
+                }
+                | Terminator::TailCall {
+                    arguments, call, ..
+                } => {
+                    escaping_call(body, call, body.args(arguments))?;
+                }
+                _ => {}
+            }
+        }
+        return Ok(());
+    }
+
+    // 按块分桶并在块内按 position 稳定排序（保留同 position 原顺序），消除 O(instructions × lifetimes) 扫描。
+    let mut lifetimes_by_block: Vec<Vec<(u32, SlotId, bool)>> = vec![Vec::new(); body.blocks.len()];
+    for lifetime in &body.lifetimes {
+        lifetimes_by_block[lifetime.block.index()].push((
+            lifetime.position,
+            lifetime.slot,
+            lifetime.live,
+        ));
+    }
+    for events in &mut lifetimes_by_block {
+        events.sort_by_key(|(position, _, _)| *position);
+    }
+
+    let mut input = vec![vec![true; slot_count]; body.blocks.len()];
     let mut output = input.clone();
     input[body.entry.index()].fill(false);
+    let mut live = vec![false; slot_count];
     loop {
         let mut changed = false;
         for &block in &graph.order {
-            let mut live = if block == body.entry {
-                vec![false; body.stack_slots.len()]
+            if block == body.entry {
+                live.fill(false);
             } else {
-                vec![true; body.stack_slots.len()]
-            };
-            if block != body.entry {
+                live.fill(true);
                 for edge in &body.predecessors[range(&body.blocks[block.index()].predecessors)] {
                     let from = body.edges[edge.index()].from;
-                    for (live, predecessor) in live.iter_mut().zip(&output[from.index()]) {
-                        *live &= *predecessor;
+                    for (slot_live, &predecessor) in live.iter_mut().zip(&output[from.index()]) {
+                        *slot_live &= predecessor;
                     }
                 }
             }
-            input[block.index()] = live.clone();
-            for lifetime in body
-                .lifetimes
-                .iter()
-                .filter(|lifetime| lifetime.block == block)
-            {
-                live[lifetime.slot.index()] = lifetime.live;
+            input[block.index()].copy_from_slice(&live);
+            for &(_, slot, is_live) in &lifetimes_by_block[block.index()] {
+                live[slot.index()] = is_live;
             }
             if output[block.index()] != live {
-                output[block.index()] = live;
+                output[block.index()].copy_from_slice(&live);
                 changed = true;
             }
         }
@@ -274,20 +348,22 @@ fn lifetimes(body: &Body, graph: &Graph) -> Result<(), Diagnostic> {
     }
     for &block_id in &graph.order {
         let block = &body.blocks[block_id.index()];
-        let mut live = input[block_id.index()].clone();
-        for position in 0..=block.instructions.end - block.instructions.start {
-            for lifetime in body
-                .lifetimes
-                .iter()
-                .filter(|lifetime| lifetime.block == block_id && lifetime.position == position)
-            {
-                live[lifetime.slot.index()] = lifetime.live;
+        live.copy_from_slice(&input[block_id.index()]);
+        let events = &lifetimes_by_block[block_id.index()];
+        let mut event_cursor = 0;
+        let len = block.instructions.end - block.instructions.start;
+        for position in 0..=len {
+            while event_cursor < events.len() && events[event_cursor].0 == position {
+                let (_, slot, is_live) = events[event_cursor];
+                live[slot.index()] = is_live;
+                event_cursor += 1;
             }
-            if position == block.instructions.end - block.instructions.start {
+            if position == len {
                 break;
             }
-            let instruction = &body.instructions
-                [usize::try_from(block.instructions.start + position).expect("指令位置")];
+            let instruction_index =
+                usize::try_from(block.instructions.start + position).expect("指令下标");
+            let instruction = &body.instructions[instruction_index];
             let args = body.args(&instruction.arguments);
             let reads_address = matches!(
                 instruction.op,
@@ -303,8 +379,6 @@ fn lifetimes(body: &Body, graph: &Graph) -> Result<(), Diagnostic> {
                     | Op::SharedAccessBegin { .. }
             );
             if reads_address {
-                let instruction_index =
-                    usize::try_from(block.instructions.start + position).expect("指令下标");
                 for &argument in args {
                     live_pointer(body, instruction_index, argument, &live)?;
                 }
@@ -315,9 +389,9 @@ fn lifetimes(body: &Body, graph: &Graph) -> Result<(), Diagnostic> {
         }
         match &block.terminator {
             Terminator::Return { values, .. } => {
-                for value in body.args(values) {
+                for &value in body.args(values) {
                     if body.values[value.index()].kind.provenance != Some(Provenance::Raw)
-                        && !stack_origins(body, *value).is_empty()
+                        && has_stack_origin(body, value)
                     {
                         return Err(invalid("Return 暴露当前 frame 的栈引用"));
                     }
@@ -329,10 +403,11 @@ fn lifetimes(body: &Body, graph: &Graph) -> Result<(), Diagnostic> {
             | Terminator::TailCall {
                 arguments, call, ..
             } => {
-                for &argument in body.args(arguments) {
+                let args = body.args(arguments);
+                for &argument in args {
                     live_pointer(body, usize::MAX, argument, &live)?;
                 }
-                escaping_call(body, call, body.args(arguments))?;
+                escaping_call(body, call, args)?;
             }
             _ => {}
         }
@@ -346,14 +421,26 @@ fn live_pointer(
     value: ValueId,
     live: &[bool],
 ) -> Result<(), Diagnostic> {
-    let dead: Vec<u32> = stack_origins(body, value)
-        .iter()
-        .filter(|slot| !live[slot.index()])
-        .map(|slot| u32::try_from(slot.index()).expect("槽下标适配 u32"))
-        .collect();
-    if dead.is_empty() {
-        return Ok(());
-    }
+    let dead: Vec<u32> = match direct_stack_origin(body, value) {
+        DirectStackOrigin::None => return Ok(()),
+        DirectStackOrigin::Single(slot) => {
+            if live[slot.index()] {
+                return Ok(());
+            }
+            vec![u32::try_from(slot.index()).expect("槽下标适配 u32")]
+        }
+        DirectStackOrigin::Complex => {
+            let dead: Vec<u32> = stack_origins(body, value)
+                .iter()
+                .filter(|slot| !live[slot.index()])
+                .map(|slot| u32::try_from(slot.index()).expect("槽下标适配 u32"))
+                .collect();
+            if dead.is_empty() {
+                return Ok(());
+            }
+            dead
+        }
+    };
     let at = if index == usize::MAX {
         "terminator".to_owned()
     } else {

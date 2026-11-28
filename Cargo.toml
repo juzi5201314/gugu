@@ -25,6 +25,8 @@ ed25519-dalek = "3"
 flate2 = "1"
 serde = { version = "1", features = ["derive"] }
 serde_json = "1"
+sha2 = "0.11"
+smallvec = { version = "1.15.1", features = ["union"] }
 tar = "0.4"
 toml = "0.9"
 unicode-width = "0.2"
@@ -32,13 +34,18 @@ ureq = { version = "3", default-features = false, features = ["rustls"] }
 
 [profile.dev]
 # 编译器的规范编解码与分析热路径需要优化；开发与测试共用该配置，避免额外 profile 产物。
+# 保持 O3 执行速度并关闭 DWARF 调试信息，大幅压低测试二进制体积、链接 I/O 与编译峰值内存（panic/assert 仍保留源行号）。
 opt-level = 3
-debug = 1
+debug = 0
 debug-assertions = true
 overflow-checks = true
 
-# build script 要跑一次完整的内建块派生并把结果物化进 artifact；debug/test 档默认 O0 会把它
-# 拖到十几秒，这里与开发档一样按 O3 编译 build script 自己的依赖。
+# build script 要跑一次完整的内建块派生并把结果物化进 artifact；与 dev 档保持相同 opt-level，
+# 避免 host build-dependencies 与 target 产物把 frontend 及其上游整链编译两遍。
 [profile.dev.build-override]
 opt-level = 3
+debug = 0
+
+[profile.dev.package."*"]
+debug = 0
 

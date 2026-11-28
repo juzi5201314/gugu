@@ -367,11 +367,11 @@ fn block_flow<'a>(
 }
 
 /// 通用预算数据流；返回每个 block 的输出成本与全局最大值。
-fn propagate(
+fn propagate<I: IntoIterator<Item = BlockId>>(
     count: usize,
     entry: BlockId,
     order: &[BlockId],
-    successors: impl Fn(BlockId) -> Vec<BlockId>,
+    successors: impl Fn(BlockId) -> I,
     mut out: impl FnMut(BlockId, u32) -> u32,
 ) -> (Vec<u32>, u32) {
     let mut in_cost = vec![0u32; count];
@@ -398,14 +398,6 @@ fn propagate(
             return (out_cost, max_seen);
         }
     }
-}
-
-fn body_successors(body: &Body, block: BlockId) -> Vec<BlockId> {
-    let mut successors = Vec::new();
-    verify::edges(body, &body.blocks[block.index()].terminator, |edge| {
-        successors.push(body.edges[edge.index()].to)
-    });
-    successors
 }
 
 /// 从 body 自身的 `poll_free_leaf` 标记构造叶信息（叶成本未知按 0 计）。
@@ -498,10 +490,8 @@ fn body_costs(
         entry,
         &order,
         |block| {
-            body_successors(body, block)
-                .into_iter()
-                .filter(|to| !bounded.contains(&(block, *to)))
-                .collect()
+            body.successors(block)
+                .filter(move |to| !bounded.contains(&(block, *to)))
         },
         |block, cost| {
             block_flow(
@@ -559,26 +549,26 @@ fn clean_cycle(
         })
         .collect();
     let mut state = vec![0u8; body.blocks.len()];
+    // 每个 DFS 栈帧持有一次借用迭代器，不在推进游标时重建后继集合。
+    let successors = |block| {
+        let clean = &clean;
+        body.successors(block).filter(move |successor| {
+            clean[successor.index()] && !bounded.contains(&(block, *successor))
+        })
+    };
     for root in 0..body.blocks.len() {
         if !clean[root] || state[root] != 0 {
             continue;
         }
-        let mut stack = vec![(BlockId(super::super::body::id(root)), 0usize)];
+        let root_block = BlockId(super::super::body::id(root));
+        let mut stack = vec![(root_block, successors(root_block))];
         state[root] = 1;
         while let Some((block, next)) = stack.last_mut() {
-            let successors: Vec<BlockId> = body_successors(body, *block)
-                .into_iter()
-                .filter(|successor| {
-                    clean[successor.index()] && !bounded.contains(&(*block, *successor))
-                })
-                .collect();
-            if *next < successors.len() {
-                let successor = successors[*next];
-                *next += 1;
+            if let Some(successor) = next.next() {
                 match state[successor.index()] {
                     0 => {
                         state[successor.index()] = 1;
-                        stack.push((successor, 0));
+                        stack.push((successor, successors(successor)));
                     }
                     1 => return Some(successor),
                     _ => {}
@@ -601,56 +591,53 @@ fn editor_clean_cycle(
     info: &CalleeInfo,
     exempt: &BTreeSet<BlockId>,
 ) -> Option<BlockId> {
-    let clean: Vec<bool> = editor
-        .live_blocks()
-        .into_iter()
-        .map(|block| {
-            let terminator_cut = matches!(
-                editor.terminator(block),
-                Term::Invoke { .. } | Term::TailCall { .. }
-            );
-            !terminator_cut
-                && (0..editor.instruction_count(block)).all(|index| {
-                    let instruction = editor.instruction((block, index));
-                    instruction.removed || !op_flow(&instruction.op, &editor.assembly, info).0
-                })
-        })
-        .collect::<Vec<_>>();
-    // live_blocks 可能不含已删除 block；用 map 保序。
     let live = editor.live_blocks();
-    let clean_of = |block: BlockId| -> bool {
-        !exempt.contains(&block)
-            && live
-                .iter()
-                .position(|candidate| *candidate == block)
-                .is_some_and(|index| clean[index])
+    // Editor 的 block ID 来自稠密 arena，可有删除洞；洞在状态表中始终不可达。
+    let slots = live
+        .iter()
+        .map(|block| block.index())
+        .max()
+        .map_or(0, |last| last + 1);
+    debug_assert!(live.iter().all(|block| block.index() < slots));
+    let mut clean = vec![false; slots];
+    for &block in &live {
+        let terminator_cut = matches!(
+            editor.terminator(block),
+            Term::Invoke { .. } | Term::TailCall { .. }
+        );
+        clean[block.index()] = !exempt.contains(&block)
+            && !terminator_cut
+            && (0..editor.instruction_count(block)).all(|index| {
+                let instruction = editor.instruction((block, index));
+                instruction.removed || !op_flow(&instruction.op, &editor.assembly, info).0
+            });
+    }
+    let clean_of = |block: BlockId| clean.get(block.index()).copied().unwrap_or(false);
+    let mut state = vec![0u8; slots];
+    let successors = |block| {
+        let clean_of = &clean_of;
+        editor
+            .successors(block)
+            .filter(move |successor| clean_of(*successor))
     };
-    let mut state: BTreeMap<BlockId, u8> = BTreeMap::new();
     for root in &live {
-        if !clean_of(*root) || state.get(root).copied().unwrap_or(0) != 0 {
+        if !clean_of(*root) || state[root.index()] != 0 {
             continue;
         }
-        let mut stack = vec![(*root, 0usize)];
-        state.insert(*root, 1);
+        let mut stack = vec![(*root, successors(*root))];
+        state[root.index()] = 1;
         while let Some((block, next)) = stack.last_mut() {
-            let successors: Vec<BlockId> = editor
-                .successors(*block)
-                .into_iter()
-                .filter(|successor| clean_of(*successor))
-                .collect();
-            if *next < successors.len() {
-                let successor = successors[*next];
-                *next += 1;
-                match state.get(&successor).copied().unwrap_or(0) {
+            if let Some(successor) = next.next() {
+                match state[successor.index()] {
                     0 => {
-                        state.insert(successor, 1);
-                        stack.push((successor, 0));
+                        state[successor.index()] = 1;
+                        stack.push((successor, successors(successor)));
                     }
                     1 => return Some(successor),
                     _ => {}
                 }
             } else {
-                state.insert(*block, 2);
+                state[block.index()] = 2;
                 stack.pop();
             }
         }
@@ -750,7 +737,10 @@ fn insert_poll(editor: &mut Editor, block: BlockId, interval: u32) -> Result<(),
     } else if terminator {
         editor.set_terminator_memory(block, output);
     } else {
-        for edge in editor.terminator(block).edges() {
+        // 重写前拥有边编号快照；常见双边内联，switch 仍按需扩容。
+        let edges: smallvec::SmallVec<[crate::body::EdgeId; 2]> =
+            editor.terminator(block).edges().collect();
+        for edge in edges {
             if let Some(data) = editor.edge(edge) {
                 let to = data.to;
                 let mut arguments = data.arguments.clone();
@@ -1001,31 +991,39 @@ fn overflow_block(
 ) -> Option<BlockId> {
     let bounded = bounded_back_edges(editor, info);
     let order = editor.reverse_postorder();
-    let mut in_cost: BTreeMap<BlockId, u32> = BTreeMap::new();
-    let mut out_cost: BTreeMap<BlockId, u32> = BTreeMap::new();
-    in_cost.insert(editor.entry(), 0);
+    // BlockId 是稠密连续下标，按 Vec 索引避免在成本不动点循环里重复查 BTreeMap。
+    let slots = order
+        .iter()
+        .map(|block| block.index() + 1)
+        .max()
+        .unwrap_or(0)
+        .max(editor.entry().index() + 1);
+    let mut in_cost = vec![0u32; slots];
+    let mut out_cost = vec![0u32; slots];
+    let mut advancing = Vec::new();
     let mut rounds = 0;
     loop {
         let mut changed = false;
-        let mut advancing = BTreeSet::new();
-        for block in &order {
+        advancing.clear();
+        for &block in &order {
             let current = block_flow(
-                (0..editor.instruction_count(*block))
-                    .filter(|index| !editor.instruction((*block, *index)).removed)
-                    .map(|index| &editor.instruction((*block, index)).op),
+                (0..editor.instruction_count(block))
+                    .filter(|index| !editor.instruction((block, *index)).removed)
+                    .map(|index| &editor.instruction((block, index)).op),
                 &editor.assembly,
                 info,
-                in_cost.get(block).copied().unwrap_or(0),
+                in_cost[block.index()],
             );
-            out_cost.insert(*block, current);
-            for successor in editor.successors(*block) {
-                if bounded.contains(&(*block, successor)) {
+            out_cost[block.index()] = current;
+            for successor in editor.successors(block) {
+                if bounded.contains(&(block, successor)) {
                     continue;
                 }
-                if in_cost.get(&successor).copied().unwrap_or(0) < current {
-                    in_cost.insert(successor, current);
+                let idx = successor.index();
+                if idx < in_cost.len() && in_cost[idx] < current {
+                    in_cost[idx] = current;
                     changed = true;
-                    advancing.insert(successor);
+                    advancing.push(successor);
                 }
             }
         }
@@ -1033,8 +1031,8 @@ fn overflow_block(
         // 无回边的最长路径至多经过每个块一次。超过该轮数仍增加说明存在
         // 正成本环，其 poll-free 成本无界，直接提升到预算溢出态。
         if rounds > order.len() {
-            for block in advancing {
-                in_cost.insert(block, POLL_BUDGET + 1);
+            for &block in &advancing {
+                in_cost[block.index()] = POLL_BUDGET + 1;
             }
         }
         if !changed {
@@ -1043,7 +1041,7 @@ fn overflow_block(
     }
     order.into_iter().find(|block| {
         !exempt.contains(block)
-            && out_cost.get(block).copied().unwrap_or(0) > POLL_BUDGET
+            && out_cost[block.index()] > POLL_BUDGET
             && !(0..editor.instruction_count(*block)).any(|index| {
                 matches!(
                     editor.instruction((*block, index)).op,
@@ -1104,21 +1102,18 @@ fn strip_mine(
     if bound.checked_add(stride).is_none() {
         return Ok(false);
     }
-    let mut exits = editor
-        .terminator(header)
-        .edges()
-        .into_iter()
-        .filter(|edge| {
-            editor
-                .edge(*edge)
-                .is_some_and(|data| !natural.blocks.contains(&data.to))
-        });
+    let mut exits = editor.terminator(header).edges().filter(|edge| {
+        editor
+            .edge(*edge)
+            .is_some_and(|data| !natural.blocks.contains(&data.to))
+    });
     let Some(exit_edge) = exits.next() else {
         return Ok(false);
     };
     if exits.next().is_some() {
         return Ok(false);
     }
+    drop(exits);
     let (exit_target, exit_values) = {
         let exit = editor.edge(exit_edge).expect("活跃边");
         (exit.to, exit.arguments.clone())

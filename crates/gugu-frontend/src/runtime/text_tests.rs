@@ -122,7 +122,7 @@ fn case_normalization_and_segmentation_follow_unicode_18() {
 
 #[test]
 fn bytes_and_byte_buffer_copies_seal_in_generic_gir() {
-    let compilation = crate::Compiler::shared().compile(crate::CompileRequest::single_file(
+    let compilation = crate::Compiler::shared().compile_to_lir(crate::CompileRequest::single_file(
         "main.gg",
         "fn main() {}",
         crate::TargetName::X86_64Linux,
