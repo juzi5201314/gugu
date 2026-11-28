@@ -11,6 +11,44 @@ fn source_prelude_implicit_and_explicit_use_resolve() {
 }
 
 #[test]
+fn qualified_std_paths_resolve_types_functions_and_reexports() {
+    assert!(accepts(
+        "fn bench(b: &std.test.Bencher) { b.iter(fn() {}) }\n\
+         fn main() {\n let m: std.collections.BTreeMap[string, int] = std.collections.BTreeMap::new()\n\
+         _ = m.insert(\"a\", 1)\n std.io.println(\"ok\") }"
+    ));
+}
+
+#[test]
+fn qualified_std_paths_preserve_privacy_and_diagnostic_spans() {
+    for path in [
+        "std.test.Missing",
+        "std.prelude.Option",
+        "std.runtime.platform.RawPtr",
+    ] {
+        let source = format!("fn check(value: &{path}) {{}}\nfn main() {{}}");
+        let compilation =
+            crate::Compiler::shared().compile_sema_for_test(crate::CompileRequest::single_file(
+                "main.gg",
+                source.clone(),
+                crate::TargetName::X86_64Linux,
+            ));
+        assert!(!compilation.is_success(), "{path}");
+        assert!(
+            compilation.diagnostics().items().iter().any(|error| {
+                error.span().is_some_and(|span| {
+                    let start = span.start() as usize;
+                    let end = span.end() as usize;
+                    source[start..end].contains(path)
+                })
+            }),
+            "{:?}",
+            compilation.diagnostics().items()
+        );
+    }
+}
+
+#[test]
 fn collection_associated_functions_infer_keys_from_later_calls_and_context() {
     assert!(accepts(
         "use std.collections.{BTreeMap, BTreeSet}\nfn main() {\n\

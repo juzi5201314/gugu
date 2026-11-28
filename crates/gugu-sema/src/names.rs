@@ -740,7 +740,7 @@ fn path_text(module: &ParsedModule, path_id: super::ast::PathId) -> Vec<String> 
         .collect()
 }
 
-fn private_builtin_module(path: &str) -> bool {
+pub(crate) fn private_builtin_module(path: &str) -> bool {
     path == "std.prelude"
         || path.starts_with("std.runtime.")
         || path == "runtime"

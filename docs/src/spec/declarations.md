@@ -38,6 +38,8 @@ use std.io as io2
 
 禁止 `use green.*` 全打散。循环 `use` 报错。`use` 不执行代码。
 
+标准库公开项也可直接使用 `std` 开头的完整路径，无需先 `use`：例如参数类型 `&std.test.Bencher`、公开再导出的类型 `std.collections.BTreeMap[string, int]` 与函数调用 `std.io.println("ok")`。完整路径遵守与导入相同的可见性规则，不能访问私有声明、私有导入或 `std.prelude`、`std.runtime.*` 等实现模块。类型路径解析失败时，诊断指向实际路径，而非文件末尾。
+
 ## `let`
 
 <!-- docs-example: parse -->

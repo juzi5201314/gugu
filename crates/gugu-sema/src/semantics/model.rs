@@ -22,6 +22,7 @@ mod kinds;
 pub use kinds::{CallableId, Constructor, DefRef, FieldInfo, Nominal, Ty};
 mod substitution;
 pub use substitution::substitute;
+mod paths;
 pub struct Model<'a> {
     pub modules: &'a [ParsedModule],
     /// 由 `RuntimeResources` 以 `Runtime` 角色注入的模块下标；GC 控制原语的授权依据。
@@ -465,6 +466,9 @@ impl<'a> Model<'a> {
                 _ => {}
             }
         }
+        if *first == "std" && path.len() > 2 {
+            return self.resolve_std_path(module, path);
+        }
         Err(self.error(module, format!("未解析名称 `{}`", path.join("."))))
     }
     pub fn form(&self, module: usize, id: TyId) -> Result<Ty, Diagnostic> {
@@ -664,7 +668,13 @@ impl<'a> Model<'a> {
                     };
                     return Ok(Ty::MaybeUninit(Box::new(inner.clone())));
                 }
-                let def = self.resolve(module, &parts)?;
+                let def = self.resolve(module, &parts).map_err(|error| {
+                    Diagnostic::error(
+                        error.code(),
+                        error.message(),
+                        Some(a.paths[path.0 as usize].span.clone()),
+                    )
+                })?;
                 self.check_generic_kinds(def, &args)?;
                 if let Some((i, n)) = self
                     .nominal
