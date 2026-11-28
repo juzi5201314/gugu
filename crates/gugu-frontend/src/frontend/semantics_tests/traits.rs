@@ -158,6 +158,32 @@ accept_cases! {
         "trait Marker {}\ntrait Identity { fn identity[T](self, value: T) T }\nstruct Point {}\nimpl Identity for Point { fn identity[T: Marker](self, value: T) T = value }\nfn main() {}";
     associated_function_generic_order_and_method_contracts_are_preserved_03: true,
         "trait Create { fn create(value: int) Self }\nstruct Point { value: int }\nimpl Create for Point { fn create(value: int) Self = Self { value } }\nfn main() { let point: Point = Create::create(1)\n _ = point }";
+    value_path_receiver_method_calls_are_accepted_00: true,
+        "enum Dir { N, S }\nimpl Dir { fn name(self: &Self) string = \"n\" }\nfn main() { _ = Dir.N.name() }";
+    value_path_receiver_method_calls_are_accepted_01: true,
+        "const DATA: [byte; 1] = [0]\nfn main() { _ = DATA.len() }";
+    value_path_receiver_method_calls_are_accepted_02: true,
+        "static DATA: [byte; 1] = [0]\nfn main() { _ = DATA.len() }";
+    value_path_receiver_method_calls_are_accepted_03: true,
+        "struct Point { x: int }\nimpl Point { fn value(self) int = self.x }\nconst P: Point = Point { x: 1 }\nfn main() { _ = P.value() }";
+}
+
+#[test]
+fn value_path_callable_fields_preserve_static_roots() {
+    super::frontend(
+        &[
+            (
+                "main.gg",
+                "use callbacks as cb\nuse callbacks.{P}\nfn main() { _ = P.f()\n _ = cb.P.f() }",
+            ),
+            (
+                "callbacks.gg",
+                "pub struct Callback { pub f: fn() int }\nfn read() int = 7\npub static P: Callback = Callback { f: read }",
+            ),
+        ],
+        &crate::QueryEngine::new(),
+    )
+    .unwrap();
 }
 
 #[test]
