@@ -44,6 +44,7 @@ const METHODS: &[Method] = &[
     method(89, 78, &[C(-100), A(0), A(1), A(2)], None),
     method(217, 61, &[A(0), A(1), A(2)], None),
     method(262, 79, &[A(0), A(1), S, A(3)], Some(2)),
+    method(318, 278, &[A(0), A(1), A(2)], None),
 ];
 
 const fn method(

@@ -96,6 +96,7 @@ fn layout(
         foreign_arguments: Vec::new(),
         sret: None,
         poll_free_leaf: false,
+        scoped_arguments: Vec::new(),
     };
     let mut arguments = Vec::new();
     if c_result.memory {

@@ -63,3 +63,20 @@ fn collection_associated_functions_infer_keys_from_later_calls_and_context() {
         "fn main() { let map = HashMap::new()\n _ = map.insert(1.5, 1) }"
     ));
 }
+
+#[test]
+fn inferred_collection_iteration_defers_key_bounds_until_numeric_types_settle() {
+    assert!(accepts(
+        "fn main() {\n\
+         let set = HashSet::new()\n _ = set.insert(1)\n\
+         for value in set { let widened: u64 = value\n _ = widened }\n\
+         let map = std.collections.BTreeMap::new()\n _ = map.insert(2, 3)\n\
+         for (key, value) in map { let widened: u64 = key\n _ = widened\n _ = value }\n\
+         let secure = std.collections.SecureHashSet::new()\n _ = secure.insert(4)\n\
+         for value in secure { _ = value } }"
+    ));
+    assert!(!accepts(
+        "fn main() { let set = HashSet::new()\n _ = set.insert(1.5)\n\
+         for value in set { _ = value } }"
+    ));
+}

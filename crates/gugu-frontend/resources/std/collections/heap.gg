@@ -1,0 +1,48 @@
+use std.vec.{Vec, VecIter}
+
+// 堆下标连续，使用 Vec；父子关系由下标计算，快照复用 Vec 的持久页。
+pub struct BinaryHeap[T] { values: Vec[T] }
+impl[T: Ord] BinaryHeap[T] {
+    pub fn new() Self = Self { values: Vec[T]::new() }
+    pub fn len(self: &Self) int = self.values.len()
+    pub fn is_empty(self: &Self) bool = self.values.is_empty()
+    pub fn peek(self: &Self) Option[T] = self.values.get(0)
+    pub fn push(self: &Self, value: T) {
+        let index = self.len()
+        self.values.push(value)
+        while index > 0 {
+            let parent = (index - 1) / 2
+            let old = self.at(parent)
+            if old >= value { break }
+            _ = self.values.set(index, old)
+            index = parent
+        }
+        _ = self.values.set(index, value)
+    }
+    pub fn pop(self: &Self) Option[T] {
+        let first = self.peek()
+        let last = match self.values.pop() { None => return None, Some(value) => value }
+        let count = self.len()
+        if count == 0 { return first }
+        let index = 0
+        while index < count / 2 {
+            let child = index * 2 + 1
+            if child + 1 < count && self.at(child + 1) > self.at(child) { child += 1 }
+            let value = self.at(child)
+            if last >= value { break }
+            _ = self.values.set(index, value)
+            index = child
+        }
+        _ = self.values.set(index, last)
+        first
+    }
+    fn at(self: &Self, index: int) T {
+        match self.values.get(index) { Some(value) => value, None => panic("堆下标越界") }
+    }
+    pub fn iter(self: &Self) VecIter[T] = self.values.iter()
+}
+impl[T: Ord] IntoIter for BinaryHeap[T] {
+    type Item = T
+    type Iter = VecIter[T]
+    fn into_iter(self: Self) VecIter[T] = self.iter()
+}

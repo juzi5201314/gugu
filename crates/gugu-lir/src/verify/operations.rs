@@ -766,6 +766,18 @@ fn resource_call_valid(args: &[ValueType], results: &[ValueType]) -> bool {
 }
 
 fn call_valid(call: &Call, args: &[ValueType], results: &[ValueType]) -> bool {
+    if call
+        .scoped_arguments
+        .windows(2)
+        .any(|pair| pair[0] >= pair[1])
+        || call.scoped_arguments.iter().any(|&index| {
+            args.get(index as usize)
+                .is_none_or(|kind| kind.ty != Type::Ptr)
+        })
+        || !call.scoped_arguments.is_empty() && call.kind != CallKind::Managed
+    {
+        return false;
+    }
     if call.parameters.len() != args.len()
         || call.results.len() != results.len()
         || call

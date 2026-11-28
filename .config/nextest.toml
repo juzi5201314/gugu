@@ -23,7 +23,7 @@ threads-required = 3
 
 # frontend 内聚合编译与多场景测试及轻量集成测试占三槽（12 槽时四并发），避开 SMT 与 L3 带宽争用，使每组稳定落在 3 秒上限内。
 [[profile.default.overrides]]
-filter = '(package(gugu-frontend) & test(/^(filesystem_tests::(docs_examples|float_formatting|collections|const_generics|formatting|array_init|a64_binding|process|platform|network|printing|strings|debug_builders|hashing|resource)|frontend::semantics_tests::array_init)::/)) | (package(gugu-compiler) & binary(=integration) & test(/^(abi_image_consistency|doc|harness|callback|native_link|filesystem|shared_handle|pin|channel_resume|foreign_roots|runtime_stats)::/))'
+filter = '(package(gugu-frontend) & test(/^(filesystem_tests::(docs_examples|float_formatting|collections|sequence_collections|scoped_views|secure_hashing|unicode|bench|const_generics|formatting|array_init|a64_binding|process|platform|network|printing|strings|debug_builders|hashing|resource)|frontend::semantics_tests::array_init)::/)) | (package(gugu-compiler) & binary(=integration) & test(/^(abi_image_consistency|doc|harness|callback|native_link|filesystem|shared_handle|pin|channel_resume|foreign_roots|runtime_stats)::/))'
 threads-required = 3
 
 # 重型集成镜像、物化复现与重型 frontend 解释用例占四槽（12 槽时最多三并发），在保持三秒安全余量的同时提升物理核吞吐。

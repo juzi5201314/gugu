@@ -196,6 +196,7 @@ fn invoke_unwind_landing_enters_edge_copy_block() {
             foreign_signature: None,
             sret: None,
             poll_free_leaf: false,
+            scoped_arguments: Vec::new(),
         },
         arguments: f.args(&[]),
         results: 0..0,

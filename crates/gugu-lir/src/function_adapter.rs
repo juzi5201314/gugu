@@ -167,6 +167,7 @@ pub(crate) fn build(target: &Body, has_environment: bool) -> Body {
                 foreign_signature: None,
                 foreign_arguments: Vec::new(),
                 poll_free_leaf: false,
+                scoped_arguments: Vec::new(),
             },
             arguments: 0..argument_end,
             results: result_start..result_end,

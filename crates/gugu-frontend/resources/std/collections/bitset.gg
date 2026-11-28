@@ -1,0 +1,68 @@
+use std.vec.{Vec, VecIter}
+
+// 非负整数键按 64 位字打包；每个字恰有 64 位，迭代按元素升序。
+struct State { words: Vec[uint], length: int }
+pub struct BitSet { state: &State }
+pub struct BitSetIter { words: VecIter[uint], word: uint, base: int, bit: int }
+impl BitSet {
+    pub fn new() Self {
+        let state = State { words: Vec[uint]::new(), length: 0 }
+        Self { state: &state }
+    }
+    pub fn len(self: &Self) int = self.state.length
+    pub fn is_empty(self: &Self) bool = self.len() == 0
+    pub fn contains(self: &Self, value: int) bool {
+        if value < 0 { return false }
+        match self.state.words.get(value / 64) {
+            None => false, Some(word) => word & (uint(1) << (value % 64)) != 0,
+        }
+    }
+    pub fn insert(self: &Self, value: int) bool {
+        if value < 0 { panic("BitSet 元素必须非负") }
+        if self.contains(value) { return false }
+        let index = value / 64
+        while self.state.words.len() <= index { self.state.words.push(0) }
+        if let Some(word) = self.state.words.get(index) {
+            _ = self.state.words.set(index, word | (uint(1) << (value % 64)))
+        }
+        self.state.length += 1
+        true
+    }
+    pub fn remove(self: &Self, value: int) bool {
+        if !self.contains(value) { return false }
+        let index = value / 64
+        if let Some(word) = self.state.words.get(index) {
+            _ = self.state.words.set(index, word ^ (uint(1) << (value % 64)))
+        }
+        self.state.length -= 1
+        true
+    }
+    pub fn clear(self: &Self) {
+        self.state.words = Vec[uint]::new()
+        self.state.length = 0
+    }
+    pub fn iter(self: &Self) BitSetIter = BitSetIter {
+        words: self.state.words.iter(), word: 0, base: 0, bit: 64,
+    }
+}
+impl Iter for BitSetIter {
+    type Item = int
+    fn next(self: &Self) Option[int] {
+        loop {
+            if self.bit == 64 {
+                self.word = match self.words.next() { None => return None, Some(word) => word }
+                self.bit = 0
+            }
+            let bit = self.bit
+            let base = self.base
+            self.bit += 1
+            if self.bit == 64 { self.base += 64 }
+            if self.word & (uint(1) << bit) != 0 { return Some(base + bit) }
+        }
+    }
+}
+impl IntoIter for BitSet {
+    type Item = int
+    type Iter = BitSetIter
+    fn into_iter(self: Self) BitSetIter = self.iter()
+}

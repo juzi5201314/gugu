@@ -328,6 +328,14 @@ fn imports_for(request: &PeRequest) -> Result<Imports<'_>, String> {
         .iter()
         .map(|(library, symbols)| (*library, symbols.to_vec()))
         .collect();
+    if request
+        .symbols
+        .iter()
+        .flat_map(|symbol| &symbol.relocs)
+        .any(|relocation| relocation.target == "__gugu_iat_BCryptGenRandom")
+    {
+        imports.push(("bcrypt.dll", vec!["BCryptGenRandom"]));
+    }
     let mut names: BTreeMap<&str, &str> = imports
         .iter()
         .flat_map(|(library, symbols)| symbols.iter().map(move |symbol| (*symbol, *library)))

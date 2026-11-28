@@ -78,6 +78,7 @@ fn bridge_packet_roots_cover_register_and_stack_copies() {
                 foreign_signature: None,
                 foreign_arguments: vec![],
                 poll_free_leaf: false,
+                scoped_arguments: Vec::new(),
             };
             let operands: Vec<_> = call
                 .parameters

@@ -1,0 +1,135 @@
+use std.collections.{Deque, BinaryHeap, BitSet, LinkedList, SmallVec, ListCursor, StaleCursor}
+
+#[track_caller]
+fn check(value: bool) { if !value { panic("集合契约失败") } }
+fn position(value: Result[ListCursor[int], StaleCursor]) ListCursor[int] {
+    match value { Ok(value) => value, Err(_) => panic("cursor 意外失效") }
+}
+fn current(value: Result[int, StaleCursor]) int {
+    match value { Ok(value) => value, Err(_) => panic("cursor 意外失效") }
+}
+fn stale[T](value: Result[T, StaleCursor]) bool { match value { Ok(_) => false, Err(_) => true } }
+
+fn deque_case() int {
+    let queue = Deque[int]::new()
+    check(queue.is_empty() && queue.pop_front() == None && queue.pop_back() == None)
+    for value in 0..12 { queue.push_back(value) }
+    let alias = queue
+    let saved = queue.iter()
+    check(alias.pop_front() == Some(0))
+    check(alias.pop_back() == Some(11))
+    alias.push_front(-1)
+    alias.push_back(12)
+    check(queue.front() == Some(-1) && queue.back() == Some(12))
+    check(queue.set(1, 20) && queue.get(1) == Some(20))
+    check(!queue.set(-1, 0) && queue.get(12) == None)
+    for value in 0..12 { check(saved.next() == Some(value)) }
+    check(saved.next() == None)
+    let reverse = Deque[int]::new()
+    for value in 0..12 { reverse.push_front(value) }
+    for value in 0..12 { check(reverse.pop_back() == Some(value)) }
+    check(reverse.is_empty())
+    1
+}
+fn heap_case() int {
+    let heap = BinaryHeap[int]::new()
+    for value in [3, 8, -1, 8, 5, 2, 12] { heap.push(value) }
+    let saved = heap.iter()
+    let alias = heap
+    check(alias.peek() == Some(12))
+    for value in [12, 8, 8, 5, 3, 2, -1] { check(heap.pop() == Some(value)) }
+    check(alias.is_empty() && heap.pop() == None)
+    let count = 0
+    while let Some(value) = saved.next() { count += 1 }
+    check(count == 7)
+    1
+}
+fn bitset_case() int {
+    let bits = BitSet::new()
+    for value in [0, 63, 64, 65, 130] { check(bits.insert(value)) }
+    check(!bits.insert(64) && bits.len() == 5)
+    let saved = bits.iter()
+    let alias = bits
+    check(alias.remove(64) && !bits.remove(64) && !bits.contains(-1))
+    bits.clear()
+    check(alias.is_empty())
+    for value in [0, 63, 64, 65, 130] { check(saved.next() == Some(value)) }
+    check(saved.next() == None && saved.next() == None)
+    1
+}
+fn smallvec_case() int {
+    let values = SmallVec[string, 2]::new()
+    values.push("a")
+    values.push("b")
+    let inline = values.iter()
+    let alias = values
+    alias.push("c")
+    let spilled = values.iter()
+    check(alias.set(0, "d") && values.get(0) == Some("d"))
+    check(values.pop() == Some("c") && alias.len() == 2)
+    check(inline.next() == Some("a") && inline.next() == Some("b") && inline.next() == None)
+    for value in ["a", "b", "c"] { check(spilled.next() == Some(value)) }
+    check(spilled.next() == None)
+    let empty = SmallVec[int, 0]::new()
+    empty.push(4)
+    let total = 0
+    for value in empty { total += value }
+    check(total == 4)
+    check(empty.pop() == Some(4) && empty.pop() == None)
+    check(!empty.set(0, 3) && empty.get(-1) == None)
+    1
+}
+fn list_case() int {
+    let list = LinkedList[int]::new()
+    check(stale(list.cursor_front()) && stale(list.cursor_back()))
+    let one = list.push_back(1)
+    let three = list.push_back(3)
+    let two = position(list.insert_before(&three, 2))
+    let saved = list.iter()
+    let alias = list
+    _ = two.update(fn(value: int) int = value * 10)
+    check(current(two.value()) == 20 && alias.len() == 3)
+    _ = position(list.splice_after(&three, &one))
+    check(current(one.value()) == 1 && current(position(list.cursor_back()).value()) == 1)
+    let source = LinkedList[int]::new()
+    let moved = source.push_back(9)
+    let untouched = source.push_back(10)
+    let new_cursor = position(list.splice_before(&two, &moved))
+    check(stale(moved.value()) && current(new_cursor.value()) == 9)
+    check(current(untouched.value()) == 10 && source.len() == 1 && list.len() == 4)
+    let returned = position(source.splice_after(&untouched, &new_cursor))
+    check(stale(moved.value()) && stale(new_cursor.value()) && current(returned.value()) == 9)
+    check(current(alias.remove(&two)) == 20 && stale(two.value()) && stale(list.remove(&two)))
+    check(stale(source.remove(&one)))
+    for value in [1, 2, 3] { check(saved.next() == Some(value)) }
+    check(saved.next() == None)
+    let sum = 0
+    list.for_each_ref(fn(value: &int) { sum += *value })
+    check(sum == 4)
+    1
+}
+fn list_view_write() {
+    let list = LinkedList[int]::new()
+    let cursor = list.push_back(1)
+    let alias = list
+    list.for_each_ref(fn(value: &int) { _ = alias.remove(&cursor) })
+}
+fn list_payload_cursor(removed: bool) ListCursor[&int] {
+    let list = LinkedList[&int]::new()
+    let value = 7345
+    let cursor = list.push_back(&value)
+    if removed {
+        match list.remove(&cursor) { Ok(value) => check(*value == 7345), Err(_) => panic("删除失败") }
+        check(stale(cursor.value()))
+    }
+    cursor
+}
+fn main() {
+    _ = deque_case()
+    _ = heap_case()
+    _ = bitset_case()
+    _ = smallvec_case()
+    _ = list_case()
+    _ = list_payload_cursor(true)
+    list_view_write()
+}

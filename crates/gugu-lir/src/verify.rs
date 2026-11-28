@@ -5,6 +5,7 @@ mod provenance;
 mod raw_publish;
 mod regions;
 pub mod resource_isolation;
+pub(crate) mod scoped_callbacks;
 mod shared_access;
 
 use super::body::{

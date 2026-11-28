@@ -702,6 +702,7 @@ impl<'a> Builder<'a> {
             normal: after_call,
             unwind: Some(unwind),
             call_kind: CallKind::Managed,
+            scoped_callback: false,
             site,
         });
         self.switch_to(after_call);

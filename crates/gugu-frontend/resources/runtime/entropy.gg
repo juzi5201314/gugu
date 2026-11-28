@@ -1,0 +1,45 @@
+use std.runtime.fs_platform.{native_call, raw_allocate, raw_free}
+
+// 工作线程只接触这块 non-moving 临时缓冲区；调用完成后立即清零并归还。
+pub fn key() (uint, uint) {
+    let buffer = raw_allocate(16)
+    defer { unsafe {
+        std.ptr.ptr_write[uint](std.mem.transmute[uint, *uint](buffer), 0)
+        std.ptr.ptr_write[uint](std.mem.transmute[uint, *uint](buffer + 8), 0)
+        raw_free(buffer, 16)
+    } }
+    fill(buffer)
+    unsafe {
+        (std.ptr.read_unaligned[uint](std.mem.transmute[uint, *uint](buffer)),
+         std.ptr.read_unaligned[uint](std.mem.transmute[uint, *uint](buffer + 8)))
+    }
+}
+
+#[cfg(os = "linux")]
+fn fill(buffer: uint) {
+    let offset: uint = 0
+    while offset < 16 {
+        let result = native_call(318, buffer + offset, 16 - offset, 0, 0, 0, 0, 0, 0, 0)
+        if result.error == 4 { continue }
+        if result.error != 0 || result.value == 0 || result.value > 16 - offset {
+            panic("系统随机源不可用")
+        }
+        offset = offset + result.value
+    }
+}
+
+#[cfg(os = "macos")]
+fn fill(buffer: uint) {
+    loop {
+        let result = native_call(22, buffer, 16, 0, 0, 0, 0, 0, 0, 0)
+        if result.error == 4 { continue }
+        if result.error != 0 { panic("系统随机源不可用") }
+        return
+    }
+}
+
+#[cfg(os = "windows")]
+fn fill(buffer: uint) {
+    let result = native_call(23, 0, buffer, 16, 2, 0, 0, 0, 0, 0)
+    if result.error != 0 { panic("系统随机源不可用") }
+}

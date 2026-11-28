@@ -1,6 +1,9 @@
 pub use std.vec.{Vec, VecIter}
-pub use std.collections.hashmap.{HashMap, HashMapIter, Entry}
+pub use std.collections.hashmap.{HashMap, SecureHashMap, HashMapIter, Entry}
 pub use std.collections.btreemap.{BTreeMap, BTreeMapIter, BTreeEntry}
-pub use std.collections.set.{HashSet, HashSetIter, BTreeSet, BTreeSetIter}
-pub struct SecureHashMap[K, V] {}
-pub struct SecureHashSet[T] {}
+pub use std.collections.set.{HashSet, SecureHashSet, HashSetIter, BTreeSet, BTreeSetIter}
+pub use std.collections.deque.{Deque, DequeIter}
+pub use std.collections.heap.{BinaryHeap}
+pub use std.collections.list.{LinkedList, ListCursor, StaleCursor}
+pub use std.collections.bitset.{BitSet, BitSetIter}
+pub use std.collections.smallvec.{SmallVec}

@@ -64,6 +64,7 @@ fn call(target: CallTarget, parameters: Vec<ValueType>, results: Vec<ValueType>)
         foreign_signature: None,
         foreign_arguments: Vec::new(),
         poll_free_leaf: false,
+        scoped_arguments: Vec::new(),
     }
 }
 

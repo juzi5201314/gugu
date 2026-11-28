@@ -126,6 +126,7 @@ const FILES: &[(i32, &str, i32)] = &[
     (19, "symlink", -1),
     (20, "readlink", -1),
     (21, "realpath", 0),
+    (22, "getentropy", -1),
 ];
 
 pub(super) fn worker(thread: bool) -> Builder {

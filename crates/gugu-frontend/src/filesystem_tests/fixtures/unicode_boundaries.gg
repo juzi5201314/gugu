@@ -1,0 +1,5 @@
+fn boundary_probe(text: &string, kind: int) int {
+    let segments = if kind == 0 { text.graphemes() } else { text.words() }
+    match segments.next() { Some(part) => part.len(), None => 0 }
+}
+fn main() { let text = "a"; _ = boundary_probe(&text, 0) }

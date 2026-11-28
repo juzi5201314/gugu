@@ -90,15 +90,6 @@ impl Model<'_> {
                         item: ItemId(index as u32),
                     };
                     let mut params = self.generic_parameters(module, generics);
-                    if trait_ty.is_some()
-                        && params.values().any(|ty| matches!(ty, Ty::Const(_)))
-                        && !matches!(
-                            parsed.arena.tys[self_ty.0 as usize].kind,
-                            TyKind::Array { .. }
-                        )
-                    {
-                        return Err(self.error(module, "trait impl 的 comptime 泛型参数尚未实现"));
-                    }
                     if matches!(
                         parsed.arena.tys[self_ty.0 as usize].kind,
                         TyKind::Array { .. }

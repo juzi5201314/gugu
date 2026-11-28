@@ -38,8 +38,8 @@ use query::{QueryEngine, QueryKey, QueryKind};
 use serde::{Deserialize, Serialize};
 use std::sync::Arc;
 
-/// LIR query 与 world 的 schema。27：合并动态根地址与 C 聚合自然对齐。
-pub const SCHEMA: u32 = 28;
+/// LIR query 与 world 的 schema。29：保留 scoped callback 的参数车道。
+pub const SCHEMA: u32 = 29;
 
 #[derive(Clone, Debug, Eq, PartialEq, Serialize, Deserialize)]
 struct World {
@@ -784,6 +784,7 @@ pub fn build(
         .map_err(|error| vec![error])?;
     function_adapter::materialize(&mut bodies, hir.module()).map_err(|error| vec![error])?;
     vtable_shim::materialize(&mut bodies, hir.module(), mono).map_err(|error| vec![error])?;
+    verify::scoped_callbacks::verify(&bodies).map_err(|error| vec![error])?;
     installed_instances.sort_unstable();
     let installed: Vec<bool> = bodies
         .iter()
@@ -883,6 +884,7 @@ fn verify_world(world: &World, mono: &mono::MonoWorldV1) -> Result<(), Diagnosti
     }
     // 资源隔离是跨 body 的世界级不变量：描述符集合来自资源调用参数，闸门在分配点生效。
     verify::resource_isolation::verify(&world.bodies)?;
+    verify::scoped_callbacks::verify(&world.bodies)?;
     Ok(())
 }
 

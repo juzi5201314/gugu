@@ -69,6 +69,7 @@ fn call(callee: &Fixture) -> Call {
         foreign_arguments: vec![],
         sret: None,
         poll_free_leaf: false,
+        scoped_arguments: Vec::new(),
     }
 }
 

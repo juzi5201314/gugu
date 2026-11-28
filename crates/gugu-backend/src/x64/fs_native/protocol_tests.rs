@@ -577,7 +577,9 @@ fn linux_worker_publishes_result_before_thread_exit_and_poll_waits_for_tid() {
 fn windows_worker_preserves_argument_lanes_and_normalizes_results() {
     for &(opcode, name, sentinel) in WINDOWS_CALLS {
         for failed in [false, true] {
-            let result = if name == "CreateEventW" {
+            let result = if name == "BCryptGenRandom" {
+                if failed { 0xc000_0001 } else { 0 }
+            } else if name == "CreateEventW" {
                 // HANDLE 保持原生宽度：失败哨兵就是 NULL。
                 if failed { 0 } else { 0x1234567800000042 }
             } else if sentinel == -1 {
@@ -588,7 +590,7 @@ fn windows_worker_preserves_argument_lanes_and_normalizes_results() {
                 0x1234567800000000 | u64::from(!failed)
             };
             let mut calls = vec![(name, result)];
-            if failed {
+            if failed && name != "BCryptGenRandom" {
                 calls.push(("GetLastError", 0xbad00000005));
             }
             let mut m = Machine::new(&calls);
@@ -607,7 +609,9 @@ fn windows_worker_preserves_argument_lanes_and_normalizes_results() {
                 &[100, 101, 102, 103, 104, 105, 106, 107],
                 "{name}"
             );
-            let normalized = if name == "WaitForSingleObject" {
+            let normalized = if name == "BCryptGenRandom" {
+                result
+            } else if name == "WaitForSingleObject" {
                 result & 0xffff_ffff
             } else if name == "CreateEventW" || sentinel == -1 {
                 result
@@ -617,13 +621,41 @@ fn windows_worker_preserves_argument_lanes_and_normalizes_results() {
             assert_eq!(m.word(REQUEST + VALUE as u64), normalized, "{name}");
             assert_eq!(
                 m.word(REQUEST + ERROR as u64),
-                if failed { 5 } else { 0 },
+                if name == "BCryptGenRandom" {
+                    result
+                } else if failed {
+                    5
+                } else {
+                    0
+                },
                 "{name}"
             );
             assert_eq!(m.get(Rax), 0);
             assert_eq!(m.get(R12), 0x1234);
             assert_eq!(m.get(Rsp), STACK);
         }
+    }
+}
+
+#[test]
+fn linux_entropy_worker_forwards_buffer_and_preserves_errno() {
+    for result in [16, (-4i64) as u64, (-5i64) as u64] {
+        let mut machine = Machine::new(&[("syscall:318", result)]);
+        machine.put(REQUEST + OPERATION as u64, 318);
+        machine.put(REQUEST + ARGUMENTS as u64, 1024);
+        machine.put(REQUEST + ARGUMENTS as u64 + 8, 16);
+        assert_eq!(machine.execute(linux_file_worker(false)), Stop::Return);
+        assert_eq!(&machine.calls[0].1[..3], &[1024, 16, 0]);
+        assert_eq!(machine.word(REQUEST + VALUE as u64), result);
+        assert_eq!(
+            machine.word(REQUEST + ERROR as u64),
+            if result == 16 {
+                0
+            } else {
+                result.wrapping_neg()
+            }
+        );
+        assert_eq!(machine.get(Rsp), STACK);
     }
 }
 

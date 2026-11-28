@@ -76,6 +76,7 @@ impl Builder<'_> {
             may_suspend,
             may_allocate,
             captures_arguments,
+            scoped_arguments: Vec::new(),
             by_value: Vec::new(),
             sret: None,
             foreign_signature: None,
@@ -198,6 +199,7 @@ impl Builder<'_> {
                 unwind,
                 call_kind,
                 site,
+                scoped_callback,
             } => {
                 self.call(
                     callee,
@@ -207,6 +209,7 @@ impl Builder<'_> {
                     *unwind,
                     *call_kind,
                     *site,
+                    *scoped_callback,
                 )?;
             }
             g::Terminator::Panic {
@@ -263,6 +266,7 @@ impl Builder<'_> {
                     may_suspend: false,
                     may_allocate: false,
                     captures_arguments: false,
+                    scoped_arguments: Vec::new(),
                     by_value: Vec::new(),
                     sret: None,
                     foreign_signature: None,
@@ -314,6 +318,7 @@ impl Builder<'_> {
         unwind: Option<g::BlockId>,
         kind: g::CallKind,
         site: mono::instantiate::CallSite,
+        scoped_callback: bool,
     ) -> Result<(), Diagnostic> {
         let result_ty = if destination.is_local() {
             self.local_ty(destination.local)
@@ -352,6 +357,7 @@ impl Builder<'_> {
             None
         };
         let target = self.callee(callee, site, &mut arguments)?;
+        let mut scoped_arguments = Vec::new();
         for operand in operands {
             let value = self.operand(operand)?;
             if foreign {
@@ -367,7 +373,15 @@ impl Builder<'_> {
                     self.layout(ty).layout.expect("参数布局").size,
                 ));
             }
+            let first = id(arguments.len());
             arguments.extend(self.computed_values(value)?);
+            if scoped_callback && matches!(self.kind(ty), TypeKind::Reference(_)) {
+                scoped_arguments.extend(
+                    (first..id(arguments.len())).filter(|&index| {
+                        self.machine_type(arguments[index as usize]).ty == Type::Ptr
+                    }),
+                );
+            }
         }
         let results: Vec<_> = if output.is_some() {
             Vec::new()
@@ -398,6 +412,7 @@ impl Builder<'_> {
             may_suspend: false,
             may_allocate: matches!(kind, g::CallKind::Managed),
             captures_arguments: false,
+            scoped_arguments,
             by_value,
             sret,
             foreign_arguments,

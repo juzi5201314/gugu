@@ -1,0 +1,8 @@
+use std.collections.{LinkedList}
+
+fn pause() { yield }
+fn main() {
+    let list = LinkedList[int]::new()
+    _ = list.push_back(7)
+    list.for_each_ref(fn(value: &int) { pause() })
+}

@@ -19,7 +19,9 @@ use std::{num::NonZeroU32, ops::Range};
 /// 25：C 聚合描述保留区别于对象对齐的自然对齐。
 /// 26：C 聚合的自然对齐保留 packed 成员约束。
 /// 27：合并数组初始化的动态逐根字节地址与 C 聚合自然对齐。
-pub const REVISION: u32 = 28;
+/// 28：零大小 dyn 载荷仍分配有效对象。
+/// 29：调用保留 compiler-owned scoped callback 的 view 参数车道。
+pub const REVISION: u32 = 29;
 
 macro_rules! ids {
     ($($name:ident),* $(,)?) => { $(
@@ -436,6 +438,8 @@ pub struct Call {
     pub may_suspend: bool,
     pub may_allocate: bool,
     pub captures_arguments: bool,
+    /// compiler-owned scoped callback 的只读 view 参数车道；包含隐藏 sret / 环境后的偏移。
+    pub scoped_arguments: Vec<u32>,
     /// 按值聚合指针的参数编号、稳定 descriptor 与字节大小。
     pub by_value: Vec<(u32, [u8; 32], u64)>,
     /// 非 managed 调用保留原始 C 参数边界，按 first 严格升序。

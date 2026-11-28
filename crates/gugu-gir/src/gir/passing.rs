@@ -361,7 +361,7 @@ pub fn lang_item(module: &hir::Module, definition: hir::DefId) -> Option<Passing
     })
 }
 
-/// `std.collections` 的共享身份 Map/Set；复制只复制句柄，`with_ref` / `for_each_ref` 产生 view。
+/// `std.collections` 的共享身份集合；复制只复制句柄，`with_ref` / `for_each_ref` 产生 view。
 pub fn collection_item(module: &hir::Module, definition: hir::DefId) -> bool {
     module
         .definitions
@@ -376,6 +376,11 @@ pub fn collection_item(module: &hir::Module, definition: hir::DefId) -> bool {
                     | "BTreeMap"
                     | "BTreeSet"
                     | "SmallMap"
+                    | "Deque"
+                    | "BinaryHeap"
+                    | "LinkedList"
+                    | "BitSet"
+                    | "SmallVec"
             )
         })
 }

@@ -20,11 +20,15 @@ mod printing;
 mod process;
 mod resource;
 mod root_trace;
+mod scoped_views;
+mod secure_hashing;
+mod sequence_collections;
 mod signal;
 mod strings;
 mod trace;
 mod try_expression;
 mod type_names;
+mod unicode;
 
 use crate::lir::body::{Body, Condition, IntOp, Op, Terminator, Type, range};
 use crate::{Compilation, CompileRequest, Compiler, TargetName};

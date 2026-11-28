@@ -1,0 +1,74 @@
+use std.vec.{Vec, VecIter}
+
+// N 由类型形成器校验为非负常量；GC 对象内恰有 N 个连续内联槽，溢出后使用 Vec。
+#[allow(large_copy)]
+struct State[T, comptime N: int] { slots: [Option[T]; N], length: int, heap: Option[Vec[T]] }
+pub struct SmallVec[T, comptime N: int] { state: &State[T, N] }
+impl[T, comptime N: int] SmallVec[T, N] {
+    pub fn new() Self {
+        let slots: [Option[T]; N] = [None; N]
+        let state = State[T, N] { slots: slots, length: 0, heap: None }
+        Self { state: &state }
+    }
+    pub fn len(self: &Self) int = self.state.length
+    pub fn is_empty(self: &Self) bool = self.len() == 0
+    pub fn get(self: &Self, index: int) Option[T] {
+        if index < 0 || index >= self.len() { return None }
+        match self.state.heap { Some(values) => values.get(index), None => self.state.slots[index] }
+    }
+    pub fn set(self: &Self, index: int, value: T) bool {
+        if index < 0 || index >= self.len() { return false }
+        match self.state.heap {
+            Some(values) => { _ = values.set(index, value) },
+            None => { self.state.slots[index] = Some(value) },
+        }
+        true
+    }
+    pub fn push(self: &Self, value: T) {
+        match self.state.heap {
+            Some(values) => { values.push(value) },
+            None => {
+                if self.len() < N { self.state.slots[self.len()] = Some(value) }
+                else {
+                    let values = Vec[T]::new()
+                    for index in 0..N {
+                        if let Some(old) = self.state.slots[index] { values.push(old) }
+                        self.state.slots[index] = None
+                    }
+                    values.push(value)
+                    self.state.heap = Some(values)
+                }
+            },
+        }
+        self.state.length += 1
+    }
+    pub fn pop(self: &Self) Option[T] {
+        if self.is_empty() { return None }
+        self.state.length -= 1
+        match self.state.heap {
+            Some(values) => values.pop(),
+            None => {
+                let value = self.state.slots[self.len()]
+                self.state.slots[self.len()] = None
+                value
+            },
+        }
+    }
+    pub fn iter(self: &Self) VecIter[T] {
+        match self.state.heap {
+            Some(values) => values.iter(),
+            None => {
+                let values = Vec[T]::new()
+                for index in 0..self.len() {
+                    if let Some(value) = self.state.slots[index] { values.push(value) }
+                }
+                values.iter()
+            },
+        }
+    }
+}
+impl[T, comptime N: int] IntoIter for SmallVec[T, N] {
+    type Item = T
+    type Iter = VecIter[T]
+    fn into_iter(self: Self) VecIter[T] = self.iter()
+}

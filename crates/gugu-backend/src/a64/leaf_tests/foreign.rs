@@ -85,6 +85,7 @@ fn call(parameters: Vec<ValueType>, results: Vec<ValueType>) -> Call {
         foreign_signature: Some(signature),
         sret: None,
         poll_free_leaf: false,
+        scoped_arguments: Vec::new(),
     }
 }
 fn invoke(f: &mut Fixture, call: Call, args: &[ValueId]) -> Vec<ValueId> {

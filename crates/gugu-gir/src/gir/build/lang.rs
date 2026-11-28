@@ -121,7 +121,8 @@ impl Builder<'_> {
         {
             // 标准集合的 `with_ref` / `for_each_ref`：整个调用在接收者的 view 动态 extent 内。
             let source = operand_place(self, args.first());
-            let dest = self.emit_view_call(id, source, mode, callee.clone(), args.to_vec())?;
+            let dest =
+                self.emit_view_call(id, source, mode, callee.clone(), args.to_vec(), false)?;
             return Ok(Some(dest));
         }
         let Some(name) = lang_name(self.module, callee) else {
@@ -156,6 +157,53 @@ impl Builder<'_> {
             .then_some(ViewMode::ScopedRead)
     }
 
+    /// 登记标准集合真正进入 callback 的调用，保留经过 helper 与 Set 适配闭包的边界。
+    pub(super) fn is_scoped_callback(&self, id: ExprId) -> bool {
+        let hir::ExprKind::Call {
+            target, receiver, ..
+        } = &self.owner.expressions[id.index()].kind
+        else {
+            return false;
+        };
+        let callee = match target {
+            hir::CallTarget::Value(value) => *value,
+            hir::CallTarget::Dispatch(_) => match receiver {
+                Some(receiver) => *receiver,
+                None => return false,
+            },
+            _ => return false,
+        };
+        let hir::ExprKind::Resolved(hir::Res::Local(local)) =
+            self.owner.expressions[callee.index()].kind
+        else {
+            return false;
+        };
+        if self.owner.locals[local.index()].name != "f" {
+            return false;
+        }
+        let mut current = Some(self.owner.definition);
+        while let Some(definition) = current {
+            let definition = &self.module.definitions[definition.index()];
+            if let Some(location) = &definition.location {
+                let path = self.module.sources[location.source as usize].path.as_str();
+                if matches!(
+                    (path, definition.name.as_str()),
+                    (
+                        "std/collections/hashmap.gg" | "std/collections/btreemap.gg",
+                        "visit" | "with_ref"
+                    ) | (
+                        "std/collections/list.gg" | "std/collections/set.gg",
+                        "for_each_ref"
+                    )
+                ) {
+                    return true;
+                }
+            }
+            current = definition.parent;
+        }
+        false
+    }
+
     fn emit_scoped_view(
         &mut self,
         id: ExprId,
@@ -187,6 +235,7 @@ impl Builder<'_> {
             mode,
             Callee::Value(callback),
             vec![Operand::Copy(source)],
+            mode == ViewMode::ScopedRead,
         )
     }
 
@@ -198,6 +247,7 @@ impl Builder<'_> {
         mode: ViewMode,
         callee: Callee,
         args: Vec<Operand>,
+        scoped_callback: bool,
     ) -> Result<LocalId, Diagnostic> {
         let token = self.temp(self.primitives.unit);
         self.push_stmt(StatementKind::ScopedViewBegin {
@@ -217,6 +267,7 @@ impl Builder<'_> {
             normal,
             unwind: Some(landing),
             call_kind: CallKind::Managed,
+            scoped_callback,
             site: crate::mono::instantiate::CallSite::Expression(id.0),
         });
         self.switch_to(landing);

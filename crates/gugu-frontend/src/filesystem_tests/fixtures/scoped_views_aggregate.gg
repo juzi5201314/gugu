@@ -1,0 +1,16 @@
+use std.collections.{LinkedList}
+
+struct Borrowed { value: &int, words: [uint; 3] }
+
+fn pack(value: &int) Borrowed = Borrowed { value: value, words: [1, 2, 3] }
+
+fn main() {
+    let list = LinkedList[int]::new()
+    _ = list.push_back(7)
+    let escaped: Option[Borrowed] = None
+    list.for_each_ref(fn(value: &int) {
+        let packet = pack(value)
+        escaped = Some(packet)
+    })
+    _ = escaped
+}

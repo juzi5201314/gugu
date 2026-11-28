@@ -68,6 +68,7 @@ fn direct(target: [u8; 32]) -> Call {
         foreign_arguments: vec![],
         sret: None,
         poll_free_leaf: true,
+        scoped_arguments: Vec::new(),
     }
 }
 

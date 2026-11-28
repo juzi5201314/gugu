@@ -187,6 +187,37 @@ fn exe_is_pe32_plus_without_crt_and_keeps_metadata() {
     assert_eq!(again.fingerprint, image.fingerprint);
 }
 
+#[test]
+fn entropy_native_reference_adds_bcrypt_import() {
+    let prepared = request(
+        "main",
+        vec![symbol(
+            "main",
+            vec![0xff, 0x15, 0, 0, 0, 0, 0xc3],
+            vec![ObjectReloc {
+                offset: 2,
+                kind: RelocKindCode::PcRel32,
+                target: "__gugu_iat_BCryptGenRandom".into(),
+                addend: 0,
+            }],
+        )],
+    );
+    let image = link(&prepared).expect("系统随机源导入必须可解析");
+    assert_eq!(image.import_dlls, 3);
+    assert!(
+        image
+            .bytes
+            .windows(b"bcrypt.dll".len())
+            .any(|bytes| bytes == b"bcrypt.dll")
+    );
+    assert!(
+        image
+            .bytes
+            .windows(b"BCryptGenRandom".len())
+            .any(|bytes| bytes == b"BCryptGenRandom")
+    );
+}
+
 fn file_offset(bytes: &[u8], rva: u32) -> usize {
     let count = u16::from_le_bytes(bytes[70..72].try_into().unwrap()) as usize;
     for index in 0..count {

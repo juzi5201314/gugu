@@ -28,7 +28,7 @@ enum ResultAbi {
 
 use ResultAbi::{DirectoryEntry, Int, Pointer, WideInt};
 
-const METHODS: [Method; 22] = [
+const METHODS: [Method; 23] = [
     method("read", 3, false, WideInt),
     method("write", 3, false, WideInt),
     method("open", 2, true, Int),
@@ -51,6 +51,7 @@ const METHODS: [Method; 22] = [
     method("symlink", 2, false, Int),
     method("readlink", 3, false, WideInt),
     method("realpath", 2, false, Pointer),
+    method("getentropy", 2, false, Int),
 ];
 
 const fn method(name: &'static str, fixed: u8, variadic_int: bool, result: ResultAbi) -> Method {

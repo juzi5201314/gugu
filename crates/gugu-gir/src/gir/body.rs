@@ -8,7 +8,7 @@ use serde::{Deserialize, Serialize};
 use std::ops::Range;
 
 /// GIR schema revision（见 gir-lir.md「共同表示规则」）。
-pub const GIR_REVISION: u32 = 10;
+pub const GIR_REVISION: u32 = 11;
 
 macro_rules! ids {
     ($($name:ident),* $(,)?) => { $(
@@ -661,6 +661,8 @@ pub enum Terminator {
         normal: BlockId,
         unwind: Option<BlockId>,
         call_kind: CallKind,
+        /// 标准库登记的 ScopedRead callback 实际调用；不标记集合入口或普通 helper 调用。
+        scoped_callback: bool,
         site: CallSite,
     },
     Return,

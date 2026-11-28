@@ -1,0 +1,69 @@
+use std.vec.{Vec, VecIter}
+
+// 两个持久 Vec 分别逆序/正序保存前后半部；空端取值时平分另一端，避免反复全量倒置。
+struct State[T] { front: Vec[T], back: Vec[T] }
+pub struct Deque[T] { state: &State[T] }
+pub struct DequeIter[T] { front: VecIter[T], back: VecIter[T] }
+
+impl[T] Deque[T] {
+    pub fn new() Self {
+        let state = State[T] { front: Vec[T]::new(), back: Vec[T]::new() }
+        Self { state: &state }
+    }
+    pub fn len(self: &Self) int = self.state.front.len() + self.state.back.len()
+    pub fn is_empty(self: &Self) bool = self.len() == 0
+    pub fn push_front(self: &Self, value: T) { self.state.front.push(value) }
+    pub fn push_back(self: &Self, value: T) { self.state.back.push(value) }
+    pub fn front(self: &Self) Option[T] = self.get(0)
+    pub fn back(self: &Self) Option[T] = self.get(self.len() - 1)
+    pub fn get(self: &Self, index: int) Option[T] {
+        if index < 0 { return None }
+        let front = self.state.front.len()
+        if index < front { self.state.front.get(front - index - 1) }
+        else { self.state.back.get(index - front) }
+    }
+    pub fn set(self: &Self, index: int, value: T) bool {
+        if index < 0 { return false }
+        let front = self.state.front.len()
+        if index < front { self.state.front.set(front - index - 1, value) }
+        else { self.state.back.set(index - front, value) }
+    }
+    pub fn pop_front(self: &Self) Option[T] {
+        if self.state.front.is_empty() { self.rebalance(true) }
+        self.state.front.pop()
+    }
+    pub fn pop_back(self: &Self) Option[T] {
+        if self.state.back.is_empty() { self.rebalance(false) }
+        self.state.back.pop()
+    }
+    fn rebalance(self: &Self, toward_front: bool) {
+        let count = self.len()
+        let middle = count / 2 + (if toward_front { count % 2 } else { 0 })
+        let front = Vec[T]::new()
+        let back = Vec[T]::new()
+        let index = middle
+        while index > 0 {
+            index -= 1
+            if let Some(value) = self.get(index) { front.push(value) }
+        }
+        for index in middle..count {
+            if let Some(value) = self.get(index) { back.push(value) }
+        }
+        self.state.front = front
+        self.state.back = back
+    }
+    pub fn iter(self: &Self) DequeIter[T] = DequeIter {
+        front: self.state.front.iter(), back: self.state.back.iter(),
+    }
+}
+impl[T] Iter for DequeIter[T] {
+    type Item = T
+    fn next(self: &Self) Option[T] {
+        match self.front.next_back() { Some(value) => Some(value), None => self.back.next() }
+    }
+}
+impl[T] IntoIter for Deque[T] {
+    type Item = T
+    type Iter = DequeIter[T]
+    fn into_iter(self: Self) DequeIter[T] = self.iter()
+}

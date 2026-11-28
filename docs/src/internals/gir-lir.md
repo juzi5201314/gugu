@@ -48,7 +48,7 @@ GIR 和 LIR 分别以一个函数、闭包、初始化器或编译器生成 glue
 - `signature`：规范化参数、返回类型和 effect；
 - `source_scopes`：可恢复到 HIR span 的内联作用域树；
 - `flags`：是否可 panic、可 suspend、可分配、含 unsafe 或属于 runtime glue；
-- `revision`：当前 GIR 为 6、LIR 为 9，concrete GIR schema 为 2。
+- `revision`：当前 GIR 为 11、LIR 为 29，concrete GIR schema 为 2。
 
 成功产物不允许错误类型、未解析定义、未物化的早期 comptime 值或悬空 arena ID。引用、切片和身份句柄的目标类型先登记稠密编号，待外层值布局闭合后再展开，不能通过引用目标反向要求未完成的聚合传递类别。unit 是零字段聚合，可作为 Result 等构造器的零字节载荷。
 
@@ -177,7 +177,7 @@ terminator 固定为：
 - `Suspend { reason, resume, cancelled, safepoint }`；
 - `SelectCommit { cases, ready, suspend, safepoint }`。
 
-`Panic.location` 固定为原始 panic 表达式位置，包括编译器生成的检查失败与 channel send 取消；它不从 block source 推断。LIR lowering 使用 `SourceMap` 将该位置转为只读常量路径、1-based 行号和列号，通过 `RuntimeCall::Panic` 的显式 ABI lanes 传入镜像 runtime；常量内不含指针，因此复用普通 `Symbol::Data` relocation。`BuildGenericGir` 当前 schema 为 8，GIR revision 为 4，LIR build schema 为 6。
+`Panic.location` 固定为原始 panic 表达式位置，包括编译器生成的检查失败与 channel send 取消；它不从 block source 推断。LIR lowering 使用 `SourceMap` 将该位置转为只读常量路径、1-based 行号和列号，通过 `RuntimeCall::Panic` 的显式 ABI lanes 传入镜像 runtime；常量内不含指针，因此复用普通 `Symbol::Data` relocation。`BuildGenericGir` 当前 schema 为 21、GIR revision 为 11，包含实际 callback 调用的 `scoped_callback` 标记；LIR build schema 为 29。
 
 编译器生成的 panic payload 固定为 `string`，即使源码 owner 没有显式引用该类型。HIR primitive type table 必须包含 `string`，具体 GIR 在该 owner 中为消息字面量物化对应类型和布局；不能把缺失的 owner-local 引用降为 `unit`，因为那会使 `RuntimeCall::Panic` 缺少消息 ABI lanes，并破坏 runtime glue 签名校验。冻结类型宇宙对含 panic 检查、panic 效果或 suspend 操作的 owner 登记相同类型键。
 
@@ -217,7 +217,7 @@ HIR同样提供保持源码臂优先级的 pattern matrix。GIR把它编译成�
 完成复制后立即结束 RHS 自有临时租约；调用结果只在正常后继记为已写入，不能因未记录而漏释放。
 
 栈根表是 enum 变体的并集，初始全零可追踪不表示以后能无条件追踪标量载荷。
-LIR query/world schema 与 body revision 为 27，合并逐根动态字节地址与 C 聚合的自然对齐约束。
+LIR query/world schema 与 body revision 为 29，包含逐根动态字节地址、C 聚合自然对齐、零大小 dyn 载荷分配，以及 scoped callback 的 view 参数车道。
 
 成功元素写入后，LIR 用 `RootInitAddr(slot)` 取得帧内逐根字节基址，计算
 `index * element_root_count + field_root_index`，再按当前活动变体复位和置位。
@@ -227,7 +227,7 @@ LIR query/world schema 与 body revision 为 27，合并逐根动态字节地址
 
 place 与 value 消费共享一条表达式构造路径：字段/下标/借用消费者只构造投影，`Dereference` 调整继续延长原 place，不提前把被引用聚合复制到临时槽。真正的 value 消费才物化最终投影，并执行该值自己的传递动作。由字段取地址产生的引用因此仍指向原槽；仅为了形成 place 不应触发 `large_copy` 或 COW/resource 复制。
 
-`std.text.Bytes` 与 `std.io.ByteBuffer` 走上面的 `CowSnapshot`。复制封存 backing，之后修改的一侧分离，旧快照字节不变。runtime 参照模型按 Unicode 18.0.0 判定 UTF-8/UTF-16、lossy U+FFFD、负索引、标量边界、默认大小写、完整 case fold、NFC/NFD/NFKC/NFKD，以及 grapheme 与 word 边界；规范化与分段表来自 `unicode-normalization`/`unicode-segmentation`，两者尚未发布 18.0.0 版本，实际版本（当前 17.0.0）与目标版本一起进入编译器身份，crate 升级会同时改身份。行切分目前只实现强制换行（CR LF 保持在一起，并在 LF、NEL、LS、PS 和不跟随 LF 的 CR 之后断开），不是完整的 UAX #14 类对规则。这些函数还没有降成可从 Gugu 源码调用的 intrinsic。
+`std.text.Bytes` 与 `std.io.ByteBuffer` 走上面的 `CowSnapshot`。复制封存 backing，之后修改的一侧分离，旧快照字节不变。runtime 参照模型的宿主大小写数据为 Unicode 18.0.0，规范化与分段依赖表为 17.0.0；它们的实际版本进入编译器身份。目标可执行文本 API 使用固定 Unicode 17.0.0 数据：`runtime-builder/build.rs` 从随附 UCD 生成 7-bit 编码的有序映射/属性范围表，仅写入构建目录，再作为标准库源参与既有 artifact 身份。`std/text/unicode.gg` 用二分查找读取表，完整大小写与 case folding 两遍扫描、一次分配，Final_Sigma 通过 Cased/Case_Ignorable 上下文判断。grapheme/word 迭代器扫描 UAX #29 状态，覆盖 Indic conjunct、emoji ZWJ、Regional Indicator 与忽略字符规则；行迭代只在强制换行处切分，保留 CR LF 与终止符。所有迭代器保存创建时的 string 快照，返回快照切片；无需新的机器操作或独立 Rust 运行时实现。官方 GraphemeBreakTest/WordBreakTest 固定向量在进程内执行同一 Gugu LIR，回归覆盖全部边界规则。
 
 阻塞 I/O 原语在 LIR 是 `RuntimeCall::BlockingIo`，`CallKind::ForeignBridge`，`may_suspend = true`。`op` 固定为 0 read、1 write、2 seek、3 fill；`cancel` 表示该调用携带 `CancelToken`。timeout 是操作开始时捕获的状态，不进每个 LIR 操作数。每条 `BlockingIo` 同时计入普通 `ForeignBridge` 站点与 `blocking_io` 站点，因此 `blocking_io <= ordinary`。`std.fs` 的源码调用现已通过私有 `RuntimeMachineOp::FsStart/FsPoll` 提交和收取原生文件请求。`FsStart` 同时计入普通 bridge 与 `blocking_io` 站点；组合函数、路径编码和错误映射保持 managed 调用。旧 `BlockingIo` 形状保留在尚未迁移的 trait 接缝中，不是文件操作的执行入口。私有 `AllocBytes` 复用数组分配；`StringBytes` 与 `StringFromUtf8Unchecked` 只转换受管 data/len 表示，不把受管地址交给 worker。字符串比较通过 `string_compare` 按 UTF-8 字节词典序比较内容，与 backing 地址无关。`+` 作用于 `string` 结果时降成 `RuntimeCall::Concat`，实参按显式 ABI 车道展开为 `(data, len) × 2`，返回侧走 `runtime_result` 的 sret 车道；`utf8_boundary` 检查降成 `RuntimeCall::Utf8Boundary`，固定四车道 `(data, len, start, end)`，缺省端点在 lowering 归一化。两者都是 `std/text.gg` 中的 Gugu 实现，登记为 glue `Item` 并由 mono 收集的类型定向 demand（按实例类型实参代入后，赋值目标的具体类型为 `string`）实例化。
 
@@ -237,11 +237,21 @@ place 与 value 消费共享一条表达式构造路径：字段/下标/借用�
 
 地址结果使用可执行的 `std.vec.Vec`，经 `std.collections` 导出。共享 VecState 持有不可变八路索引页根、长度与层级；按非负 int 的63位上界，最多21层，每次修改复制访问路径，迭代器 O(1) 保存旧根。叶槽为 Option[T]、分支槽为 Option[&VecPage[T]]，全部由现有固定数组/枚举 GC 描述追踪，不在字节数组中隐藏引用，也不新增第二份 Rust 容器运行时。网络地址的解析和格式化均为普通 Gugu 函数；SocketAddr 最长58字节 ASCII 输出在固定缓冲完成，不依赖未物化的通用字符串拼接。
 
-`std.collections` 的 `HashMap` / `HashSet` / `SecureHashMap` / `SecureHashSet` / `BTreeMap` / `BTreeSet` / `SmallMap` 是按名字登记的共享身份 lang item：passing class 为 `IDENTITY`，复制只复制句柄，不产生 `CowSnapshot`。接收者类型为这些集合的 `with_ref` / `for_each_ref` 派发在调用点降为 `ScopedViewBegin ScopedRead`（源是接收者 place）、`Call`、`ScopedViewEnd`，整个调用位于 view 的动态 extent 内；调用的 unwind 边先进入一个只做 `ScopedViewEnd` 的 cleanup landing 块再接外围 cleanup 链，因此正常返回与 panic 展开两条路径都闭合 token，满足 GIR verifier 的配对 / no-suspend 规则与 LIR verifier 的出口无未闭合 guard 规则；`std.mem.with_ref` 等旧钩子继续按名字产生 view。集合的键约束（`Eq + Hash + StableHash`、`Ord + StableOrd`）由 `std/collections/hashmap.gg`、`btreemap.gg` 和 `set.gg` 的 impl 头声明并走普通 trait 求解，缺少 marker 的键类型没有适用方法。内建源单元可以声明预导入名，用户源码不能。runtime 参照模型 `runtime/collections.rs` 固定语义：共享句柄、普通读取返回语义副本、`with_ref` / `for_each_ref` 期间任一别名的写入是 panic、`iter()` O(1) 封存 backing 且第一次修改先分离、Entry 只传递副本；HashMap 类按所选哈希族的键 hash 排列实现序，BTreeMap 类按键全序，SmallMap 在内联阶段按插入序线性查找、溢出后与同族 HashMap 相同。`runtime/hash.rs` 固定 `Hasher` 的语义馈送（定宽标量、带长度前缀的文本/字节），以及默认 FoldHash-fast（进程熵 seed）、SecureHashMap 的 SipHash 1-3（CSPRNG key）与稳定的 XXH3-64 / XXH3-128 三类哈希族；前两者不是持久格式。`frontend/string/fmt.rs` 固定 `Formatter` 的 padding、integral 与结构化 debug 写入，comptime 静态格式化直接复用它。`std.hash.Hasher` 已作为普通名义类型提供 seeded FoldHash-fast：Gugu 源码累积规范字节流并在 finish 中执行 FoldHash 0.2 的完整 short/long-byte 算法，含 64×64→128 folded multiply。标量、Option、Result 的 Hash 实现来自 std.hash 源码；元组的内建静态派发在 mono 实例选择时绑定同模块的 pack 馈送函数，按字段顺序展开成普通调用，再经现有 concrete call 绑定进入 LIR，不增加 Hasher 专用运行时表示或机器操作。数组与 TypeId 的直接 Hash 调用显式报未实现。entropy 尚无原生执行片段，故只公开显式 seed 构造。可执行集合由 `std/collections.gg` 重导出以下普通 Gugu 模块；SecureHashMap / SecureHashSet 仍仅保留原有空类型声明，SipHash 尚未接入。`SmallMap[K, V, comptime N]` 的 comptime 值参数也尚未进入类型形成。
+`std.collections` 的 `HashMap` / `HashSet` / `SecureHashMap` / `SecureHashSet` / `BTreeMap` / `BTreeSet` / `SmallMap` 是按名字登记的共享身份 lang item：passing class 为 `IDENTITY`，复制只复制句柄，不产生 `CowSnapshot`。接收者类型为这些集合的 `with_ref` / `for_each_ref` 派发在调用点降为 `ScopedViewBegin ScopedRead`（源是接收者 place）、`Call`、`ScopedViewEnd`，整个调用位于 view 的动态 extent 内；调用的 unwind 边先进入一个只做 `ScopedViewEnd` 的 cleanup landing 块再接外围 cleanup 链，因此正常返回与 panic 展开两条路径都闭合 token，满足 GIR verifier 的配对 / no-suspend 规则与 LIR verifier 的出口无未闭合 guard 规则；`std.mem.with_ref` 等旧钩子继续按名字产生 view。集合的键约束（`Eq + Hash + StableHash`、`Ord + StableOrd`）由 `std/collections/hashmap.gg`、`btreemap.gg` 和 `set.gg` 的 impl 头声明并走普通 trait 求解，缺少 marker 的键类型没有适用方法。内建源单元可以声明预导入名，用户源码不能。runtime 参照模型 `runtime/collections.rs` 固定语义：共享句柄、普通读取返回语义副本、`with_ref` / `for_each_ref` 期间任一别名的写入是 panic、`iter()` O(1) 封存 backing 且第一次修改先分离、Entry 只传递副本；HashMap 类按所选哈希族的键 hash 排列实现序，BTreeMap 类按键全序，SmallMap 在内联阶段按插入序线性查找、溢出后与同族 HashMap 相同。`runtime/hash.rs` 固定 `Hasher` 的语义馈送（定宽标量、带长度前缀的文本/字节），以及默认 FoldHash-fast（进程熵 seed）、SecureHashMap 的 SipHash 1-3（CSPRNG key）与稳定的 XXH3-64 / XXH3-128 三类哈希族；前两者不是持久格式。`frontend/string/fmt.rs` 固定 `Formatter` 的 padding、integral 与结构化 debug 写入，comptime 静态格式化直接复用它。`std.hash.Hasher` 作为普通名义类型累积规范字节流，按构造时的算法选择执行 FoldHash 0.2 的完整 short/long-byte 算法（含 64×64→128 folded multiply）或 SipHash 1-3。标量、Option、Result 的 Hash 实现来自 std.hash 源码；元组的内建静态派发在 mono 实例选择时绑定同模块的 pack 馈送函数，按字段顺序展开成普通调用，再经现有 concrete call 绑定进入 LIR，不增加 Hasher 专用运行时表示或机器操作。数组与 TypeId 的直接 Hash 调用显式报未实现。可执行集合由 `std/collections.gg` 重导出以下普通 Gugu 模块；`SmallMap[K, V, comptime N]` 的 comptime 值参数仍尚未进入类型形成。
+
+SecureHashMap 复用 HashMap 的持久页树、Entry 与快照迭代器，State 保存未馈送的 Hasher，每次查找或修改按值复制后馈送键；SecureHashSet 在同一安全 Map 上存 unit。安全构造经 `runtime/entropy.gg` 取得独立 128 位 OS 随机密钥：使用现有 BlockingBridge/native_call，把 16 字节 non-moving 临时缓冲区交给 native worker。Linux 的请求号 318 对应 x64 getrandom，在 A64 转换为 syscall 278；Darwin 请求 22 调用 getentropy；Windows 请求 23 调用 BCryptGenRandom，使用系统首选 RNG 标志并直接保留 NTSTATUS，PE 仅在选入的片段引用该符号时加入 bcrypt.dll。Linux 完成短读、Unix 重试 EINTR，其余失败报告 panic，不返回固定 seed。缓冲区在正常返回与 panic 清理时先清零再归还；进程内测试以固定字节、短读、EINTR 和失败脚本覆盖协议，并将 SipHash 输出与 Rust 参照模型比较。
+
+集合 callback 的实际调用点在 GIR 标记 `scoped_callback`；LIR lowering 将每个只读引用实参映射为 `Call.scoped_arguments` 的机器车道，跳过隐藏返回地址、闭包环境与切片长度。完整实例世界验证沿静态调用图检查无挂起，并在 callback、helper、分支合流与递归之间传播 view 来源，拒绝写入、外部存储、返回和跨协程发布；从 view 读取出的普通值副本不携带 view 身份。无法静态证明的动态调用不能接收 view。标记进入规范编码与缓存版本，已缓存的函数不能绕过相同验证。
+
+scoped verifier 在完整 LIR 调用图形成后、优化前和最终 world 检查时执行；SSA 参数按入口 `Mem` 车道之后的真实 ABI 位置映射。借用引用和包含借用的局部存储地址分别传播，栈槽与编译器生成的私有临时对象按字段字节偏移登记，使聚合中的普通值字段不被污染；临时对象一旦含 view，其地址同样不能逃逸。`CowSnapshot` / `ValueTransfer` 的源值复制和 `ResourceAcquire` 的租约复制使用已登记的参数形状；它们不把 view 地址视作可保存的普通引用。helper 返回 view、未知局部槽地址转发和来源无法证明的聚合复制拒绝进入后端。
 
 集合预导入表指向 `std.collections.hashmap` / `std.collections.set` 中的原始类型声明，而不是 `std.collections` 的重导出，因为隐式导入早于 use 解析收集；内建源单元不注入预导入，hashmap 模块显式导入 `std.hash.Hasher`。
 
-HashMap 使用八路持久 hash trie：共享 State 保存根、长度、view 计数和 seed；每个键通过 `Hasher::with_seed(seed)`、`key.hash(&h)`、`finish()` 得到 64 位路径，每层消费三位，最多 22 层。固定数组分支和叶中的链式 collision bucket 都是类型化 GC 引用；hash 位耗尽时用 Eq 区分键。写操作只复制路径和被修改 bucket 的前缀，删除会清空无子项的分支。当前没有原生熵片段，DEFAULT_SEED 固定为 0；这不是随机化或 HashDoS 防御，未来接入熵可以改变 seed，不能依赖具体 hash 值或遍历序。
+Deque、BinaryHeap、LinkedList、BitSet、SmallVec 同样登记为共享身份集合，LinkedList 的 for_each_ref 复用既有 scoped view 钩子。Deque 由逆序前半 Vec 和正序后半 Vec 构成，一端耗尽时平分剩余元素；迭代器捕获两个持久根，组合 VecIter.next_back 与 next。BinaryHeap 在 Vec 连续下标上维护最大堆，调整仅沿祖先或孩子路径，迭代保留堆数组快照。BitSet 把非负 int 按 64 位字打包到 Vec，按字和位顺序迭代。SmallVec 的 State 内含 `[Option[T]; N]` 与可选 Vec，容量溢出时搬入 Vec 并清空内联槽；内联迭代复制至多 N 个元素，溢出后复用 Vec 的 O(1) 快照。Vec.pop 沿持久路径清空末项，保留旧迭代器且不让已删除元素被当前根继续持有。
+
+LinkedList 的 State 保存双向链端点、长度与 view 计数；Node 保存托管前后指针、owner、代际、alive 与 `Option[&T]` 元素载荷。每个节点使用独立受管载荷，使 for_each_ref 能零复制借用 T；安全模式解构 Option[T] 会复制 T，因此不把元素直接放在可选值内。删除断开链接、置 alive=false 并清空载荷引用，stale cursor 只保留身份，不保留已删除元素。跨 list splice 改 owner 并递增代际，同 list 重排不改代际。cursor 持有 owner、节点与形成时代际，验证同时检查三者；短暂地址比较之间没有 safepoint，地址不作为保存的身份。节点和 owner 始终由普通 GC 引用保持存活。迭代器复制当前节点值，for_each_ref 直接借用并由 view 计数禁止别名写入。
+
+HashMap 使用八路持久 hash trie：共享 State 保存根、长度、view 计数和初始 Hasher；每个键复制初始 Hasher 后经 `key.hash(&h)`、`finish()` 得到 64 位路径，每层消费三位，最多 22 层。固定数组分支和叶中的链式 collision bucket 都是类型化 GC 引用；hash 位耗尽时用 Eq 区分键。写操作只复制路径和被修改 bucket 的前缀，删除会清空无子项的分支。普通 HashMap 的 DEFAULT_SEED 固定为 0，这不是随机化或 HashDoS 防御；安全集合使用独立的系统随机密钥，不能依赖两类集合的具体 hash 值或遍历序。
 
 BTreeMap 使用持久 AVL 树：节点保存 K/V、左右子树与高度，插入和删除沿路径复制，用单旋转或双旋转维持高度差不超过一；两子树删除用右子树最小键替换。比较只依赖 Ord 的关系运算，不额外要求 Eq。普通查询和修改都是 O(log len) 次比较。两种 Map 的 iter 都 O(1) 捕获当前根，next 使用持久 frame 栈延迟遍历，已有迭代器不读取共享 State 的新根；AVL 遍历及直接 for_each_ref 都是中序升序。HashSet / BTreeSet 以对应 Map[T, ()] 实现，迭代器去掉 unit value。
 

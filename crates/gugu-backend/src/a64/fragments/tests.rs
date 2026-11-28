@@ -309,6 +309,7 @@ fn darwin_fd_dispatch_uses_native_packet_and_arm64_libsystem_abi() {
         "symlink",
         "readlink",
         "realpath",
+        "getentropy",
         "__error",
     ];
     assert_eq!(
@@ -372,7 +373,7 @@ fn darwin_fd_dispatch_uses_native_packet_and_arm64_libsystem_abi() {
         }
         let variadic = matches!(name, "open" | "fcntl");
         let fixed = [
-            3usize, 3, 2, 1, 3, 2, 2, 2, 2, 1, 2, 1, 1, 1, 2, 1, 1, 2, 2, 2, 3, 2,
+            3usize, 3, 2, 1, 3, 2, 2, 2, 2, 1, 2, 1, 1, 1, 2, 1, 1, 2, 2, 2, 3, 2, 2,
         ][index];
         let end = (site.offset / 4) as usize;
         let args_start = end - fixed - if variadic { 2 } else { 0 };

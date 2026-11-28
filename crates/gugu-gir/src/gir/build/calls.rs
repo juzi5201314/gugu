@@ -235,6 +235,7 @@ impl Builder<'_> {
         let normal = self.fresh(false);
         let unwind = self.intern_plan(self.current_unwind(id), CleanupChain::Unwind)?;
         let call_kind = self.call_kind(id);
+        let scoped_callback = self.is_scoped_callback(id);
         self.terminate(Terminator::Call {
             callee,
             args,
@@ -242,6 +243,7 @@ impl Builder<'_> {
             normal,
             unwind: Some(unwind),
             call_kind,
+            scoped_callback,
             site: crate::mono::instantiate::CallSite::Expression(id.0),
         });
         self.switch_to(normal);
@@ -360,6 +362,7 @@ impl Builder<'_> {
             normal,
             unwind: Some(unwind),
             call_kind: CallKind::Managed,
+            scoped_callback: false,
             site: crate::mono::instantiate::CallSite::Dispatch(dispatch),
         });
         self.switch_to(normal);

@@ -455,6 +455,7 @@ fn rooted_locals_appear_in_managed_call_return_maps() {
             may_unwind: false,
             captures_arguments: false,
             poll_free_leaf: false,
+            scoped_arguments: Vec::new(),
         }),
         &[],
         &[],

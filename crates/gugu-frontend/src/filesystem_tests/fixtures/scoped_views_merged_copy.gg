@@ -1,0 +1,17 @@
+use std.collections.{HashMap}
+
+// 三个引用字段使整个值经间接 ABI 复制，避免退化为单个字段读取。
+struct Packet { first: &Packet, second: &Packet, third: &Packet }
+
+fn escape(choose_view: bool) {
+    let map = HashMap[int, Packet]::new()
+    let key = 1
+    let escaped = map.with_ref(&key, fn(view: &Packet) Packet {
+        let local = Packet { first: view, second: view, third: view }
+        let selected = if choose_view { view } else { &local }
+        *selected
+    })
+    _ = escaped
+}
+
+fn main() { escape(false) }

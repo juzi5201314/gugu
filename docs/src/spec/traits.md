@@ -185,6 +185,7 @@ impl Vec[T] {
 
 - `impl Type { ... }` 给类型挂固有方法与关联函数。同一类型可以有多块固有 `impl`，合并看待。**固有 impl 只能写在该类型的定义模块**（`int` / `Vec` 等语言类型由标准库或编译器；`string` 的定义模块是 `std.text`）。其它模块要给已有类型加方法，只能 `impl Trait for Type`。
 - 类型参数：出现在 Self 或 trait 实参里的 `T` 由此引入，写作 `impl Vec[T]`、`impl Print for Foo[T]`。blanket `impl Trait for T` 必须写成 `impl[T] Trait for T`（可带约束 `impl[T: Print] Trait for T`）。`comptime` 参数同样写在 `impl[...]` 里。
+- 名义类型的 trait impl 可以绑定 comptime 参数，例如 `impl[T, comptime N: int] IntoIter for SmallVec[T, N]`；N 从接收类型的实参匹配，参与方法单态化和关联类型替换。重叠及具体性检查同时比较类型实参与 comptime 值，不能忽略 N，也不能因两个 impl 使用不同参数名而漏报重叠。
 - 带 `self` 的是方法：`p.len()` 与 `Point::len(p)` 等价（UFCS）。没有隐式 `this`；`self` 必须是第一个参数。
 - 不带 `self` 的是关联函数：`Vec::new()` / `Vec[int]::new()`，没有接收者。能从上下文推断时 `let v: Vec[int] = Vec::new()` 即可。
 - `impl Trait for Type` 给类型实现接口。

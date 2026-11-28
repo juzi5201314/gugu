@@ -86,6 +86,7 @@ mod tests {
                 foreign_signature: None,
                 foreign_arguments: Vec::new(),
                 poll_free_leaf: false,
+                scoped_arguments: Vec::new(),
             })
         };
         for (left, right) in [

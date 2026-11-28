@@ -25,6 +25,7 @@ fn call(target: RuntimeCall, parameters: &[ValueType], results: &[ValueType], le
         foreign_arguments: vec![],
         sret: None,
         poll_free_leaf: leaf,
+        scoped_arguments: Vec::new(),
     }
 }
 

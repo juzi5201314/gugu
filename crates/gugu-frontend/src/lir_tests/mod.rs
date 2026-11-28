@@ -58,6 +58,7 @@ fn poll_linear_leaf_matches_generic_and_rejects_calls_and_loops() {
         foreign_signature: None,
         foreign_arguments: Vec::new(),
         poll_free_leaf: false,
+        scoped_arguments: Vec::new(),
     });
     assert!(!poll::has_linear_leaf_shape(&called));
     assert!(!poll::has_linear_leaf_shape(named(&compilation, "spin")));

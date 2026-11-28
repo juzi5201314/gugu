@@ -1,0 +1,15 @@
+use std.collections.{LinkedList}
+
+fn walk[F: Fn(&int)](list: &LinkedList[int], callback: F) { list.for_each_ref(callback) }
+
+fn main() {
+    let list = LinkedList[int]::new()
+    _ = list.push_back(7)
+    let escaped: Option[&int] = None
+    let fallback = 0
+    walk(&list, fn(value: &int) {
+        let alias = if *value == 7 { value } else { &fallback }
+        escaped = Some(alias)
+    })
+    _ = escaped
+}

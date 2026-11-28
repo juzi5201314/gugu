@@ -1,15 +1,14 @@
 use std.hash.{Hasher}
 
-const DEFAULT_SEED: uint = 0
-
 struct Bucket[K, V] { key: K, value: V, next: Option[&Bucket[K, V]] }
 #[allow(large_copy)]
 enum Page[K, V] {
     Leaf(uint, &Bucket[K, V]),
     Branch([Option[&Page[K, V]]; 8]),
 }
-struct State[K, V] { root: Option[&Page[K, V]], length: int, views: int, seed: uint }
+struct State[K, V] { root: Option[&Page[K, V]], length: int, views: int, hasher: Hasher }
 pub struct HashMap[K, V] { state: &State[K, V] }
+pub struct SecureHashMap[K, V] { map: HashMap[K, V] }
 pub struct Entry[K, V] { map: HashMap[K, V], key: K }
 struct Frame[K, V] { page: &Page[K, V], next: Option[&Frame[K, V]] }
 pub struct HashMapIter[K, V] { stack: Option[&Frame[K, V]], bucket: Option[&Bucket[K, V]] }
@@ -18,10 +17,9 @@ fn new_frame[K, V](page: &Page[K, V], next: Option[&Frame[K, V]]) &Frame[K, V] {
     let result = Frame { page: page, next: next }
     &result
 }
-fn digest[K: Hash](key: &K, seed: uint) uint {
-    let h = Hasher::with_seed(seed)
-    key.hash(&h)
-    h.finish()
+fn digest[K: Hash](key: &K, hasher: Hasher) uint {
+    key.hash(&hasher)
+    hasher.finish()
 }
 fn find[K: Eq, V](root: Option[&Page[K, V]], depth: uint, hash: uint, key: &K) Option[&Bucket[K, V]] {
     let page = match root { Some(page) => page, None => return None }
@@ -107,14 +105,17 @@ fn visit[K, V, F: Fn(&K, &V)](root: Option[&Page[K, V]], f: F) {
 }
 impl[K: Eq + Hash + StableHash, V] HashMap[K, V] {
     pub fn new() Self {
-        let state: State[K, V] = State { root: None, length: 0, views: 0, seed: DEFAULT_SEED }
+        Self::with_hasher(Hasher::with_seed(0))
+    }
+    fn with_hasher(hasher: Hasher) Self {
+        let state: State[K, V] = State { root: None, length: 0, views: 0, hasher: hasher }
         Self { state: &state }
     }
     pub fn len(self: &Self) int = self.state.length
     pub fn is_empty(self: &Self) bool = self.len() == 0
     fn writable(self: &Self) { if self.state.views != 0 { panic("map write during scoped view") } }
     pub fn get(self: &Self, key: &K) Option[V] {
-        self.get_hashed(key, digest(key, self.state.seed))
+        self.get_hashed(key, digest(key, self.state.hasher))
     }
     fn get_hashed(self: &Self, key: &K, hash: uint) Option[V] {
         match find(self.state.root, 0, hash, key) {
@@ -122,10 +123,10 @@ impl[K: Eq + Hash + StableHash, V] HashMap[K, V] {
         }
     }
     pub fn contains_key(self: &Self, key: &K) bool {
-        match find(self.state.root, 0, digest(key, self.state.seed), key) { None => false, Some(node) => true }
+        match find(self.state.root, 0, digest(key, self.state.hasher), key) { None => false, Some(node) => true }
     }
     pub fn with_ref[R, F: Fn(&V) R](self: &Self, key: &K, f: F) Option[R] {
-        let node = match find(self.state.root, 0, digest(key, self.state.seed), key) {
+        let node = match find(self.state.root, 0, digest(key, self.state.hasher), key) {
             None => return None, Some(node) => node,
         }
         self.state.views = self.state.views + 1
@@ -139,7 +140,7 @@ impl[K: Eq + Hash + StableHash, V] HashMap[K, V] {
     }
     pub fn insert(self: &Self, key: K, value: V) Option[V] {
         self.writable()
-        let hash = digest(&key, self.state.seed)
+        let hash = digest(&key, self.state.hasher)
         let old = self.get_hashed(&key, hash)
         if let None = old {
             if self.state.length == 9223372036854775807 { panic("map length overflow") }
@@ -150,7 +151,7 @@ impl[K: Eq + Hash + StableHash, V] HashMap[K, V] {
     }
     pub fn remove(self: &Self, key: &K) Option[V] {
         self.writable()
-        let hash = digest(key, self.state.seed)
+        let hash = digest(key, self.state.hasher)
         let old = self.get_hashed(key, hash)
         if let Some(value) = old {
             self.state.root = edit(self.state.root, 0, hash, *key, None)
@@ -219,6 +220,26 @@ impl[K, V] Iter for HashMapIter[K, V] {
     }
 }
 impl[K: Eq + Hash + StableHash, V] IntoIter for HashMap[K, V] {
+    type Item = (K, V)
+    type Iter = HashMapIter[K, V]
+    fn into_iter(self: Self) HashMapIter[K, V] = self.iter()
+}
+
+impl[K: Eq + Hash + StableHash, V] SecureHashMap[K, V] {
+    pub fn new() Self = Self { map: HashMap[K, V]::with_hasher(Hasher::secure()) }
+    pub fn len(self: &Self) int = self.map.len()
+    pub fn is_empty(self: &Self) bool = self.map.is_empty()
+    pub fn get(self: &Self, key: &K) Option[V] = self.map.get(key)
+    pub fn contains_key(self: &Self, key: &K) bool = self.map.contains_key(key)
+    pub fn insert(self: &Self, key: K, value: V) Option[V] = self.map.insert(key, value)
+    pub fn remove(self: &Self, key: &K) Option[V] = self.map.remove(key)
+    pub fn update[F: Fn(V) V](self: &Self, key: &K, f: F) bool = self.map.update(key, f)
+    pub fn entry(self: &Self, key: K) Entry[K, V] = self.map.entry(key)
+    pub fn iter(self: &Self) HashMapIter[K, V] = self.map.iter()
+    pub fn with_ref[R, F: Fn(&V) R](self: &Self, key: &K, f: F) Option[R] = self.map.with_ref(key, f)
+    pub fn for_each_ref[F: Fn(&K, &V)](self: &Self, f: F) { self.map.for_each_ref(f) }
+}
+impl[K: Eq + Hash + StableHash, V] IntoIter for SecureHashMap[K, V] {
     type Item = (K, V)
     type Iter = HashMapIter[K, V]
     fn into_iter(self: Self) HashMapIter[K, V] = self.iter()

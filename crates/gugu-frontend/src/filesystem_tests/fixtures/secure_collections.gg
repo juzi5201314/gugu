@@ -1,0 +1,38 @@
+use std.collections.{SecureHashMap, SecureHashSet}
+
+fn collections() bool {
+    let a = "a"
+    let b = "b"
+    let c = "c"
+    let map = SecureHashMap::new()
+    _ = map.insert(a, 1)
+    _ = map.entry(b).or_insert(2)
+    let snapshot = map.iter()
+    let alias = map
+    _ = alias.update(&a, fn(value: int) int = value + 2)
+    _ = map.insert(c, 4)
+    let old_total = 0
+    while let Some((key, value)) = snapshot.next() { old_total = old_total + value }
+    let current_total = 0
+    map.for_each_ref(fn(key: &string, value: &int) { current_total = current_total + *value })
+    let iterated_total = 0
+    for (key, value) in map { iterated_total = iterated_total + value }
+    let viewed = map.with_ref(&a, fn(value: &int) int = *value)
+    let found = match viewed { Some(value) => value == 3, None => false }
+    let removed = match map.remove(&b) { Some(value) => value == 2, None => false }
+    let set = SecureHashSet::new()
+    let one = 1
+    let first = set.insert(one)
+    let duplicate = set.insert(one)
+    let set_total = 0
+    for value in set { set_total = set_total + value }
+    let old_set = set.iter()
+    let set_alias = set
+    let gone = set_alias.remove(&one)
+    let old_key = match old_set.next() { Some(value) => value == 1, None => false }
+    old_total == 3 && current_total == 9 && iterated_total == 9 && found && removed && map.len() == 2 && alias.contains_key(&c) && first && !duplicate && set_total == 1 && gone && old_key && set.is_empty()
+}
+
+fn main() {
+    _ = collections()
+}

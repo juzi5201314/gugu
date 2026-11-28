@@ -37,6 +37,7 @@ fn caller(callee: &Fixture) -> Fixture {
         foreign_arguments: vec![],
         sret: None,
         poll_free_leaf: true,
+        scoped_arguments: Vec::new(),
     };
     let result = f.op(Op::Call(call), &[], &[Type::I64])[0];
     f.ret(&[result]);

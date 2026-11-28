@@ -1,0 +1,16 @@
+fn digest(first: uint, second: uint, text: string) uint {
+    let hasher = Hasher::with_keys(first, second)
+    hasher.write_str(text)
+    hasher.finish()
+}
+
+fn random_digest() uint {
+    let hasher = Hasher::secure()
+    hasher.write_str("secure")
+    hasher.finish()
+}
+
+fn main() {
+    _ = digest(0, 0, "")
+    _ = random_digest()
+}

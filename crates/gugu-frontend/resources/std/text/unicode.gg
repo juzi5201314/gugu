@@ -1,0 +1,286 @@
+use std.text.unicode_tables as tables
+
+fn bytes(value: string) &[byte] = unsafe { std.runtime.string_bytes(value) }
+
+pub fn utf8_scalar_width(code: uint) int =
+    if code < 128 { 1 } else if code < 2048 { 2 } else if code < 65536 { 3 } else { 4 }
+
+pub fn write_utf8_scalar(data: &[byte], start: int, code: uint, length: int) {
+    if length == 1 {
+        data[start] = byte(code)
+    } else {
+        let remaining = code
+        let index = length - 1
+        while index > 0 {
+            data[start + index] = byte((remaining & 63) | 128)
+            remaining = remaining >> 6
+            index = index - 1
+        }
+        let prefix = if length == 2 { uint(192) } else if length == 3 { uint(224) } else { uint(240) }
+        data[start] = byte(remaining | prefix)
+    }
+}
+
+// 表项为三组 7-bit 数位；scalar/范围端点都小于 0x110000。
+fn read21(data: &[byte], offset: int) uint =
+    uint(data[offset]) | (uint(data[offset + 1]) << 7) | (uint(data[offset + 2]) << 14)
+
+fn property(table: string, scalar: uint) int {
+    let data = bytes(table)
+    let low = 0
+    let high = data.len() / 7
+    while low < high {
+        let middle = low + (high - low) / 2
+        let at = middle * 7
+        if scalar < read21(data, at) { high = middle }
+        else if scalar > read21(data, at + 3) { low = middle + 1 }
+        else { return int(data[at + 6]) }
+    }
+    0
+}
+
+fn scalar_at(text: string, offset: int) uint {
+    let data = bytes(text)
+    let first = uint(data[offset])
+    if first < 128 { return first }
+    let width = if first < 224 { 2 } else if first < 240 { 3 } else { 4 }
+    let mask = if width == 2 { uint(31) } else if width == 3 { uint(15) } else { uint(7) }
+    let scalar = first & mask
+    for index in 1..width { scalar = (scalar << 6) | (uint(data[offset + index]) & 63) }
+    scalar
+}
+
+fn mapping(index: &[byte], scalar: uint) int {
+    let low = 0
+    let high = index.len() / 7
+    while low < high {
+        let middle = low + (high - low) / 2
+        let value = read21(index, middle * 7)
+        if scalar < value { high = middle }
+        else if scalar > value { low = middle + 1 }
+        else { return middle * 7 }
+    }
+    -1
+}
+
+fn following_cased(text: string, offset: int) bool {
+    let cursor = offset
+    while cursor < text.len() {
+        let scalar = scalar_at(text, cursor)
+        if property(tables.case_ignorable(), scalar) == 0 {
+            return property(tables.cased(), scalar) != 0
+        }
+        cursor += utf8_scalar_width(scalar)
+    }
+    false
+}
+
+// 两遍线性扫描先确定 UTF-8 大小，再一次分配；不逐字符拼接 string。
+pub fn case_mapping(text: string, kind: int) string {
+    let index = bytes(if kind == 0 { tables.lower_index() } else if kind == 1 {
+        tables.upper_index()
+    } else { tables.fold_index() })
+    let values = bytes(if kind == 0 { tables.lower_values() } else if kind == 1 {
+        tables.upper_values()
+    } else { tables.fold_values() })
+    let length = map_pass(text, kind, index, values, None)
+    let output = unsafe { std.runtime.alloc_bytes(uint(length)) }
+    _ = map_pass(text, kind, index, values, Some(output))
+    unsafe { std.runtime.string_from_utf8_unchecked(output) }
+}
+
+fn map_pass(text: string, kind: int, index: &[byte], values: &[byte], output: Option[&[byte]]) int {
+    let cursor = 0
+    let written = 0
+    let preceding_cased = false
+    while cursor < text.len() {
+        let scalar = scalar_at(text, cursor)
+        cursor += utf8_scalar_width(scalar)
+        let final_sigma = kind == 0 && scalar == 0x03A3 && preceding_cased && !following_cased(text, cursor)
+        let entry = mapping(index, scalar)
+        if final_sigma { written = emit(output, written, 0x03C2) }
+        else if entry < 0 { written = emit(output, written, scalar) }
+        else {
+            let start = int(read21(index, entry + 3)) * 3
+            for item in 0..int(index[entry + 6]) {
+                written = emit(output, written, read21(values, start + item * 3))
+            }
+        }
+        if property(tables.case_ignorable(), scalar) == 0 {
+            preceding_cased = property(tables.cased(), scalar) != 0
+        }
+    }
+    written
+}
+
+fn emit(output: Option[&[byte]], offset: int, scalar: uint) int {
+    let width = utf8_scalar_width(scalar)
+    if let Some(data) = output { write_utf8_scalar(data, offset, scalar, width) }
+    offset + width
+}
+
+pub struct TextSegments { text: string, offset: int, kind: int, empty_line: bool }
+
+impl TextSegments {
+    pub fn new(text: string, kind: int) TextSegments =
+        TextSegments { text: text, offset: 0, kind: kind, empty_line: kind == 2 && text.is_empty() }
+}
+
+impl Iter for TextSegments {
+    type Item = string
+    fn next(self: &Self) Option[string] {
+        if self.empty_line { self.empty_line = false; return Some("") }
+        let start = self.offset
+        if start >= self.text.len() { return None }
+        let end = if self.kind == 0 { grapheme_end(self.text, start) }
+            else if self.kind == 1 { word_end(self.text, start) }
+            else { line_end(self.text, start) }
+        self.offset = end
+        Some(self.text[start..end])
+    }
+}
+
+impl IntoIter for TextSegments {
+    type Item = string
+    type Iter = TextSegments
+    fn into_iter(self: Self) TextSegments = self
+}
+
+// 属性编号与 build.rs 的固定表序一致，0 表示 Other。
+// 两种表的 1..3 分别是 CR、LF 和 Control/Newline。
+fn control(category: int) bool = category >= 1 && category <= 3
+
+fn grapheme_pair(left: int, right: int) bool {
+    // GB3..GB5：CR LF 连接，其它控制字符边界断开。
+    if left == 1 && right == 2 { return true }
+    if control(left) || control(right) { return false }
+    // GB6..GB8：Hangul L/V/T/LV/LVT 音节。
+    if left == 4 && (right == 4 || right == 5 || right == 7 || right == 8) { return true }
+    if (left == 7 || left == 5) && (right == 5 || right == 6) { return true }
+    if (left == 8 || left == 6) && right == 6 { return true }
+    // GB9/9a/9b：Extend、ZWJ、SpacingMark、Prepend。
+    right == 9 || right == 10 || right == 11 || left == 12
+}
+
+fn grapheme_end(text: string, start: int) int {
+    let cursor = start
+    let previous = 0
+    let regional = 0
+    let pictographic = false
+    let emoji_zwj = false
+    let consonant = false
+    let linker = false
+    while cursor < text.len() {
+        let scalar = scalar_at(text, cursor)
+        let category = property(tables.grapheme(), scalar)
+        let indic = property(tables.incb(), scalar)
+        let emoji = property(tables.pictographic(), scalar) != 0
+        if cursor > start {
+            let joined = grapheme_pair(previous, category) || (
+                !control(previous) && !control(category) && (
+                    (indic == 1 && consonant && linker) ||
+                    (previous == 10 && emoji_zwj && emoji) ||
+                    (previous == 13 && category == 13 && regional % 2 == 1)
+                )
+            )
+            if !joined { return cursor }
+        }
+        // GB11 记录 EP Extend* ZWJ，GB9c 记录 Consonant (Extend|Linker)* Linker。
+        emoji_zwj = category == 10 && pictographic
+        if category != 9 { pictographic = emoji }
+        if indic == 1 { consonant = true; linker = false }
+        else if indic == 3 { linker = consonant }
+        else if indic != 2 { consonant = false; linker = false }
+        regional = if category == 13 { regional + 1 } else { 0 }
+        previous = category
+        cursor += utf8_scalar_width(scalar)
+    }
+    cursor
+}
+
+fn ignored(category: int) bool = category >= 4 && category <= 6
+fn letter(category: int) bool = category == 8 || category == 9
+fn mid_letter(category: int) bool = category == 13 || category == 15 || category == 16
+fn mid_number(category: int) bool = category == 14 || category == 15 || category == 16
+fn extended_word(category: int) bool = letter(category) || category == 10 || category == 11 || category == 12
+
+fn following_word(text: string, offset: int) int {
+    let cursor = offset
+    while cursor < text.len() {
+        let scalar = scalar_at(text, cursor)
+        let category = property(tables.word(), scalar)
+        if !ignored(category) { return category }
+        cursor += utf8_scalar_width(scalar)
+    }
+    0
+}
+
+fn word_pair(before: int, left: int, right: int, after: int, regional: int) bool {
+    // WB5..WB7c：字母、词中标点与 Hebrew 引号。
+    if letter(left) && letter(right) { return true }
+    if letter(left) && mid_letter(right) && letter(after) { return true }
+    if letter(before) && mid_letter(left) && letter(right) { return true }
+    if left == 9 && right == 16 { return true }
+    if left == 9 && right == 17 && after == 9 { return true }
+    if before == 9 && left == 17 && right == 9 { return true }
+    // WB8..WB12：数字与字母、数字中的标点。
+    if left == 10 && right == 10 { return true }
+    if letter(left) && right == 10 || left == 10 && letter(right) { return true }
+    if left == 10 && mid_number(right) && after == 10 { return true }
+    if before == 10 && mid_number(left) && right == 10 { return true }
+    // WB13..WB16：Katakana、ExtendNumLet 与成对的 Regional Indicator。
+    if left == 11 && right == 11 { return true }
+    if extended_word(left) && right == 12 || left == 12 && extended_word(right) { return true }
+    left == 18 && right == 18 && regional % 2 == 1
+}
+
+fn word_end(text: string, start: int) int {
+    let cursor = start
+    let raw_previous = 0
+    let previous = 0
+    let before = 0
+    let regional = 0
+    while cursor < text.len() {
+        let scalar = scalar_at(text, cursor)
+        let category = property(tables.word(), scalar)
+        let next = cursor + utf8_scalar_width(scalar)
+        if cursor > start {
+            let joined = raw_previous == 1 && category == 2
+            if !control(raw_previous) && !control(category) {
+                joined = (raw_previous == 6 && property(tables.pictographic(), scalar) != 0) ||
+                    (raw_previous == 7 && category == 7) || ignored(category)
+                if !joined {
+                    let after = if mid_letter(category) || mid_number(category) || category == 17 {
+                        following_word(text, next)
+                    } else { 0 }
+                    joined = word_pair(before, previous, category, after, regional)
+                }
+            }
+            if !joined { return cursor }
+        }
+        if !ignored(category) {
+            before = previous
+            previous = category
+            regional = if category == 18 { regional + 1 } else { 0 }
+        }
+        raw_previous = category
+        cursor = next
+    }
+    cursor
+}
+
+fn line_end(text: string, start: int) int {
+    let cursor = start
+    while cursor < text.len() {
+        let scalar = scalar_at(text, cursor)
+        cursor += utf8_scalar_width(scalar)
+        if scalar == 13 {
+            if cursor < text.len() && scalar_at(text, cursor) == 10 { cursor += 1 }
+            return cursor
+        }
+        if scalar == 10 || scalar == 11 || scalar == 12 || scalar == 0x85 || scalar == 0x2028 || scalar == 0x2029 {
+            return cursor
+        }
+    }
+    cursor
+}

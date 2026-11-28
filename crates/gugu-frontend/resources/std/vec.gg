@@ -52,8 +52,38 @@ impl[T] Vec[T] {
         self.state.level = level
         self.state.length = self.state.length + 1
     }
+    pub fn pop(self: &Self) Option[T] {
+        if self.state.length == 0 { return None }
+        let index = self.state.length - 1
+        let value = self.get(index)
+        self.state.root = clear(self.state.root, self.state.level, uint(index))
+        self.state.length = index
+        value
+    }
     pub fn iter(self: &Self) VecIter[T] = VecIter {
         root: self.state.root, level: self.state.level, index: 0, length: self.state.length,
+    }
+}
+fn clear[T](root: &VecPage[T], level: uint, index: uint) &VecPage[T] {
+    match *root {
+        VecPage::Leaf(values) => {
+            values[int(index & uint(7))] = None
+            let page: VecPage[T] = VecPage::Leaf(values)
+            &page
+        },
+        VecPage::Branch(branches) => {
+            let slot = int(index >> (level * 3) & uint(7))
+            if let Some(child) = branches[slot] { branches[slot] = Some(clear(child, level - 1, index)) }
+            let page: VecPage[T] = VecPage::Branch(branches)
+            &page
+        },
+    }
+}
+impl[T] VecIter[T] {
+    pub fn next_back(self: &Self) Option[T] {
+        if self.index >= self.length { return None }
+        self.length = self.length - 1
+        lookup(self.root, self.level, uint(self.length))
     }
 }
 fn lookup[T](root: &VecPage[T], level: uint, index: uint) Option[T] {

@@ -1,0 +1,11 @@
+use std.collections.{HashMap}
+
+fn leak(value: &int) &int = value
+
+fn main() {
+    let map = HashMap[int, int]::new()
+    _ = map.insert(1, 7)
+    let key = 1
+    let escaped = map.with_ref(&key, leak)
+    _ = escaped
+}

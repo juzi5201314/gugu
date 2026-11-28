@@ -387,6 +387,7 @@ mod argument_tests {
             foreign_arguments: vec![],
             sret: None,
             poll_free_leaf: false,
+            scoped_arguments: Vec::new(),
         };
         let layout = abi::classify_call(&call, crate::TargetName::X86_64Linux).unwrap();
         let mut operands: Vec<_> = (0..10)

@@ -44,6 +44,7 @@ fn file_syscalls_use_linux_request_ids_and_asm_generic_arguments() {
         (88, 36, vec![11, cwd, 22]),
         (89, 78, vec![cwd, 11, 22, 33]),
         (217, 61, vec![11, 22, 33]),
+        (318, 278, vec![11, 22, 33]),
     ] {
         let mut vm = Vm::new(op, arguments);
         let mut calls = 0;
@@ -72,7 +73,7 @@ fn unsupported_operations_do_not_make_a_syscall() {
 #[test]
 fn negative_returns_preserve_value_and_publish_positive_errno() {
     for operation in [
-        0, 1, 2, 3, 4, 5, 6, 8, 72, 74, 75, 77, 82, 83, 84, 86, 87, 88, 89, 217, 262,
+        0, 1, 2, 3, 4, 5, 6, 8, 72, 74, 75, 77, 82, 83, 84, 86, 87, 88, 89, 217, 262, 318,
     ] {
         for errno in [2, 9, 13, 22] {
             let mut vm = Vm::new(operation, [0; 6]);

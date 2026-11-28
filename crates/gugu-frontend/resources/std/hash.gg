@@ -20,11 +20,20 @@
 // 3. This notice may not be removed or altered from any source distribution.
 
 use std.text.{Bytes, ByteBuffer}
+use std.runtime.entropy.{key}
 
-pub struct Hasher { seed: uint, bytes: ByteBuffer }
+enum Algorithm { Fold(uint), Sip(uint, uint) }
+pub struct Hasher { algorithm: Algorithm, bytes: ByteBuffer }
 
 impl Hasher {
-    pub fn with_seed(seed: uint) Self = Self { seed: seed, bytes: ByteBuffer::new() }
+    pub fn with_seed(seed: uint) Self = Self { algorithm: Algorithm::Fold(seed), bytes: ByteBuffer::new() }
+    pub fn with_keys(first: uint, second: uint) Self {
+        Self { algorithm: Algorithm::Sip(first, second), bytes: ByteBuffer::new() }
+    }
+    pub fn secure() Self {
+        let (first, second) = key()
+        Self::with_keys(first, second)
+    }
     pub fn write_int(self: &Self, value: int) { self.write_uint(uint(value)) }
     pub fn write_uint(self: &Self, value: uint) { self.write_word(value, 8) }
     pub fn write_bool(self: &Self, value: bool) {
@@ -44,7 +53,10 @@ impl Hasher {
     pub fn finish(self: &Self) uint {
         let bytes = self.bytes.freeze()
         let data = unsafe { bytes.as_slice() }
-        foldhash(data, self.seed)
+        match self.algorithm {
+            Algorithm::Fold(seed) => foldhash(data, seed),
+            Algorithm::Sip(first, second) => siphash13(data, first, second),
+        }
     }
 }
 
@@ -57,6 +69,43 @@ fn load(data: &[byte], offset: int, count: int) uint {
     let value: uint = 0
     for index in 0..count { value = value | uint(data[offset + index]) << (index * 8) }
     value
+}
+
+fn rotate(value: uint, bits: uint) uint = (value << bits) | (value >> (64 - bits))
+
+fn sip_round(state: &[uint; 4]) {
+    state[0] = state[0] + state[1]
+    state[1] = rotate(state[1], 13) ^ state[0]
+    state[0] = rotate(state[0], 32)
+    state[2] = state[2] + state[3]
+    state[3] = rotate(state[3], 16) ^ state[2]
+    state[0] = state[0] + state[3]
+    state[3] = rotate(state[3], 21) ^ state[0]
+    state[2] = state[2] + state[1]
+    state[1] = rotate(state[1], 17) ^ state[2]
+    state[2] = rotate(state[2], 32)
+}
+
+fn siphash13(data: &[byte], first: uint, second: uint) uint {
+    let state: [uint; 4] = [
+        first ^ uint(0x736f6d6570736575), second ^ uint(0x646f72616e646f6d),
+        first ^ uint(0x6c7967656e657261), second ^ uint(0x7465646279746573),
+    ]
+    let offset = 0
+    while data.len() - offset >= 8 {
+        let word = load(data, offset, 8)
+        state[3] = state[3] ^ word
+        sip_round(&state)
+        state[0] = state[0] ^ word
+        offset = offset + 8
+    }
+    let tail = (uint(data.len()) << 56) | load(data, offset, data.len() - offset)
+    state[3] = state[3] ^ tail
+    sip_round(&state)
+    state[0] = state[0] ^ tail
+    state[2] = state[2] ^ uint(255)
+    for index in 0..3 { sip_round(&state) }
+    state[0] ^ state[1] ^ state[2] ^ state[3]
 }
 
 // FoldHash-fast 0.2 的 fixed shared seed；输入是一次完整的规范字节流。

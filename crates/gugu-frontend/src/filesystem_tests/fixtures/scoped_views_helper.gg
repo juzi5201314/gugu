@@ -1,0 +1,11 @@
+use std.collections.{LinkedList}
+
+fn save[T](slot: &Option[&T], value: &T) { *slot = Some(value) }
+fn forward[T](slot: &Option[&T], value: &T) { save(slot, value) }
+fn main() {
+    let list = LinkedList[int]::new()
+    _ = list.push_back(7)
+    let escaped: Option[&int] = None
+    list.for_each_ref(fn(value: &int) { forward(&escaped, value) })
+    _ = escaped
+}

@@ -1,0 +1,20 @@
+fn lower_probe(text: &string) string = text.to_lowercase()
+fn upper_probe(text: &string) string = text.to_uppercase()
+fn fold_probe(text: &string) string = text.case_fold()
+
+fn segment_probe(text: &string, kind: int) string {
+    let segments = if kind == 0 { text.graphemes() } else if kind == 1 {
+        text.words()
+    } else { text.lines() }
+    let result = ""
+    while let Some(part) = segments.next() { result.push_string("["); result.push_string(part); result.push_string("]") }
+    result
+}
+
+fn main() {
+    let source = "A"
+    _ = lower_probe(&source)
+    _ = upper_probe(&source)
+    _ = fold_probe(&source)
+    _ = segment_probe(&source, 0)
+}

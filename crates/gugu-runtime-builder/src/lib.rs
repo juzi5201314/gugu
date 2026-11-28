@@ -99,6 +99,16 @@ const SOURCES: &[RuntimeSourceInput<'static>] = &[
         RuntimeSourceRole::StandardLibrary,
     ),
     source(
+        "std/text/unicode_tables.gg",
+        include_str!(concat!(env!("OUT_DIR"), "/unicode_tables.gg")),
+        RuntimeSourceRole::StandardLibrary,
+    ),
+    source(
+        "std/text/unicode.gg",
+        include_str!("../../gugu-frontend/resources/std/text/unicode.gg"),
+        RuntimeSourceRole::Runtime,
+    ),
+    source(
         "std/io.gg",
         include_str!("../../gugu-frontend/resources/std/io.gg"),
         RuntimeSourceRole::StandardLibrary,
@@ -194,6 +204,31 @@ const SOURCES: &[RuntimeSourceInput<'static>] = &[
         RuntimeSourceRole::StandardLibrary,
     ),
     source(
+        "std/collections/deque.gg",
+        include_str!("../../gugu-frontend/resources/std/collections/deque.gg"),
+        RuntimeSourceRole::StandardLibrary,
+    ),
+    source(
+        "std/collections/heap.gg",
+        include_str!("../../gugu-frontend/resources/std/collections/heap.gg"),
+        RuntimeSourceRole::StandardLibrary,
+    ),
+    source(
+        "std/collections/list.gg",
+        include_str!("../../gugu-frontend/resources/std/collections/list.gg"),
+        RuntimeSourceRole::StandardLibrary,
+    ),
+    source(
+        "std/collections/bitset.gg",
+        include_str!("../../gugu-frontend/resources/std/collections/bitset.gg"),
+        RuntimeSourceRole::StandardLibrary,
+    ),
+    source(
+        "std/collections/smallvec.gg",
+        include_str!("../../gugu-frontend/resources/std/collections/smallvec.gg"),
+        RuntimeSourceRole::StandardLibrary,
+    ),
+    source(
         "std/sync.gg",
         include_str!("../../gugu-frontend/resources/std/sync.gg"),
         RuntimeSourceRole::StandardLibrary,
@@ -207,6 +242,11 @@ const SOURCES: &[RuntimeSourceInput<'static>] = &[
         "std/runtime/platform.gg",
         include_str!("../../gugu-frontend/resources/runtime/platform.gg"),
         RuntimeSourceRole::StandardLibrary,
+    ),
+    source(
+        "std/runtime/entropy.gg",
+        include_str!("../../gugu-frontend/resources/runtime/entropy.gg"),
+        RuntimeSourceRole::Runtime,
     ),
     source(
         "std/runtime/coroutine.gg",

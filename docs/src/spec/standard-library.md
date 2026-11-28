@@ -286,7 +286,9 @@ fn string.words(self: &Self) impl IntoIter
 fn string.lines(self: &Self) impl IntoIter
 ```
 
-严格 decode 在第一个非法序列处返回包含 byte/code-unit offset 的 EncodingError；lossy decode 以 U+FFFD 替换每个 maximal invalid subsequence。graphemes 返回 extended grapheme cluster 的 COW string 快照，words 与 lines 按随附 Unicode 版本的默认边界算法返回快照。
+严格 decode 在第一个非法序列处返回包含 byte/code-unit offset 的 EncodingError；lossy decode 以 U+FFFD 替换每个 maximal invalid subsequence。大小写转换采用 Unicode 17.0.0 的完整、与 locale 无关的映射，允许一个 scalar 映射为多个 scalar；小写转换包含 Final_Sigma 上下文规则，case_fold 采用默认完整折叠，不启用 Turkic 特例。三者返回新值，不修改接收者。
+
+graphemes 按 UAX #29 返回 extended grapheme cluster，words 按同版本的默认 word boundary 返回全部分段（包括空白和标点），均返回 COW string 快照。lines 按 Unicode 强制换行边界切分，保留终止符，CR LF 作为一个终止符；LF、CR、VT、FF、NEL、LS、PS 均结束当前行，不在末尾终止符后额外产生空行。空 string 的 graphemes/words 为空迭代器，lines 产生一个空行。三种迭代器都固定创建时的文本快照，后续修改原 string 不改变结果。
 
 工具链升级可以升级 Unicode 数据并改变属性、case mapping、normalization 或 segmentation 结果；`unicode_version` 使程序能够记录该版本，当前返回 17.0.0。string 的默认 Eq、Ord 与 Hash 始终按原始 UTF-8 byte，不随 Unicode 表改变。
 
@@ -368,7 +370,15 @@ MultiMap 不作为独立标准类型；使用 `HashMap[K, Vec[V]]` 或 `BTreeMap
 
 Vec、Deque、BinaryHeap、LinkedList、BitSet、SmallVec 和全部 Map/Set 都是共享身份句柄：赋值只复制句柄，通过任一别名修改时，所有别名继续观察同一个逻辑集合。集合内部可以为快照迭代封存并替换 backing；这只改变物理表示，不把集合改成 COW 值语义。
 
-`Vec.new()` 建立空集合，`Vec.from_slice(&[T])` 按顺序复制元素；`len()`、`is_empty()`、`get(index:int) -> Option[T]`、`set(index:int,value:T) -> bool` 和 `push(value:T)` 操作共享集合。负数或越界的 get 返回 None、set 返回 false；push 超过 int 可表示长度时 panic。`iter()` 和 IntoIter 保存创建时的元素快照；后来通过任一别名 push/set 不改变已有迭代器。Resolver 每次创建独立 Vec，返回后修改它不影响系统解析结果或其它调用。
+`Vec.new()` 建立空集合，`Vec.from_slice(&[T])` 按顺序复制元素；`len()`、`is_empty()`、`get(index:int) -> Option[T]`、`set(index:int,value:T) -> bool`、`push(value:T)` 和 `pop() -> Option[T]` 操作共享集合。负数或越界的 get 返回 None、set 返回 false；空集合 pop 返回 None，其余删除并返回末项；push 超过 int 可表示长度时 panic。`iter()` 和 IntoIter 保存创建时的元素快照；后来通过任一别名 push/set/pop 不改变已有迭代器。`VecIter.next_back()` 从同一快照末端取值，与 next 共享剩余范围。Resolver 每次创建独立 Vec，返回后修改它不影响系统解析结果或其它调用。
+
+`Deque[T]` 提供 `new`、`len`、`is_empty`、`get`、`set`、`front`、`back`、`push_front`、`push_back`、`pop_front`、`pop_back` 与 `iter`。下标从队首开始；查询、写入和空队列弹出沿用 Vec 的 Option/bool 契约。迭代从队首到队尾。
+
+`BinaryHeap[T: Ord]` 是最大堆，提供 `new`、`len`、`is_empty`、`push`、`peek`、`pop` 与 `iter`；peek/pop 返回最大元素的 Option，空堆返回 None。重复元素分别保留，push/pop 使用 O(log len) 次比较；iter 捕获快照但不承诺排序。
+
+`BitSet` 保存非负 int，提供 `new`、`len`、`is_empty`、`contains(value)`、`insert(value) -> bool`、`remove(value) -> bool`、`clear` 与 `iter`。len 是元素数；插入新元素、删除已有元素分别返回 true。负数查询/删除返回 false，插入负数 panic；迭代严格升序且保持创建时快照。Deque、BinaryHeap、BitSet 均实现 IntoIter。
+
+`SmallVec[T, N]` 提供与 Vec 一致的 `new`、`len`、`is_empty`、`get`、`set`、`push`、`pop`、`iter` 与 IntoIter。容量 N 可以为零，第一次超过 N 时迁移全部已有元素；迁移后所有别名仍观察同一集合，先前创建的内联或堆快照保持原内容。
 
 Map 的普通读取返回 value 的语义副本，不公开会因 rehash、树旋转或紧凑化而失效的普通 `&K` / `&V`：
 
@@ -418,7 +428,7 @@ impl[K: Ord + StableOrd, V] BTreeEntry[K, V] {
 
 `new` 建立空 Map；`len` 返回键数，`is_empty` 等价于长度为零。键按 Eq 相等或 Ord 比较等价视为同一键。`get` / `contains_key` 只查询；`insert` 在新键时返回 None，在已有键时替换 value 并返回旧值；`remove` 删除已有键并返回旧值，缺失时返回 None 且不改变长度。插入使长度超出 int 上界时 panic。BTreeMap 的查询、插入、删除使用 O(log len) 次键比较；其 `iter` 和 `for_each_ref` 都按键升序访问，每个键恰好一次。
 
-SecureHashMap、SmallMap 保留与 HashMap 相同的 value 访问契约和约束，当前版本尚未实现其完整可执行 API。`with_ref` 在 key 存在时对 value 建立 `ScopedRead` view，调用 callback 并返回 `Some` 结果；key 不存在时不调用 callback 并返回 `None`。`for_each_ref` 在一次共享结构访问期间逐项调用 callback，每个键恰好一次，空 Map 不调用 callback，不创建 snapshot，也不复制 K/V。两者都不能在 callback 中修改同一 map：通过任一别名发出的 `insert`、`remove`、`update` 与 Entry 写入在 view 内都是 panic，包括缺失键或本不会改变内容的写操作。整个 `with_ref` / `for_each_ref` 调用位于接收者的 view 动态 extent 内；callback 的无 suspend、无 escape 和 safepoint relocation 规则见[函数与闭包](functions.md#scoped-borrowed-view-callback)。
+SecureHashMap 提供与 HashMap 相同的 value 访问 API、契约和约束。SmallMap 保留同一访问契约和约束，当前版本尚未实现其完整可执行 API。`with_ref` 在 key 存在时对 value 建立 `ScopedRead` view，调用 callback 并返回 `Some` 结果；key 不存在时不调用 callback 并返回 `None`。`for_each_ref` 在一次共享结构访问期间逐项调用 callback，每个键恰好一次，空 Map 不调用 callback，不创建 snapshot，也不复制 K/V。两者都不能在 callback 中修改同一 map：通过任一别名发出的 `insert`、`remove`、`update` 与 Entry 写入在 view 内都是 panic，包括缺失键或本不会改变内容的写操作。整个 `with_ref` / `for_each_ref` 调用位于接收者的 view 动态 extent 内；callback 的无 suspend、无 escape 和 safepoint relocation 规则见[函数与闭包](functions.md#scoped-borrowed-view-callback)。
 
 `update` 只在键存在时调用一次 `f`，把当前 value 的语义副本交给它，再以返回值替换槽；存在时返回 true，缺失时不调用 f 并返回 false。`entry` 保存集合身份与键，不锁定当前是否存在；每次 Entry 操作都查询同一共享 Map 的当前状态。`and_modify` 等价于对该键 update 后返回 Entry；`or_insert` 在缺失时插入传入值，否则保留旧值；`or_insert_with` 只在缺失时调用一次 f 生成插入值。后两者返回最终 value 的语义副本。所有 Entry 操作只传入或返回语义副本，不产生集合内部引用。
 
@@ -456,15 +466,21 @@ SmallVec 与 SmallMap 的 N 必须是非负 comptime 整数。它们的 GC 对�
 
 LinkedList 的节点是具有稳定 GC 身份且不复用代际的对象。`ListCursor[T]` 绑定 list 身份、node 身份与 node generation；`cursor_front`、`cursor_back`、`insert_before`、`insert_after`、`remove`、`splice_before`、`splice_after` 和 `value` / `update` 都返回 `Result[..., StaleCursor]`，不暴露节点引用。另提供 `for_each_ref[F: Fn(&T) ()](self: &Self, f: F)`：它在一次受保护遍历中直接访问节点值，不创建 snapshot或复制 T；callback 不能结构性修改该 list，且遵守 scoped view 的无 suspend、无 escape 和 relocation 规则。插入和同一 list 内的重排不使既有 cursor 失效；删除节点会使其全部 cursor 变为 stale。把另一 list 的节点 splice 进当前 list 时，目标 cursor 以及两边未移动节点的 cursor 仍有效，绑定到被移动节点旧 list 身份的 cursor 变为 stale。StaleCursor 是普通领域错误，不是 panic 或未定义行为。
 
+`LinkedList.new`、`len`、`is_empty`、`push_front(value)`、`push_back(value)` 构造和访问链表；两种 push 返回新节点 cursor。空链表的 cursor_front/back 返回 Err。`insert_before/after(&position, value)` 返回新节点 cursor；`remove(&position)` 返回删除值；`splice_before/after(&position, &moved)` 移动一个节点并返回它在目标 list 的新 cursor。同一节点向自身 splice 不改变顺序。目标 cursor 必须属于接收 list，源 cursor 可以属于另一 list；无效 cursor 在任何修改前返回 Err。跨 list 移动递增节点代际，因此移动回原 list 也不会使旧 cursor 重新有效。`ListCursor.value()` 返回值副本，`update(fn(T) T)` 替换节点值，`next/previous()` 返回相邻 cursor 的 Option；这三类操作也会检查 stale。更新 callback 使原 cursor 失效时 update 返回 Err。所有写入都拒绝正在 scoped view 中的 list。`iter` 与 IntoIter 按节点顺序产生快照副本。
+
+删除节点时同时解除该节点对元素的持有；保存 stale cursor 不能继续保活已经删除的元素及其资源租约。删除前创建的快照和 remove 返回的值副本仍按普通值生命周期持有元素。
+
 HashMap/HashSet 的表示和内存布局不是稳定 ABI，可以随目标指令集和工具链改变。迭代顺序不保证，也可以在不同进程、不同集合和不同工具链间变化。
 
-默认 HashMap/HashSet 使用 FoldHash-fast，seed 由实现选择，允许在不同进程和工具链间变化。它追求整数和 string 键的吞吐，不承诺抵抗能与进程交互并观察行为的 HashDoS 攻击。SecureHashMap/SecureHashSet 保留由 OS CSPRNG 初始化的 SipHash 1-3 契约，供不可信键使用；当前版本仅保留类型声明，其实现是后续工作。不能依赖具体 hash 值或迭代顺序。
+默认 HashMap/HashSet 使用 FoldHash-fast，seed 由实现选择，允许在不同进程和工具链间变化。它追求整数和 string 键的吞吐，不承诺抵抗能与进程交互并观察行为的 HashDoS 攻击。SecureHashMap/SecureHashSet 使用由 OS CSPRNG 初始化的 SipHash 1-3，供不可信键使用；每次构造取得独立的 128 位密钥，系统随机源失败时报告 panic，禁止退回固定种子。两者分别提供与 HashMap/HashSet 相同的操作、共享身份和快照迭代语义，使用 HashMapIter/HashSetIter；SecureHashMap 的 entry 返回同一 Entry 类型。不能依赖具体 hash 值或迭代顺序。
 
-`std.hash.Hasher` 是预导入的普通名义值类型，当前公开确定性 FoldHash-fast 接口：
+`std.hash.Hasher` 是预导入的普通名义值类型，公开确定性 FoldHash-fast、显式密钥 SipHash 1-3 与系统随机密钥构造：
 
 ```text
 impl Hasher {
     pub fn with_seed(seed: uint) Hasher
+    pub fn with_keys(first: uint, second: uint) Hasher
+    pub fn secure() Hasher
     pub fn write_int(self: &Self, value: int)
     pub fn write_uint(self: &Self, value: uint)
     pub fn write_bool(self: &Self, value: bool)
@@ -475,11 +491,11 @@ impl Hasher {
 }
 ```
 
-`write_int` / `write_uint` 馈送 64 位小端补码 / 无符号整数；bool 馈送一个 0 或 1 字节，char 馈送 Unicode 标量的 32 位小端值。string 馈送 UTF-8，Bytes 馈送原始字节，两者均先馈送 64 位小端字节长度。所有写入拼成一个字节流，`finish` 等价于 Rust 参照模型对整个流执行一次 FoldHash-fast `FixedState::with_seed(seed)` 写入。重复 `finish` 不改变状态；之后仍可继续写入，下一次 `finish` 覆盖全部新旧输入。空输入也有定义。不承诺此输出跨工具链稳定。
+`write_int` / `write_uint` 馈送 64 位小端补码 / 无符号整数；bool 馈送一个 0 或 1 字节，char 馈送 Unicode 标量的 32 位小端值。string 馈送 UTF-8，Bytes 馈送原始字节，两者均先馈送 64 位小端字节长度。所有写入拼成一个字节流；`with_seed(seed)` 构造的 `finish` 等价于 Rust 参照模型对整个流执行一次 FoldHash-fast `FixedState::with_seed(seed)` 写入。重复 `finish` 不改变状态；之后仍可继续写入，下一次 `finish` 覆盖全部新旧输入。空输入也有定义。不承诺此输出跨工具链稳定。
 
 内建 Hash 对不超过 64 位的有符号 / 无符号整数分别调用 `write_int` / `write_uint`（先扩展到 64 位），128 位整数按低、高两个 64 位字馈送；bool、char、string、Bytes 使用对应写入方法，unit 不写入。元组按字段顺序递归馈送；Option 用 64 位标签 0（None）/ 1（Some）后接载荷，Result 用 0（Ok）/ 1（Err）后接载荷。浮点不满足 Hash；数组与 TypeId 暂保留内建 trait 资格，但直接调用 Hash.hash 会明确编译报错。
 
-当前不提供随机化 Hasher 构造器：原生平台尚未实现 entropy 执行片段。以上 seeded API 不替代集合的随机播种要求；集合实现及其默认播种路径单独提供。
+`with_keys` 对相同输入与密钥产生确定的 SipHash 1-3 输出；`secure` 从 OS CSPRNG 获取两个 64 位密钥。三种构造共享相同的字段馈送编码，`finish` 使用构造时选定的算法且不改变状态；显式种子或密钥构造不会自动增加系统熵。
 
 `std.hash.Hash` 规定值向 hasher 馈送字段的语义顺序，并要求 `a == b` 蕴含 hash 输入相同。HashMap、SecureHashMap 及对应 Set 进一步要求键实现 `StableHash`：键的 Eq 与 Hash 可观察结果不能被任何外部别名改变。BTreeMap/BTreeSet 对称地要求 `Ord + StableOrd`，比较顺序不能被外部别名改变。string、Bytes、Path、标量以及字段全部满足同一稳定约束的值类型由编译器提供或安全派生这些 marker；插入 COW 键会封存其 backing。Vec、Map、resource 等可变身份句柄不能安全派生。用户只能用 `unsafe impl StableHash` / `unsafe impl StableOrd` 手写其余实现，并承担该类型的稳定性证明，见[接口](traits.md)与[unsafe](unsafe.md)。
 

@@ -533,7 +533,7 @@ fn linux_file_worker(exit_thread: bool) -> Builder {
     rr(&mut b, R12, Rdi);
     load(&mut b, Rax, R12, OPERATION);
     for code in [
-        0, 1, 2, 3, 5, 8, 14, 72, 74, 75, 77, 82, 83, 84, 86, 87, 88, 89, 217, 262, 289,
+        0, 1, 2, 3, 5, 8, 14, 72, 74, 75, 77, 82, 83, 84, 86, 87, 88, 89, 217, 262, 289, 318,
     ] {
         compare(&mut b, Rax, code);
         jump(&mut b, "je", accepted);
@@ -685,6 +685,7 @@ const WINDOWS_CALLS: &[(i32, &str, i32)] = &[
     (20, "SetFileInformationByHandle", 0),
     (21, "CreateEventW", 0),
     (22, "WaitForSingleObject", -1),
+    (23, "BCryptGenRandom", 0),
 ];
 fn windows_worker() -> Builder {
     let mut b = Builder::new();
@@ -725,6 +726,13 @@ fn windows_worker() -> Builder {
             dword_result(&mut b);
         }
         store(&mut b, R12, VALUE, Rax);
+        if name == "BCryptGenRandom" {
+            // BCrypt 返回 NTSTATUS，不使用 GetLastError；零为成功，其余状态由调用方报告。
+            store(&mut b, R12, ERROR, Rax);
+            jump(&mut b, "jmp", done);
+            b.define(next);
+            continue;
+        }
         if name == "WaitForSingleObject" {
             b.emit(
                 "cmp",

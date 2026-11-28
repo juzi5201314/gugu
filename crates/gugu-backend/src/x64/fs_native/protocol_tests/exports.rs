@@ -32,6 +32,7 @@ fn scalar_export() -> Export {
                 .collect(),
             sret: None,
             poll_free_leaf: false,
+            scoped_arguments: Vec::new(),
         },
         arguments: vec![
             Lane {

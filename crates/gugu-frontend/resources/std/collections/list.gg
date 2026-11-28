@@ -1,0 +1,161 @@
+use std.vec.{Vec, VecIter}
+
+// 节点由 GC 独立追踪，不复用节点或代际；cursor 保存所属 list 和节点的代际快照。
+// payload 独立保存，删除时清空引用；安全模式解构会复制 T，独立引用允许 scoped view 零复制借用。
+struct Node[T] {
+    value: Option[&T], previous: Option[&Node[T]], next: Option[&Node[T]],
+    owner: &State[T], generation: uint, alive: bool,
+}
+struct State[T] { first: Option[&Node[T]], last: Option[&Node[T]], length: int, views: int }
+pub struct LinkedList[T] { state: &State[T] }
+pub struct ListCursor[T] { owner: &State[T], node: &Node[T], generation: uint }
+pub struct StaleCursor {}
+
+fn same[T](left: &T, right: &T) bool {
+    // 两次转换和比较之间没有 safepoint；地址只用于本次比较，不保存为节点身份。
+    unsafe { std.mem.transmute[&T, uint](left) == std.mem.transmute[&T, uint](right) }
+}
+fn cursor[T](owner: &State[T], node: &Node[T]) ListCursor[T] = ListCursor {
+    owner: owner, node: node, generation: node.generation,
+}
+fn writable[T](state: &State[T]) {
+    if state.views != 0 { panic("LinkedList 不能在 scoped view 内修改") }
+}
+fn payload[T](node: &Node[T]) &T {
+    match node.value { Some(value) => value, None => panic("存活节点缺少值") }
+}
+fn detach[T](state: &State[T], node: &Node[T]) {
+    match node.previous { Some(previous) => { previous.next = node.next }, None => { state.first = node.next } }
+    match node.next { Some(next) => { next.previous = node.previous }, None => { state.last = node.previous } }
+    state.length -= 1
+}
+fn attach[T](state: &State[T], node: &Node[T], previous: Option[&Node[T]], next: Option[&Node[T]]) {
+    node.previous = previous
+    node.next = next
+    match previous { Some(previous) => { previous.next = Some(node) }, None => { state.first = Some(node) } }
+    match next { Some(next) => { next.previous = Some(node) }, None => { state.last = Some(node) } }
+    state.length += 1
+}
+impl[T] LinkedList[T] {
+    pub fn new() Self {
+        let state = State[T] { first: None, last: None, length: 0, views: 0 }
+        Self { state: &state }
+    }
+    pub fn len(self: &Self) int = self.state.length
+    pub fn is_empty(self: &Self) bool = self.len() == 0
+    fn add(self: &Self, value: T, previous: Option[&Node[T]], next: Option[&Node[T]]) ListCursor[T] {
+        writable(self.state)
+        let node = Node[T] {
+            value: Some(&value), previous: None, next: None, owner: self.state, generation: 0, alive: true,
+        }
+        attach(self.state, &node, previous, next)
+        cursor(self.state, &node)
+    }
+    pub fn push_front(self: &Self, value: T) ListCursor[T] = self.add(value, None, self.state.first)
+    pub fn push_back(self: &Self, value: T) ListCursor[T] = self.add(value, self.state.last, None)
+    pub fn cursor_front(self: &Self) Result[ListCursor[T], StaleCursor] {
+        match self.state.first { None => Err(StaleCursor {}), Some(node) => Ok(cursor(self.state, node)) }
+    }
+    pub fn cursor_back(self: &Self) Result[ListCursor[T], StaleCursor] {
+        match self.state.last { None => Err(StaleCursor {}), Some(node) => Ok(cursor(self.state, node)) }
+    }
+    fn checked(self: &Self, position: &ListCursor[T]) Result[&Node[T], StaleCursor] {
+        let node = position.checked()?
+        if !same(self.state, position.owner) { return Err(StaleCursor {}) }
+        Ok(node)
+    }
+    pub fn insert_before(self: &Self, position: &ListCursor[T], value: T) Result[ListCursor[T], StaleCursor] {
+        let node = self.checked(position)?
+        Ok(self.add(value, node.previous, Some(node)))
+    }
+    pub fn insert_after(self: &Self, position: &ListCursor[T], value: T) Result[ListCursor[T], StaleCursor] {
+        let node = self.checked(position)?
+        Ok(self.add(value, Some(node), node.next))
+    }
+    pub fn remove(self: &Self, position: &ListCursor[T]) Result[T, StaleCursor] {
+        let node = self.checked(position)?
+        writable(self.state)
+        let value = *payload(node)
+        detach(self.state, node)
+        node.alive = false
+        node.value = None
+        node.previous = None
+        node.next = None
+        Ok(value)
+    }
+    pub fn splice_before(self: &Self, position: &ListCursor[T], moved: &ListCursor[T]) Result[ListCursor[T], StaleCursor] {
+        self.splice(position, moved, true)
+    }
+    pub fn splice_after(self: &Self, position: &ListCursor[T], moved: &ListCursor[T]) Result[ListCursor[T], StaleCursor] {
+        self.splice(position, moved, false)
+    }
+    fn splice(self: &Self, position: &ListCursor[T], moved: &ListCursor[T], before: bool) Result[ListCursor[T], StaleCursor] {
+        let target = self.checked(position)?
+        let node = moved.checked()?
+        writable(self.state)
+        writable(moved.owner)
+        if same(target, node) { return Ok(cursor(self.state, node)) }
+        let changed_owner = !same(self.state, moved.owner)
+        if changed_owner && node.generation == ~uint(0) { panic("LinkedList 代际耗尽") }
+        detach(moved.owner, node)
+        if changed_owner {
+            node.owner = self.state
+            node.generation += 1
+        }
+        if before { attach(self.state, node, target.previous, Some(target)) }
+        else { attach(self.state, node, Some(target), target.next) }
+        Ok(cursor(self.state, node))
+    }
+    pub fn iter(self: &Self) VecIter[T] {
+        let values = Vec[T]::new()
+        let next = self.state.first
+        while let Some(node) = next {
+            values.push(*payload(node))
+            next = node.next
+        }
+        values.iter()
+    }
+    pub fn for_each_ref[F: Fn(&T)](self: &Self, f: F) {
+        self.state.views += 1
+        defer { self.state.views -= 1 }
+        let next = self.state.first
+        while let Some(node) = next {
+            f(payload(node))
+            next = node.next
+        }
+    }
+}
+impl[T] ListCursor[T] {
+    fn checked(self: &Self) Result[&Node[T], StaleCursor] {
+        if !self.node.alive || self.node.generation != self.generation || !same(self.owner, self.node.owner) {
+            return Err(StaleCursor {})
+        }
+        Ok(self.node)
+    }
+    pub fn value(self: &Self) Result[T, StaleCursor] {
+        let node = self.checked()?
+        Ok(*payload(node))
+    }
+    pub fn update[F: Fn(T) T](self: &Self, f: F) Result[(), StaleCursor] {
+        let node = self.checked()?
+        writable(self.owner)
+        let value = f(*payload(node))
+        _ = self.checked()?
+        let slot = payload(node)
+        *slot = value
+        Ok(())
+    }
+    pub fn next(self: &Self) Result[Option[Self], StaleCursor] {
+        let node = self.checked()?
+        Ok(match node.next { None => None, Some(next) => Some(cursor(self.owner, next)) })
+    }
+    pub fn previous(self: &Self) Result[Option[Self], StaleCursor] {
+        let node = self.checked()?
+        Ok(match node.previous { None => None, Some(previous) => Some(cursor(self.owner, previous)) })
+    }
+}
+impl[T] IntoIter for LinkedList[T] {
+    type Item = T
+    type Iter = VecIter[T]
+    fn into_iter(self: Self) VecIter[T] = self.iter()
+}

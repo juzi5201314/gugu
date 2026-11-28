@@ -137,9 +137,11 @@ fn demo(xs: &[int]) {
 
 ## Scoped borrowed view callback {#scoped-borrowed-view-callback}
 
-标准库的 `with_ref`、`with_read_ref` 与 `for_each_ref` 使用 compiler-owned 的 scoped view callback。它们的 callback 参数在源码层可以写作 `&T`，但 HIR 额外标记为 `ScopedRead` view，不等同于普通可写引用；实现必须在 GIR 中保留该访问模式。`ScopedRead` 只允许在 callback 动态 extent 内读取或向已登记的无逃逸 helper 传递，不能写入、存入任何外部槽、作为返回值、跨协程发布或转换为 raw pointer。需要修改值的 API 必须显式声明 `ScopedWrite`，不能借用只读 view 的类型检查空缺。
+标准库的 `with_ref`、`with_read_ref` 与 `for_each_ref` 使用 compiler-owned 的 scoped view callback。它们的 callback 参数在源码层可以写作 `&T`，但编译器把这些参数视为 `ScopedRead` view，不等同于普通可写引用；实现必须在 GIR 与 LIR 中保留该访问约束。`ScopedRead` 只允许在 callback 动态 extent 内读取或向已证明无逃逸的静态 helper 传递，不能写入、存入任何外部槽、作为 callback 返回值、跨协程发布或转换为 raw pointer。callback 内的局部临时引用可以继续读取，读取出的标量和值副本遵守普通值语义；只读 helper 的递归与泛型实例不能绕过同一检查。需要修改值的 API 必须显式声明 `ScopedWrite`，不能借用只读 view 的类型检查空缺。
 
 scoped callback 必须是同步调用：其 body、可达的静态 callee 和 compiler intrinsic 不能 `suspend`、`await`、`yield`、进入 `select`、执行可能挂起的锁/I/O/foreign bridge 或把 view 传给无法证明 no-escape 的动态调用。callback 可以触发普通 safepoint；runtime 会通过 view token 注册临时 root/epoch并在 backing relocation 后修正 view。callback 正常返回或 panic 展开时 token 必须闭合，未闭合或逃逸是编译器内部错误，不能降级成普通 `&T`。
+
+静态 helper 的无逃逸证明允许读取 view、递归或泛型转发同一 view，以及返回读取后的普通值副本；不允许 helper 返回 view 本身，也不接受以包含 view 的局部聚合地址作为参数。这些路径必须先在 callback 内读出普通值，再按值传递。局部聚合内临时保存的 view 只能在该 callback 中使用，不能经整块复制或分支合流写入外部存储。
 
 ## 调用边界与捕获身份
 

@@ -153,6 +153,7 @@ impl Builder<'_> {
                     normal,
                     unwind: None,
                     call_kind,
+                    scoped_callback: false,
                     site,
                 });
                 self.switch_to(normal);

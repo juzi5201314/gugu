@@ -21,6 +21,7 @@ fn native_calls_require_valid_original_c_metadata_and_matching_groups() {
         foreign_arguments: vec![],
         foreign_signature: None,
         poll_free_leaf: false,
+        scoped_arguments: Vec::new(),
     };
     assert!(!call_valid(&call, &[], &[]));
     call.foreign_signature = Some(Signature {
@@ -106,6 +107,7 @@ fn foreign_stack_addresses_require_explicit_abi_temporary() {
             }],
             sret: None,
             poll_free_leaf: false,
+            scoped_arguments: Vec::new(),
         };
         assert!(!call_valid(&call, &call.parameters, &[]));
         call.by_value.push((0, [0; 32], 24));

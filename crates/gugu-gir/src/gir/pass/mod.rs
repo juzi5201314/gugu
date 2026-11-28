@@ -439,6 +439,7 @@ fn remap_terminator(
             normal,
             unwind,
             call_kind,
+            scoped_callback,
             site,
         } => Terminator::Call {
             callee: callee.clone(),
@@ -449,6 +450,7 @@ fn remap_terminator(
                 .map(|block| remap_block(block_map, block))
                 .transpose()?,
             call_kind: *call_kind,
+            scoped_callback: *scoped_callback,
             site: *site,
         },
         Terminator::Return => Terminator::Return,
