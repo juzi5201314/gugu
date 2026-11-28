@@ -486,11 +486,13 @@ impl Checker<'_, '_> {
             None => method.signature,
         };
         let (parameters, _) = callable.signature().expect("方法具有签名");
+        let borrow = receiver
+            && matches!(parameters.first(), Some(Ty::Ref(inner)) if inner.as_ref() == target);
         let actual = if receiver {
-            let parameter = parameters.first().expect("接收者方法有首参");
-            Some(match parameter {
-                Ty::Ref(_) if !matches!(target, Ty::Ref(_)) => Ty::Ref(Box::new(target.clone())),
-                _ => target.clone(),
+            Some(if borrow {
+                Ty::Ref(Box::new(target.clone()))
+            } else {
+                target.clone()
             })
         } else {
             None
@@ -511,7 +513,7 @@ impl Checker<'_, '_> {
             };
             if let Some(expression) = receiver_expression {
                 self.address_taken(expression);
-                if dereferences == 0 && !matches!(target, Ty::Ref(_)) {
+                if dereferences == 0 && borrow {
                     self.implicit_borrow_check(callee, expression, target);
                 }
             }
@@ -535,8 +537,7 @@ impl Checker<'_, '_> {
             self_ty: target.clone(),
             signature,
             dereferences,
-            borrow: actual.as_ref().is_some_and(|ty| matches!(ty, Ty::Ref(_)))
-                && !matches!(target, Ty::Ref(_)),
+            borrow,
             implicit_receiver: receiver && !trait_ufcs,
             dynamic: method.dynamic,
         });

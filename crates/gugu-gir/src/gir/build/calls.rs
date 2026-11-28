@@ -283,7 +283,7 @@ impl Builder<'_> {
         for _ in 0..dereferences {
             place = self.project(place, Projection::Deref);
         }
-        if self.ref_type(self.place_ty(place)) {
+        if Some(self.place_ty(place)) == parameter {
             let ty = self.place_ty(place);
             let dest = self.temp(ty);
             self.copy_value(Place::local(dest), place, ty);
@@ -298,7 +298,7 @@ impl Builder<'_> {
         matches!(self.module.types.get(ty.index()), Some(hir::Type::Ref(_)))
     }
 
-    /// 派发实参：签名参数为 `&T` 而实参不是引用时按语言规则自动借用。
+    /// 派发实参：引用形参与实参类型不同时自动借用，保留 `&T` 到 `&&T` 的层级。
     pub(super) fn dispatch_argument(
         &mut self,
         parameter: TypeId,
@@ -309,14 +309,8 @@ impl Builder<'_> {
             self.module.types.get(parameter.index()),
             Some(hir::Type::Ref(_))
         );
-        let already = expression.is_some_and(|id| {
-            matches!(
-                self.module
-                    .types
-                    .get(self.owner.expression_types[id.index()].index()),
-                Some(hir::Type::Ref(_))
-            )
-        });
+        let already =
+            expression.is_some_and(|id| self.owner.expression_types[id.index()] == parameter);
         if !reference || already {
             return copy_of(local);
         }

@@ -8,7 +8,7 @@ use super::{
 use crate::{Diagnostic, DiagnosticCode};
 use gugu_base::SharedTable;
 
-pub const SCHEMA_VERSION: u32 = 31;
+pub const SCHEMA_VERSION: u32 = 32;
 
 #[derive(Clone, Debug, Default, Eq, PartialEq, serde::Serialize, serde::Deserialize)]
 pub struct CheckedSemantics {

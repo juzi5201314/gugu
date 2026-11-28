@@ -59,6 +59,12 @@ query 依赖，不靠可变的全局 phase 回跳：
 显式错误占位以继续产生同一根因附近的诊断；错误占位不得进入 GIR、单态化或持久成功
 产物。
 
+方法派发记录中的自动借用以已选择的 `Self` 和接收者签名为准：签名首参为 `&Self` 时记录一层借用，即使 `Self` 本身是引用；HIR 与 GIR 保留这层引用槽借用，不把 `&&T` 压成 `&T`。GIR 只有在实参与形参类型相同时直接传递已有引用。`std.fmt` 的引用 `Print` / `Debug` 通过普通泛型 impl 转发，类型约束、单态化和缺失实现诊断均走普通 trait 路径。
+
+函数项实例化从声明的原始签名代入捕获参数与显式实参一次。方法选择已替换的调用点签名只用于恢复绑定，不能再次对它应用 impl 的同名参数绑定；否则 `T = Option[T]` 会错误展开成 `Option[Option[T]]`。
+
+`TypeCheck` schema 32 使旧的接收者借用、泛型签名替换与派生字段约束检查结果失效；内建物化语义表使用相同版本。
+
 `abstract_analysis` 在 `LowerHir` 冻结之后消费 generic GIR body。当前管线为
 `BuildGenericGir` → `mono::close` → `late::run` → `attach_fragments` →
 `WholeProgramAnalysis` → `EscapeAndPlacement` → `PublicFunctionSummary`。

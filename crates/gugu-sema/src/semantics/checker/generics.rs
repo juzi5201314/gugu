@@ -30,7 +30,7 @@ impl Checker<'_, '_> {
         arguments: AstRange<GenericArg>,
         span: &Span,
     ) -> Ty {
-        let Ty::Callable(id, captured, signature) = ty else {
+        let Ty::Callable(id, captured, mut signature) = ty else {
             if arguments.len != 0 {
                 self.error(
                     DiagnosticCode::InvalidExpression,
@@ -98,6 +98,8 @@ impl Checker<'_, '_> {
                     if super::super::traits::select::matches(&formal, &signature, &mut inferred) {
                         bindings.extend(inferred);
                     }
+                    // 捕获参数已替换过调用点签名；只对声明签名代入一次，避免同名参数被再次展开。
+                    signature = formal;
                 }
                 Err(error) => {
                     self.errors.push(error);

@@ -1,0 +1,31 @@
+use std.io.{println}
+
+struct Label { text: string }
+impl Print for Label {
+    fn print(self: &Self, out: &Formatter) { out.write_str(self.text) }
+}
+impl Debug for Label {
+    fn debug(self: &Self, out: &Formatter) {
+        out.debug_tuple("Label").entry(&self.text).finish()
+    }
+}
+
+fn print_ref[T: Print](value: &T) { println(value) }
+
+fn main() {
+    let text = "hi"
+    let number = 5
+    let reference = &text
+    println(&text, "|", &number, "|", &reference)
+    let label = Label { text: "label" }
+    print_ref(&label)
+    let label_ref = &label
+    println(label_ref, "|", f"{label_ref:?}")
+    let tuple = (&number, &text)
+    println(&tuple)
+    let values = Vec::new()
+    values.push(7)
+    println(values.get(0), "|", values.get(1))
+    let option = Some(&text)
+    println(&option)
+}

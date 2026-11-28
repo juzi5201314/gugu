@@ -144,6 +144,8 @@ trait Default {
 
 `Default` 是无接收者的关联函数。`Option[T]` 的 `default` 是 `None`，不要求 `T: Default`。`Result` 没有 `Default`。标量 `()`、`bool`、整数、`char`、`string` 有 `Default`；数组与元组在每个元素都有 `Default` 时有 `Default`。`Print` 与 `Debug` 覆盖 `()`、`bool`、整数、浮点、`char`、`string`、`TypeId`，以及元素满足 `Debug` 的 `Option`、`Result`、数组和元组；聚合的默认输出同样采用结构化调试表示。`Hash` 覆盖 `()`、bool、整数、char、string、Bytes，并在元素满足 `Hash` 时覆盖 `Option`、`Result` 和元组；浮点不满足 Hash，数组与 TypeId 暂保留内建 trait 资格，但调用 Hash.hash 会明确编译报错。`Binary`、`Octal`、`LowerHex`、`UpperHex` 只覆盖整数；`LowerExp` 与 `UpperExp` 只覆盖浮点。`Error` 由具体错误类型自行实现，编译器不提供覆盖用户 impl 的内建实现。
 
+标准库提供 `impl[T: Print] Print for &T` 与 `impl[T: Debug] Debug for &T`，通过引用转发到被引用值的对应实现，保留同一个 `Formatter`。因此 `println(&value)` 与 `println(value)` 的文本一致，多层引用和泛型参数同样适用；引用不会让缺少 `Print` 或 `Debug` 的类型获得该能力。
+
 `StableHash` 与 `StableOrd` 是没有方法的 unsafe marker trait：前者承诺该值副本的 Eq 与 Hash 可观察结果不能通过外部别名改变，后者对 Ord 作同一承诺。它们不使用 trait 继承；集合约束分别显式写成 `K: Eq + Hash + StableHash` 与 `K: Ord + StableOrd`。
 
 编译器为标量、按 byte 比较的 string/Bytes/Path 和其它内建不可变值提供 marker impl。`#[derive(StableHash)]` 要求本类型同时 derive Eq 与 Hash 且每个参与字段都实现 StableHash；`#[derive(StableOrd)]` 对称地要求 Ord 与 StableOrd。COW 字段在复制进键槽时封存 backing。含可变身份句柄或资源字段的类型不能安全 derive；若其 Eq/Hash/Ord 只观察不会变化的身份或其它稳定状态，作者可以显式承担 unsafe impl 契约。
@@ -198,6 +200,10 @@ impl Vec[T] {
 关联调用遵循[类型路径的分段泛型规则](types.md)。`Self` 在关联项签名和函数体中都指当前实现的完整 Self 类型，可以直接用于构造该类型。
 
 `self` 的类型可以写 `self`、`self: Point`、`self: &Point`。按值 `self` 拷贝接收者；`&Point` 按引用。句柄类型（`Vec`）的方法接 `self` 就是拷贝句柄，能 `push` 到同一块载荷。大位结构体应接 `&Self`。
+
+自动借用按选中方法的接收者类型决定：当 `Self = &T` 且方法接收 `&Self` 时，借用的是引用槽，形成 `&&T`；不能因为原接收者已经是引用就跳过这层借用。
+
+调用方与 impl 中的泛型参数各自独立，即使同名也不能互相捕获。例如在 `fn inspect[T](value: &Option[T])` 中选择 `impl[T] Trait for &T` 时，实现参数绑定为完整的 `Option[T]`，其中的 `T` 仍指调用方参数。
 
 ```text
 impl Dim for [int; 4] {

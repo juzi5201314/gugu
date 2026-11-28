@@ -107,6 +107,24 @@ fn qualified_result_variant_names_keep_their_enum_identity() {
 }
 
 #[test]
+fn reference_impl_receivers_borrow_the_reference_slot() {
+    let errors = check(
+        "trait ReadValue { fn read(self: &Self) int }\n\
+         impl ReadValue for int { fn read(self: &Self) int = *self }\n\
+         impl[T: ReadValue] ReadValue for &T { fn read(self: &Self) int = (**self).read() }\n\
+         impl[T: ReadValue] ReadValue for Option[T] { fn read(self: &Self) int = 1 }\n\
+         impl[T: ReadValue, E: ReadValue] ReadValue for Result[T, E] { fn read(self: &Self) int = 2 }\n\
+         fn read_option[T: ReadValue](value: &Option[T]) int = value.read()\n\
+         fn read_result[T: ReadValue, E: ReadValue](value: &Result[T, E]) int = value.read()\n\
+         fn main() { let value: int = 5\n let reference = &value\n\
+         _ = reference.read()\n _ = (&reference).read()\n\
+         let option: Option[int] = Some(value)\n _ = read_option(&option)\n\
+         let result: Result[int, int] = Ok(value)\n _ = read_result(&result) }",
+    );
+    assert!(errors.is_empty(), "{errors:?}");
+}
+
+#[test]
 fn inferred_inherent_impl_bounds_are_checked_after_receiver_inference() {
     let declaration = "trait Key {}\nimpl Key for int {}\n\
         struct Map[K, V] {}\nimpl[K: Key, V] Map[K, V] {\n\

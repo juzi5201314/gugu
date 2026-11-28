@@ -225,6 +225,24 @@ fn aggregate_printing_and_debug_formatting() {
 }
 
 #[test]
+fn reference_printing_forwards_to_the_referent() {
+    assert_eq!(
+        output(include_str!("fixtures/reference_printing.gg"), &[]),
+        [
+            "hi|5|hi\n",
+            "label\n",
+            "label|Label(\"label\")\n",
+            "(5, \"hi\")\n",
+            "Some(7)|None\n",
+            "Some(\"hi\")\n",
+        ]
+        .into_iter()
+        .map(|text| (1, text.as_bytes().to_vec()))
+        .collect::<Vec<_>>()
+    );
+}
+
+#[test]
 fn aggregate_printing_rejects_missing_format_traits_at_use() {
     for (declaration, value, expression) in [
         (
@@ -243,6 +261,11 @@ fn aggregate_printing_rejects_missing_format_traits_at_use() {
             "_ = f\"{value}\"",
         ),
         ("enum Shape { Dot }", "Shape::Dot", "println(value)"),
+        (
+            "struct Point { x: int }",
+            "Point { x: 1 }",
+            "println(&value)",
+        ),
     ] {
         let source = format!(
             "use std.io.{{println}}\n{declaration}\nfn main() {{\n    let value = {value}\n    {expression}\n}}"
