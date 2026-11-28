@@ -127,6 +127,18 @@ fn rejects_duplicate_targets_and_escaping_entries() {
         Project::discover(&outside),
         Err(ProjectError::TargetDiscovery { .. })
     ));
+
+    let backslash = package(
+        &root,
+        "backslash",
+        "[package]\nname = \"backslash\"\nauto-bins = false\n\n[[bin]]\nname = \"cli\"\npath = 'src\\main.gg'\n",
+        &[("src/main.gg", "fn main() {}\n")],
+    );
+    assert!(matches!(
+        Project::discover(&backslash),
+        Err(ProjectError::TargetDiscovery { message, .. })
+            if message.contains("不是 package 内相对路径")
+    ));
 }
 
 #[test]

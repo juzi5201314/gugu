@@ -30,6 +30,8 @@
 ELF/PE自重定位、TLS、metadata验证、heap/scheduler建立和平台 fault handler的内部次序分别由[后端](../internals/backend.md)、[GC 元数据](../internals/gc-metadata.md)和[调度器](../internals/scheduler.md)规定，不构成额外的用户启动钩子。
 启动初始化仍在宿主栈上运行时，不得把尚未激活的 `main` 栈界限用于入口增长检查；只有第一次实际上下文切换到独立 `main` 栈时才发布该检查界限。启动快照解析也不得依靠托管分配或已运行的用户调度器。
 
+原生内存预约的长度必须先按实际 OS 页大小向上舍入，再交给平台边界；预约与释放账本使用同一舍入长度。启动配置、处理器与架构控制存储也遵守这一规则，实际建立的映射与已提交页必须完整计入启动内存账本。
+
 镜像 runtime 的 `current_slot()` machine intrinsic 返回当前协程控制块句柄；x86_64 上该句柄来自固定保留的 `r14` 并通过内部返回寄存器 `rax` 交付。它不分配内存、不切换上下文，也不改变协程状态。
 
 `gc_config()` machine intrinsic 返回编译器生成的只读 `GcImageConfig` 记录的地址。记录由 compiler 生成并随镜像一起写出，字段全部是 64 位无符号整数、按固定顺序连续排列，取值只来自已验证的 schema 与 profile：`revision`、`byte_len`、四个 schema 号、三个 profile revision、arena/block/line/granule/object-header 尺寸、TLAB span、nursery 触发量与年龄、对齐上限、card/stamp/edge 容量、每写预算、mark shard 数、pacing 预算与压力阈值。`byte_len` 由记录布局派生，runtime 在启动期用 `revision` 与 `byte_len` 校验自己读到的记录与 compiler 写出的记录一致，不一致按 `RuntimeInvariant` fatal 结束。该原语不分配内存、不切换上下文，也不改变 GC 状态。LocalHeap 的 schema 变化会同时拒绝旧的 arena side metadata；超过 block 或配置对齐上限的对象使用页粒度 LargeMapping，不回退到普通 block。

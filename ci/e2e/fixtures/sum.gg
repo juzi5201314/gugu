@@ -1,11 +1,8 @@
 //! 根据实参个数计算三角数，写入标准输出后以指定状态退出。
 
 use std.env as env
-use std.fs as fs
-use std.io as io
-use std.path.{Path}
+use std.io.{println}
 use std.process as process
-use std.text.{Bytes}
 
 fn triangular(n: int) int {
     let total = 0
@@ -20,15 +17,6 @@ fn main() {
     if total != 15 {
         panic("unexpected sum")
     }
-    let options = fs.OpenOptions::new()
-    options.write = true
-    let stdout = match fs.open(Path::from_string("/dev/stdout"), options) {
-        Ok(file) => file,
-        Err(_) => panic("open stdout"),
-    }
-    match io.write_all(&stdout, Bytes::from_string("sum verified\n")) {
-        Ok(_) => (),
-        Err(_) => panic("write stdout"),
-    }
+    println("sum verified")
     process.exit(7)
 }

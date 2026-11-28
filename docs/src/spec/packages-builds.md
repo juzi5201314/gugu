@@ -125,6 +125,8 @@ workspace 共享根目录的 `gugu.lock` 和 `target/`。在根执行命令时�
 
 同名的文件形式与目录形式同时存在是错误。`auto-lib`、`auto-bins`、`auto-tests`、`auto-benches`、`auto-examples` 和 `auto-build` 可以分别关闭自动发现。显式 target 路径相对 package 根；两个 target 不能拥有同一 target 名与种类。显式 `path` 可直接位于 package 根（如 `main.gg`），其源码根为 package 根本身。target 自动发现与冲突检查会忽略构建输出目录 `target` 及隐藏目录。
 
+自动发现的 target 入口先按宿主目录分隔符转换为 `/` 分隔的 package 相对路径，再执行入口校验；显式清单中的 `path` 必须直接使用 `/`，在 Windows 宿主上也不能写反斜杠。
+
 `[lib]` 最多一个，默认名是 package 短名把 `-` 换成 `_`。`artifacts = ["gugu"]` 表示它作为其它 Gugu package 的普通依赖入口；还可以包含 `staticlib`、`cdylib`，把该 lib 中的 `pub extern "C"` 导出写成平台静态库或共享库。`staticlib` / `cdylib` 只稳定 C ABI，不形成可在运行时加载新 Gugu 类型的动态库。
 
 `[[bin]]`、`[[test]]`、`[[bench]]`、`[[example]]` 至少接受 `name`、`path`、`required-features`。Test target 始终使用语言内建测试 harness。Bench target 默认 `harness = true` 并收集 `#[bench]`；可以显式写 `harness = false`，此时它是必须提供 main 的普通 benchmark 可执行程序。Example 是普通可执行入口，只有显式选择或相应工具命令才运行。`required-features` 列出的 feature 没有全部启用时，该 target 不进入默认选择（lib+bin 或 all-targets）；显式按名选择时也失败，必须先用 `--features`/`--all-features` 启用。请求未在当前 package 声明的 feature 属于命令行错误（退出码 2）。
@@ -167,6 +169,8 @@ parser_dev = { git = "https://example.com/acme/parser.git", branch = "next" }
 ```
 
 `version`、`path`、`git` 是 source 选择；`path`/`git` 可以同时带 registry `package + version` 作为发布回退。`git` 的 `rev`、`tag`、`branch` 最多写一个；锁文件总是记录解析后的完整 commit 与规范 tree hash。发布归档允许 Git 依赖，但必须显式写不可变 `rev`；tag、branch 和裸仓库默认分支在发布时是错误。Path 依赖发布时必须同时存在 registry package/version 回退，打包后移除本地 path 覆盖。
+
+清单依赖 `path` 与锁文件 path source 在所有宿主上都拒绝 ASCII 盘符前缀，包括 `C:dep` 这类依赖当前盘符目录的路径和 `C:/dep` 这类绝对路径；`../dep` 等普通相对路径仍按既定基址解析。
 
 同一个 package ID 可以被多个别名引用，但只解析和编译一次。依赖图中同一 owner/name 的不兼容版本可以并存；源码若要直接使用多个版本，必须给每个版本不同别名。别名只改变名称解析入口，不改变 package ID、类型身份或锁文件节点。
 
@@ -335,6 +339,7 @@ Linux 默认使用 `$XDG_CACHE_HOME/gugu`（未设置时 `~/.cache/gugu`）、`$
 
 依赖源码与归档默认不会自动淘汰，只由显式 cache clean/gc 删除，以保证离线可用。编译 action cache 使用可配置容量和最近使用 LRU 自动回收；实现必须保证正在读取或写入的 entry 不被回收。并发写以临时文件、内容哈希验证和原子发布完成；损坏或摘要不符的 entry 必须隔离并重新构建。
 实现使用以下稳定输入边界：registry archive 先解包为规范相对文件集合，再以 `gugu-package-v1`、路径长度、路径字节、内容长度和内容字节组成内容流计算 SHA-256；缓存条目另外保存每个文件的长度与 BLAKE3 摘要。缓存布局为 `dependencies/v1/packages/<package-key>/record.toml` 与 `files/`，`tmp/` 只放未发布临时目录，损坏条目移入 `quarantine/`。
+从缓存、path 或 vendor 的物理目录读取 package 时，先将宿主目录分隔符转换为 `/`，再校验规范相对路径；相同文件集合在各宿主上具有相同逻辑路径与 checksum。archive 和缓存记录中的逻辑路径必须直接满足规范，不转换其反斜杠；Unix 文件名中的字面反斜杠也必须拒绝。
 
 vendor 根包含严格的 `.gugu-vendor.toml` 映射；每个 registry/Git package 使用由 package identity 派生的 `pkg-<key>` 目录，并记录 source、锁定 registry checksum 和内容摘要。读取 vendor 时 package 集合、目录集合、source、每个文件和整体摘要都必须与锁图一致，path package 仍从本地目录读取。输入准备在 codegen 前完成，cache 与 vendor 不会静默互相回退。
 

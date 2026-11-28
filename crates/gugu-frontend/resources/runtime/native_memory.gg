@@ -183,12 +183,17 @@ fn add(owner: uint, offset: uint, bytes: uint) {
     put(owner + offset, previous + bytes)
 }
 
-/// 启动时仅调用一次：三个映射在 processor 发布前已建立，后续均走计费入口。
+/// 启动时仅调用一次：栈、配置页和 processor 已建立，A64 另含独立控制页。
 pub fn adopt_boot(owner: uint, stack_reserved: uint, stack_committed: uint, limit: uint) {
-    put(owner + RUNTIME_RESERVED_OFFSET, page_bytes(stack_reserved) + 2 * page_bytes(4096))
-    put(owner + RUNTIME_COMMITTED_OFFSET, page_bytes(stack_committed) + 8192)
-    put(owner + RUNTIME_MAPPINGS_OFFSET, 3)
-    put(owner + RUNTIME_PEAK_OFFSET, page_bytes(stack_committed) + 8192)
+    #[cfg(arch = "aarch64")]
+    let metadata_pages: uint = 3
+    #[cfg(not(arch = "aarch64"))]
+    let metadata_pages: uint = 2
+    let metadata_bytes = metadata_pages * page_bytes(4096)
+    put(owner + RUNTIME_RESERVED_OFFSET, page_bytes(stack_reserved) + metadata_bytes)
+    put(owner + RUNTIME_COMMITTED_OFFSET, page_bytes(stack_committed) + metadata_bytes)
+    put(owner + RUNTIME_MAPPINGS_OFFSET, metadata_pages + 1)
+    put(owner + RUNTIME_PEAK_OFFSET, page_bytes(stack_committed) + metadata_bytes)
     put(owner + RUNTIME_LIMIT_OFFSET, limit)
     put(owner + STACK_RESERVED_OFFSET, page_bytes(stack_reserved))
     put(owner + STACK_COMMITTED_OFFSET, page_bytes(stack_committed))
@@ -201,7 +206,8 @@ static aligned_reservations: uint = 0
 
 #[cfg(any(os = "linux", os = "macos"))]
 fn reserve_native(bytes: uint, alignment: uint) (uint, uint, uint) {
-    (unsafe { std.platform.reserve_aligned(bytes, alignment) }, page_bytes(bytes), 0)
+    let length = page_bytes(bytes)
+    (unsafe { std.platform.reserve_aligned(length, alignment) }, length, 0)
 }
 
 #[cfg(os = "windows")]

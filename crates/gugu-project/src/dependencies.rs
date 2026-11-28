@@ -13,6 +13,11 @@ pub use dependency_model::*;
 pub(crate) use resolver::resolve_project;
 pub use semver::{Version, VersionReq};
 
+// 逻辑路径在所有宿主上统一拒绝 Windows 盘符，不能依赖宿主的 Path 解析规则。
+fn has_windows_drive_prefix(path: &str) -> bool {
+    matches!(path.as_bytes(), [drive, b':', ..] if drive.is_ascii_alphabetic())
+}
+
 /// 全部 path package（workspace 成员 + 传递外部 path）的依赖解析元数据，
 /// 与 `resolve_project` 使用同一份收集逻辑。
 pub(crate) fn dependency_metadata(

@@ -411,16 +411,16 @@ pub fn darwin_parallelism_probe() -> Fragment {
 pub fn linux_startup_call() -> Fragment {
     let mut b = Builder::default();
     let done = startup_prelude(&mut b, 95);
-    load(&mut b, Reg::x(0), Reg::x(1), 8);
-    load(&mut b, Reg::x(1), Reg::x(1), 16);
+    load(&mut b, Reg::x(0), Reg::x(19), 8);
+    load(&mut b, Reg::x(1), Reg::x(19), 16);
     syscall(&mut b, 17);
     compare(&mut b, Reg::x(0), 0);
     let success = cond(&mut b, GE);
     negate(&mut b, Reg::x(0), Reg::x(0));
-    store(&mut b, Reg::x(1), 80, Reg::x(0));
+    store(&mut b, Reg::x(19), 80, Reg::x(0));
     let end = jump(&mut b);
     patch(&mut b, success, GE);
-    store(&mut b, Reg::x(1), 72, Reg::x(0));
+    store(&mut b, Reg::x(19), 72, Reg::x(0));
     link(&mut b, end);
     startup_epilogue(&mut b, done);
     b.finish()
@@ -429,19 +429,17 @@ pub fn linux_startup_call() -> Fragment {
 pub fn darwin_startup_call() -> Fragment {
     let mut b = Builder::default();
     let done = startup_prelude(&mut b, 45);
-    b.memory("str.X.Unsigned", LR, SP, 0);
-    load(&mut b, Reg::x(0), Reg::x(1), 8);
-    load(&mut b, Reg::x(1), Reg::x(1), 16);
+    load(&mut b, Reg::x(0), Reg::x(19), 8);
+    load(&mut b, Reg::x(1), Reg::x(19), 16);
     darwin_call(&mut b, "getcwd");
-    b.memory("ldr.X.Unsigned", LR, SP, 0);
     // getcwd 成功返回 buf 指针，失败返回 NULL 并置 errno。
     compare(&mut b, Reg::x(0), 0);
     let failed = cond(&mut b, EQ);
-    store(&mut b, Reg::x(1), 72, Reg::x(0));
+    store(&mut b, Reg::x(19), 72, Reg::x(0));
     let end = jump(&mut b);
     patch(&mut b, failed, EQ);
     darwin_errno(&mut b);
-    store(&mut b, Reg::x(1), 80, Reg::x(0));
+    store(&mut b, Reg::x(19), 80, Reg::x(0));
     link(&mut b, end);
     startup_epilogue(&mut b, done);
     b.finish()
@@ -449,13 +447,17 @@ pub fn darwin_startup_call() -> Fragment {
 
 /// 校验 op 镜像并清零 value/error；op0 落到调用方位置，op1 走 `done` 出口。
 fn startup_prelude(b: &mut Builder, unsupported: u16) -> u32 {
-    load(b, A, Reg::x(1), 0);
+    // x1 要改作 getcwd 长度；请求地址跨原生调用保存在非易失寄存器。
+    // 额外 16 字节供 Darwin errno helper 保存 LR，不覆盖调用方栈。
+    enter(b, 16);
+    b.add(Reg::x(19), Reg::x(1), 0);
+    load(b, A, Reg::x(19), 0);
     compare_regs(b, Reg::x(0), A);
     let valid = cond(b, EQ);
     b.emit("brk", [imm(0)]);
     patch(b, valid, EQ);
-    store(b, Reg::x(1), 72, XZR);
-    store(b, Reg::x(1), 80, XZR);
+    store(b, Reg::x(19), 72, XZR);
+    store(b, Reg::x(19), 80, XZR);
     compare(b, Reg::x(0), 0);
     let cwd = cond(b, EQ);
     compare(b, Reg::x(0), 1);
@@ -463,7 +465,7 @@ fn startup_prelude(b: &mut Builder, unsupported: u16) -> u32 {
     b.emit("brk", [imm(0)]);
     patch(b, known, EQ);
     b.emit("movz.X", [reg(A), movz(unsupported)]);
-    store(b, Reg::x(1), 80, A);
+    store(b, Reg::x(19), 80, A);
     let done = jump(b);
     patch(b, cwd, EQ);
     done
@@ -471,11 +473,9 @@ fn startup_prelude(b: &mut Builder, unsupported: u16) -> u32 {
 
 /// 汇合：返回 packet[80]。
 fn startup_epilogue(b: &mut Builder, done: u32) {
-    load(b, Reg::x(0), Reg::x(1), 80);
-    b.ret();
     link(b, done);
-    load(b, Reg::x(0), Reg::x(1), 80);
-    b.ret();
+    load(b, Reg::x(0), Reg::x(19), 80);
+    leave(b, 16);
 }
 
 fn darwin_errno(b: &mut Builder) {

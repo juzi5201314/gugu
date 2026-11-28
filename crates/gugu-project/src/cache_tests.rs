@@ -56,6 +56,39 @@ fn package_checksum_uses_sorted_canonical_content_stream() {
 }
 
 #[test]
+fn directory_files_use_canonical_paths_and_checksums() {
+    let root = TempDir::new().expect("创建 package 目录");
+    let expected = files();
+    std::fs::create_dir(root.path().join("src")).expect("创建源码目录");
+    for (path, bytes) in expected.files() {
+        std::fs::write(root.path().join(path), bytes).expect("写入 package 文件");
+    }
+    let actual = PackageFiles::from_directory(root.path()).expect("读取宿主路径");
+    assert_eq!(actual.files(), expected.files());
+    assert_eq!(actual.checksum(), expected.checksum());
+}
+
+#[test]
+fn logical_package_paths_reject_backslashes() {
+    let error = PackageFiles::new(BTreeMap::from([(
+        "src\\lib.gg".to_owned(),
+        b"fn value() {}\n".to_vec(),
+    )]))
+    .expect_err("逻辑路径不能使用宿主分隔符");
+    assert!(matches!(error, CacheError::Invalid { .. }));
+}
+
+#[cfg(unix)]
+#[test]
+fn directory_files_reject_literal_backslashes() {
+    let root = TempDir::new().expect("创建 package 目录");
+    std::fs::write(root.path().join("src\\lib.gg"), b"fn value() {}\n")
+        .expect("写入含反斜杠的文件名");
+    let error = PackageFiles::from_directory(root.path()).expect_err("拒绝字面反斜杠");
+    assert!(matches!(error, CacheError::Invalid { .. }));
+}
+
+#[test]
 fn archive_is_verified_before_cache_publish_and_can_be_replayed() {
     let root = TempDir::new().expect("cache root");
     let input_files = files();

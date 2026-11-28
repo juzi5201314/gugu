@@ -73,6 +73,30 @@ pub(super) fn invoke_compiled(
 }
 
 #[test]
+fn hello_fixture_uses_standard_output_on_linux_and_windows() {
+    for target in [TargetName::X86_64Linux, TargetName::X86_64Windows] {
+        let compiled = Compiler::shared().compile_to_lir(CompileRequest::single_file(
+            "main.gg",
+            include_str!("../../../../ci/e2e/fixtures/hello.gg"),
+            target,
+        ));
+        assert!(
+            compiled.is_success(),
+            "{target}: {:?}",
+            compiled.diagnostics().items()
+        );
+        assert_eq!(
+            invoke_compiled(&compiled, "main", &[], 262144),
+            vec![(
+                1,
+                include_bytes!("../../../../ci/e2e/fixtures/hello.stdout").to_vec()
+            )],
+            "{target} 必须沿标准输出边界写出同一字节序列"
+        );
+    }
+}
+
+#[test]
 fn print_and_write_retry_contracts() {
     let source = r#"
 use std.io.{print, println, eprint, eprintln}

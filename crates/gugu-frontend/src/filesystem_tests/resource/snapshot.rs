@@ -57,6 +57,68 @@ fn windows_aligned_reservation_contracts() {
     windows_aligned_metadata_commit_failure_releases_unpublished_reservation();
 }
 
+#[test]
+fn native_reservations_round_lengths_and_account_a64_boot_pages() {
+    // A64 artifact 尚未录制函数表，须从同目标的物化前端表生成一次真实 LIR。
+    let output = Compiler::shared().compile_to_lir(CompileRequest::single_file(
+        "main.gg",
+        include_str!("../fixtures/native_memory.gg"),
+        TargetName::Aarch64Linux,
+    ));
+    assert!(output.is_success(), "{:?}", output.diagnostics().items());
+    for page in [4096_u64, 16384, 65536] {
+        let mut harness = ResourceHarness::new(&output);
+        let mut memory = vec![0; 16384];
+        put(&mut memory, HOT + 16, PROCESSOR);
+        harness.run(
+            "native_memory",
+            "adopt_native_page_size",
+            &[page],
+            &mut memory,
+        );
+        harness.run(
+            "native_memory",
+            "adopt_boot",
+            &[PROCESSOR, 1 << 30, 65536, 0],
+            &mut memory,
+        );
+        let initial_reserved = (1 << 30) + 3 * page;
+        let initial_committed = 65536 + 3 * page;
+        assert_eq!(word(&memory, PROCESSOR + 3920), initial_reserved);
+        assert_eq!(word(&memory, PROCESSOR + 3928), initial_committed);
+        assert_eq!(word(&memory, PROCESSOR + 3936), 4);
+        assert_eq!(word(&memory, PROCESSOR + 3944), initial_committed);
+        // 默认 arena 的数据段、侧元数据、块记录与大对象表并非整页长度。
+        for (index, bytes) in [1, page + 1, 2_159_896].into_iter().enumerate() {
+            let base = 2_097_152 + index as u64 * 4_194_304;
+            let length = bytes.next_multiple_of(page);
+            harness.reserve_result = base;
+            assert_eq!(
+                harness.run(
+                    "native_memory",
+                    "reserve_aligned",
+                    &[bytes, 2_097_152],
+                    &mut memory,
+                ),
+                [base]
+            );
+            assert_eq!(harness.reserved.last(), Some(&(base, length)));
+            assert_eq!(word(&memory, PROCESSOR + 3920), initial_reserved + length);
+            assert_eq!(word(&memory, PROCESSOR + 3928), initial_committed);
+            assert_eq!(word(&memory, PROCESSOR + 3936), 5);
+            harness.run(
+                "native_memory",
+                "release_mapping",
+                &[base, bytes, 0],
+                &mut memory,
+            );
+            assert_eq!(harness.released.last(), Some(&(base, length)));
+            assert_eq!(word(&memory, PROCESSOR + 3920), initial_reserved);
+            assert_eq!(word(&memory, PROCESSOR + 3936), 4);
+        }
+    }
+}
+
 fn memory_snapshot_separates_uncommitted_reservation_and_file_subtotal() {
     let mut harness = runtime_harness();
     let mut memory = vec![0; 16384];

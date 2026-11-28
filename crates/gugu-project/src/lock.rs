@@ -10,6 +10,7 @@ use super::super::error::ProjectError;
 use super::dependency_model::{
     DependencyDomain, LockGraph, LockedDependency, LockedPackage, PackageId, PackageSource,
 };
+use super::has_windows_drive_prefix;
 use super::semver::Version;
 
 impl LockGraph {
@@ -118,6 +119,7 @@ fn validate_source(source: &PackageSource) -> Result<(), ProjectError> {
         PackageSource::Path { path }
             if path.is_empty()
                 || path.starts_with('/')
+                || has_windows_drive_prefix(path)
                 || path.contains('\\')
                 || path.contains('\0') =>
         {

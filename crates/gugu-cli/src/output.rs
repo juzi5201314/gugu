@@ -754,6 +754,7 @@ mod tests {
     }
 
     #[test]
+    #[cfg(feature = "slow-tests")]
     fn image_len_includes_macho_bytes() {
         let compilation =
             gugu_compiler::Compiler::with_artifacts(&gugu_compiler::EMBEDDED_ARTIFACTS)

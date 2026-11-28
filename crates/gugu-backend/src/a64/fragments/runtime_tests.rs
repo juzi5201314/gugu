@@ -14,6 +14,101 @@ use crate::runtime::processor::{PROCESSOR_STATE_OFFSET, PROCESSOR_SYSTEM_SLOT_OF
 const X9: Reg = Reg::x(9);
 const X10: Reg = Reg::x(10);
 
+fn startup_vm(operation: u64) -> linux_vm::Vm {
+    let mut vm = linux_vm::Vm::new(0, [0; 6]);
+    vm.registers[0] = operation;
+    vm.registers[1] = linux_vm::REQUEST;
+    for (offset, value) in [(0, operation), (8, 0x4000), (16, 256), (72, 999), (80, 999)] {
+        vm.put(linux_vm::REQUEST + offset, value, 8);
+    }
+    vm
+}
+
+#[test]
+fn linux_startup_getcwd_preserves_packet_and_writes_success_or_errno() {
+    let code = instructions(&linux_startup_call());
+    for result in [5, (-34_i64) as u64] {
+        let mut vm = startup_vm(0);
+        let mut calls = 0;
+        let status = vm.run_result(&code, |vm| {
+            assert_eq!(vm.registers[8], 17);
+            assert_eq!(&vm.registers[..2], &[0x4000, 256]);
+            calls += 1;
+            vm.registers[0] = result;
+        });
+        let error = if result == 5 { 0 } else { 34 };
+        assert_eq!(calls, 1);
+        assert_eq!(status, error);
+        assert_eq!(
+            vm.read(linux_vm::REQUEST + 72, 8),
+            if error == 0 { 5 } else { 0 }
+        );
+        assert_eq!(vm.read(linux_vm::REQUEST + 80, 8), error);
+        assert_eq!(vm.read(linux_vm::REQUEST + 8, 8), 0x4000);
+        assert_eq!(vm.read(linux_vm::REQUEST + 16, 8), 256);
+    }
+}
+
+#[test]
+fn darwin_startup_getcwd_preserves_packet_across_clobbered_callers() {
+    const POISON: u64 = 0xDEAD_5EED_0BAD_F00D;
+    let fragment = darwin_startup_call();
+    let code = instructions(&fragment);
+    for success in [true, false] {
+        let mut vm = startup_vm(0);
+        let caller_sp = vm.registers[31];
+        vm.put(caller_sp, 0xABCDEF, 8);
+        let mut calls = 0;
+        let status = vm.run_calls(&code, |vm, pc| {
+            let target = &fragment
+                .relocations
+                .iter()
+                .find(|site| u64::from(site.offset) == pc)
+                .unwrap()
+                .relocation
+                .target;
+            if calls == 0 {
+                assert_eq!(target, &import_stub_symbol("getcwd"));
+                assert_eq!(&vm.registers[..2], &[0x4000, 256]);
+                vm.registers[0] = if success { 0x4000 } else { 0 };
+            } else {
+                assert_eq!(calls, 1);
+                assert!(!success);
+                assert_eq!(target, &import_stub_symbol("__error"));
+                vm.put(0x6000, 34, 4);
+                vm.registers[0] = 0x6000;
+            }
+            vm.registers[1..19].fill(POISON);
+            vm.registers[30] = POISON;
+            calls += 1;
+        });
+        let error = if success { 0 } else { 34 };
+        assert_eq!(calls, if success { 1 } else { 2 });
+        assert_eq!(status, error);
+        assert_eq!(
+            vm.read(linux_vm::REQUEST + 72, 8),
+            if success { 0x4000 } else { 0 }
+        );
+        assert_eq!(vm.read(linux_vm::REQUEST + 80, 8), error);
+        assert_eq!(vm.read(caller_sp, 8), 0xABCDEF);
+    }
+}
+
+#[test]
+fn startup_unsupported_operation_returns_through_the_same_saved_frame() {
+    for (fragment, error) in [(linux_startup_call(), 95), (darwin_startup_call(), 45)] {
+        let mut vm = startup_vm(1);
+        assert_eq!(
+            vm.run_result(&instructions(&fragment), |_| panic!(
+                "未支持操作不得系统调用"
+            )),
+            error
+        );
+        assert_eq!(vm.read(linux_vm::REQUEST + 72, 8), 0);
+        assert_eq!(vm.read(linux_vm::REQUEST + 80, 8), error);
+    }
+}
+
 fn branch(fragment: &Fragment, kind: RelocKind, name: &str, addend: i64) {
     assert_eq!(fragment.relocations.len(), 1);
     let fixup = &fragment.relocations[0];
