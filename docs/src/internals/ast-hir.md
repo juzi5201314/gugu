@@ -412,6 +412,8 @@ HIR 节点本体不复制完整类型。每个 owner 的 `expression_inputs` 与
 
 HIR只固定哪些源码位置必须共享及其访问摘要，不决定 stack/heap或把只读值复制进环境。`EscapeAndPlacement`依据该计划选择 direct value、parent-environment projection或 shared slot；无论选择什么，都必须满足[函数与闭包](../spec/functions.md#capture-semantics)这一唯一公开语义。
 
+GIR 在捕获绑定的动态声明点发射 `StorageLive`，由 LIR 在该点分配新的 cell；闭包环境继续引用创建时取得的 cell。普通 `let` 的分配先于初始化表达式，以保留递归闭包的自身绑定；循环、条件与匹配模式在各自的绑定路径分配。or-pattern 的各备选共享同一组绑定 ID，因此只从一个备选收集槽，不能重复激活。range `for` 使用独立的内部游标，在每轮进入循环体时写入新的模式绑定，推进游标不得改写已捕获的迭代值。捕获自父环境的槽和参数保持入口绑定。
+
 ### 清理计划
 
 每个 owner 保存两张连续表 `cleanup_plans: Vec<CleanupPlan>` 与 `cleanup_actions: Vec<CleanupAction>`，为每个控制流出口给出按[表达式规范](../spec/expressions.md#return-loop-exit-defer)排好序的动作序列。GIR 只能消费这些计划，不得按 `return`、panic 或循环种类重新推导动作：

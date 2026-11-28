@@ -4,6 +4,7 @@ mod a64_image;
 mod array_init;
 mod bench;
 mod collections;
+mod concurrency;
 mod const_generics;
 mod copy;
 mod debug_builders;

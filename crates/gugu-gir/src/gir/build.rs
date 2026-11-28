@@ -378,6 +378,15 @@ impl<'a> Builder<'a> {
     fn live_entry_locals(&mut self) {
         let live_ids: Vec<LocalId> = (0..self.locals.len())
             .filter(|&index| {
+                let local = &self.locals[index];
+                if local.kind == LocalKind::User && local.pinned_storage {
+                    return local.hir_local.is_some_and(|local| {
+                        self.owner
+                            .captures
+                            .iter()
+                            .any(|capture| capture.local == local)
+                    });
+                }
                 matches!(
                     self.locals[index].kind,
                     LocalKind::Return | LocalKind::Argument | LocalKind::User
@@ -421,6 +430,18 @@ impl<'a> Builder<'a> {
         }
         self.push_stmt(StatementKind::StorageLive(local));
         self.live[local.index()] = true;
+    }
+
+    fn start_pattern_storage(&mut self, pattern: hir::PatternId) {
+        for local in binds(self.owner, pattern) {
+            let local = self.hir_to_gir[local.index()];
+            if self.locals[local.index()].pinned_storage {
+                // 每次执行声明都是新的绑定；旧 cell 由已构造的闭包继续持有。
+                self.push_stmt(StatementKind::StorageLive(local));
+                self.live[local.index()] = true;
+                self.written[local.index()] = PlaceInit::Unwritten;
+            }
+        }
     }
 
     fn dead_local(&mut self, local: LocalId) {
@@ -819,9 +840,14 @@ fn collect_binds(owner: &hir::Owner, pattern: hir::PatternId, out: &mut Vec<hir:
     match &owner.patterns[pattern.index()].kind {
         hir::PatternKind::Bind(local) | hir::PatternKind::At { local, .. } => out.push(*local),
         hir::PatternKind::Ref(inner) => collect_binds(owner, *inner, out),
-        hir::PatternKind::Tuple(range) | hir::PatternKind::Or(range) => {
+        hir::PatternKind::Tuple(range) => {
             for id in &owner.pattern_ids[range.start as usize..range.end as usize] {
                 collect_binds(owner, *id, out);
+            }
+        }
+        hir::PatternKind::Or(range) => {
+            if let Some(pattern) = owner.pattern_ids.get(range.start as usize) {
+                collect_binds(owner, *pattern, out);
             }
         }
         hir::PatternKind::Array {

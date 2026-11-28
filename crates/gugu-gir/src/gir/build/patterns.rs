@@ -24,6 +24,7 @@ impl Builder<'_> {
             self.switch_to(ok);
             // 绑定先于守卫：守卫读取模式绑定，绑定必须已在当前块定义；
             // 语义层（checker::flow::matching）同样以绑定先行。
+            self.start_pattern_storage(arm.pattern);
             self.bind_pattern(place, arm.pattern)?;
             if let Some(guard) = arm.guard {
                 let Some(cond) = self.emit_expr(guard)? else {

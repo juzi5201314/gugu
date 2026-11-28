@@ -329,6 +329,10 @@ result写入Release，恢复coroutine以Acquire取得后读取。一个wait gene
 
 ## `select` 提交
 
+GIR lowering 为每个当前 `select` 的候选保存其结果 place、模式和分支 body，按排除 default 后的候选序号生成 ready 分派。操作数求值完成后，才把当前候选连续追加到 owner 的 case 池；操作数中嵌套的 `select` 拥有独立范围。不得在整函数的 case 表中用局部 arm 编号查找首个匹配，否则后续和嵌套 `select` 会读到别次操作的结果。
+
+镜像内无缓冲 channel 的等待节点用 `flags` 记录本次配对是否完成：初始化为 0，发送/接收完成载荷复制后写 1，再唤醒。`park_on` 恢复后读取该节点状态；close 只排空并唤醒尚在队列中的节点，不改写已配对节点的成功状态。缓冲 channel 恢复后继续重查 ring 与关闭状态。
+
 每个 channel/Join 控制块创建时取得单调 `WaitSourceId(u64)`；GC 地址移动不改变该 ID。一次 `select` 先按源码顺序完成 HIR/GIR规定的一次求值，把 source、send payload、result slot和 barrier需求物化为稳定 case record。任何 scratch增长、随机采样、source排序和可能触发 barrier refill的 reservation都发生在取得 source锁前；持锁机器区间必须由 `NoSafepointRegion`标记并接受同一 `POLL_BUDGET`验证。
 
 HIR把无 case且无 default的形式标为 `SelectPlan::Never`。scheduler对此不生成 source锁或随机取模，只通过专用 never wait记录把 coroutine置 Waiting；该记录没有普通 waker，何时因 runtime终止而不再执行只消费 `TerminationPlan`。只有至少一个非 default case时才进入下述算法。

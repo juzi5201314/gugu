@@ -1,5 +1,10 @@
 use super::*;
 
+struct ReadyArm {
+    body: ExprId,
+    binding: Option<(Place, hir::PatternId)>,
+}
+
 impl Builder<'_> {
     pub(super) fn emit_chan_send(
         &mut self,
@@ -167,7 +172,7 @@ impl Builder<'_> {
     ) -> Result<Option<LocalId>, Diagnostic> {
         let dest = self.temp(self.expr_ty(id));
         let index = self.temp(self.int_ty());
-        let start = self.select_cases.len() as u32;
+        let mut cases = Vec::new();
         let mut has_send = false;
         let mut default = None;
         let mut ready_arms = Vec::new();
@@ -190,15 +195,18 @@ impl Builder<'_> {
                         return Ok(None);
                     };
                     let sent = self.pass_arg(*value, payload);
-                    self.select_cases.push(SelectCase {
+                    cases.push(SelectCase {
                         operation: SelectOperation::Send {
                             channel: copy_of(channel),
                             value: sent,
                         },
                         destination: None,
-                        arm: arm_index as u32,
+                        arm: arms.start + arm_index as u32,
                     });
-                    ready_arms.push(*body);
+                    ready_arms.push(ReadyArm {
+                        body: *body,
+                        binding: None,
+                    });
                 }
                 hir::SelectArm::Recv {
                     channel,
@@ -209,14 +217,17 @@ impl Builder<'_> {
                         return Ok(None);
                     };
                     let slot = self.temp(self.owner.patterns[pattern.index()].ty);
-                    self.select_cases.push(SelectCase {
+                    cases.push(SelectCase {
                         operation: SelectOperation::Recv {
                             channel: copy_of(channel),
                         },
                         destination: Some(Place::local(slot)),
-                        arm: arm_index as u32,
+                        arm: arms.start + arm_index as u32,
                     });
-                    ready_arms.push(*body);
+                    ready_arms.push(ReadyArm {
+                        body: *body,
+                        binding: Some((Place::local(slot), *pattern)),
+                    });
                 }
                 hir::SelectArm::Wait {
                     join,
@@ -227,17 +238,23 @@ impl Builder<'_> {
                         return Ok(None);
                     };
                     let slot = self.temp(self.owner.patterns[pattern.index()].ty);
-                    self.select_cases.push(SelectCase {
+                    cases.push(SelectCase {
                         operation: SelectOperation::Wait {
                             join: copy_of(join),
                         },
                         destination: Some(Place::local(slot)),
-                        arm: arm_index as u32,
+                        arm: arms.start + arm_index as u32,
                     });
-                    ready_arms.push(*body);
+                    ready_arms.push(ReadyArm {
+                        body: *body,
+                        binding: Some((Place::local(slot), *pattern)),
+                    });
                 }
             }
         }
+        // 操作数自身可以包含 select；本次 case 必须在它们完成后连续追加。
+        let start = self.select_cases.len() as u32;
+        self.select_cases.extend(cases);
         let ready = self.fresh(false);
         let join = self.fresh(false);
         let suspend = default.is_none().then(|| self.fresh(false));
@@ -266,31 +283,22 @@ impl Builder<'_> {
         &mut self,
         dest: LocalId,
         index: LocalId,
-        ready_arms: &[ExprId],
+        ready_arms: &[ReadyArm],
         default: Option<ExprId>,
         join: BlockId,
     ) -> Result<(), Diagnostic> {
         let mut targets = Vec::new();
         let otherwise = self.fresh(false);
-        for (arm_index, body) in ready_arms.iter().enumerate() {
+        for (arm_index, arm) in ready_arms.iter().enumerate() {
             let block = self.fresh(false);
             targets.push((arm_index as u128, block));
             let saved = self.current;
             self.current = block;
-            if let Some(case) = self
-                .select_cases
-                .iter()
-                .find(|case| case.arm == arm_index as u32)
-                && let Some(place) = case.destination
-            {
-                let arm = &self.owner.select_arms[case.arm as usize];
-                if let hir::SelectArm::Recv { pattern, .. } | hir::SelectArm::Wait { pattern, .. } =
-                    arm
-                {
-                    self.bind_pattern(place, *pattern)?;
-                }
+            if let Some((place, pattern)) = arm.binding {
+                self.start_pattern_storage(pattern);
+                self.bind_pattern(place, pattern)?;
             }
-            if let Some(value) = self.emit_expr(*body)? {
+            if let Some(value) = self.emit_expr(arm.body)? {
                 self.copy_value(
                     Place::local(dest),
                     Place::local(value),

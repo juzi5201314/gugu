@@ -5,6 +5,7 @@ use crate::lir::body::{Body, CallTarget, Op, Symbol};
 
 mod admission;
 mod callback;
+mod channel;
 mod collection;
 mod directory;
 mod foreign;

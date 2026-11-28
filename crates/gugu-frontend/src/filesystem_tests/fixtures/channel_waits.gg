@@ -1,0 +1,10 @@
+fn main() {
+    let channel = chan[int](0)
+    let sender = async {
+        channel.send(42)
+        channel.close()
+    }
+    _ = channel.recv()
+    _ = channel.try_send(7)
+    _ = sender.wait()
+}

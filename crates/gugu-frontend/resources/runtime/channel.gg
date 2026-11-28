@@ -161,8 +161,8 @@ pub fn channel_new(capacity: int, desc: *()) uint {
 pub fn channel_close(handle: uint) {
     if word(handle + 24) != 0 { panic("close on closed channel") }
     store_word(handle + 24, 1)
-    wake_node(pop_queue(handle + 56))
-    wake_node(pop_queue(handle + 64))
+    while word(handle + 56) != 0 { wake_node(pop_queue(handle + 56)) }
+    while word(handle + 64) != 0 { wake_node(pop_queue(handle + 64)) }
 }
 
 fn deliver(control: uint, src: uint, dst: uint) {
@@ -173,6 +173,7 @@ fn try_rendezvous_send(control: uint, payload: uint) byte {
     let node = pop_queue(control + 64)
     if node == 0 { return 0 }
     deliver(control, payload, word(node + 40))
+    store_word(node + 56, 1)
     wake_node(node)
     1
 }
@@ -212,11 +213,13 @@ fn enqueue_value(control: uint, payload: uint, desc: uint) byte {
     1
 }
 
-fn park_on(control: uint, queue: uint, payload: uint, result: uint) {
+fn park_on(control: uint, queue: uint, payload: uint, result: uint) byte {
     let hot = current_hot()
     let node = alloc_node(proc_of(hot), hot, payload, result, 0)
     push_queue(queue, node)
     park_current()
+    // 成功交付属于本次等待；关闭状态不能覆盖已经完成的会合。
+    byte(word(node + 56))
 }
 
 #[used]
@@ -226,12 +229,11 @@ pub fn channel_send(handle: uint, payload: *(), desc: *()) byte {
     if word(handle + 24) != 0 { return 0 }
     if word(handle + 16) == 0 {
         if try_rendezvous_send(handle, src) == 1 { return 1 }
-        park_on(handle, handle + 56, src, 0)
-        return 1
+        return park_on(handle, handle + 56, src, 0)
     }
     while enqueue_value(handle, src, roots) == 0 {
         if word(handle + 24) != 0 { return 0 }
-        park_on(handle, handle + 56, src, 0)
+        _ = park_on(handle, handle + 56, src, 0)
         if word(handle + 24) != 0 { return 0 };
     }
     1
@@ -265,16 +267,16 @@ pub fn channel_receive(handle: uint, payload: *(), desc: *()) byte {
         let node = pop_queue(handle + 56)
         if node != 0 {
             deliver(handle, word(node + 32), dst)
+            store_word(node + 56, 1)
             wake_node(node)
             return 1
         }
         if word(handle + 24) != 0 { return 0 }
-        park_on(handle, handle + 64, 0, dst)
-        return 1
+        return park_on(handle, handle + 64, 0, dst)
     }
     while dequeue_value(handle, dst) == 0 {
         if word(handle + 24) != 0 { return 0 }
-        park_on(handle, handle + 64, 0, dst)
+        _ = park_on(handle, handle + 64, 0, dst)
     }
     1
 }
@@ -299,6 +301,7 @@ pub fn channel_try_recv(handle: uint, payload: *(), desc: *()) byte {
         let node = pop_queue(handle + 56)
         if node != 0 {
             deliver(handle, word(node + 32), dst)
+            store_word(node + 56, 1)
             wake_node(node)
             return 1
         }

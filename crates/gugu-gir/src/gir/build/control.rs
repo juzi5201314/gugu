@@ -80,6 +80,7 @@ impl Builder<'_> {
         value: Option<ExprId>,
         otherwise: Option<ExprId>,
     ) -> Result<(), Diagnostic> {
+        self.start_pattern_storage(pattern);
         let Some(value) = value else {
             if let hir::PatternKind::Bind(local) = self.owner.patterns[pattern.index()].kind {
                 let local = self.hir_to_gir[local.index()];
@@ -283,6 +284,7 @@ impl Builder<'_> {
             unwind,
         )?;
         let dest = self.hir_to_gir[local.index()];
+        self.live_local(dest);
         let ptr = self.intrinsic_temp(
             IntrinsicOp::StaticRef(definition),
             Vec::new(),
@@ -407,6 +409,7 @@ impl Builder<'_> {
                 };
                 self.emit_pattern_test(Place::local(local), pattern, ok, fail)?;
                 self.switch_to(ok);
+                self.start_pattern_storage(pattern);
                 self.bind_pattern(Place::local(local), pattern)?;
                 Ok(Some(()))
             }
@@ -594,6 +597,7 @@ impl Builder<'_> {
                 access: Access::Normal,
             },
         );
+        self.start_pattern_storage(pattern);
         self.bind_pattern(payload, pattern)?;
         self.loops.push(LoopFrame {
             scope,
@@ -632,7 +636,7 @@ impl Builder<'_> {
         let Some(end_local) = self.emit_expr(end)? else {
             return Ok(Some(None));
         };
-        let iv = self.hir_to_gir[local.index()];
+        let iv = self.temp(self.owner.locals[local.index()].ty);
         self.assign_copy(Place::local(iv), start_local);
         let plans = match &self.owner.expressions[id.index()].kind {
             hir::ExprKind::For {
@@ -661,6 +665,8 @@ impl Builder<'_> {
             otherwise: exit,
         });
         self.switch_to(body_block);
+        self.start_pattern_storage(pattern);
+        self.bind_pattern(Place::local(iv), pattern)?;
         let init_depth = self.init_stores.len();
         for plan in &plans {
             self.init_stores.push(plan.store);
@@ -744,6 +750,7 @@ impl Builder<'_> {
             place
         };
         let element = self.project(base, Projection::Index(index));
+        self.start_pattern_storage(pattern);
         self.bind_pattern(element, pattern)?;
         self.loops.push(LoopFrame {
             scope: self.expr_scope(id),

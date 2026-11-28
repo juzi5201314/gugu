@@ -1,0 +1,90 @@
+fn sequential() int {
+    let a = chan[int](1)
+    select {
+        let v = a.recv() => { _ = v }
+        _ => {}
+    }
+    a.send(42)
+    select {
+        let v = a.recv() => match v {
+            Ok(x) => x
+            Err(_) => -1
+        }
+        _ => -2
+    }
+}
+
+fn repeated() int {
+    let a = chan[int](1)
+    let total = 0
+    for expected in [1, 2, 3] {
+        a.send(expected)
+        select {
+            let v = a.recv() => match v {
+                Ok(x) => { total = total * 10 + x }
+                Err(_) => {}
+            }
+            _ => {}
+        }
+    }
+    total
+}
+
+fn nested() int {
+    let a = chan[int](1)
+    let b = chan[int](1)
+    a.send(2)
+    b.send(3)
+    select {
+        _ => -1
+        let v = a.recv() => match v {
+            Ok(x) => select {
+                let w = b.recv() => match w {
+                    Ok(y) => x * 10 + y
+                    Err(_) => -2
+                }
+            }
+            Err(_) => -3
+        }
+    }
+}
+
+fn waited(h: Join[int]) int {
+    let a = chan[int](1)
+    select {
+        let v = a.recv() => { _ = v }
+        _ => {}
+    }
+    select {
+        let v = h.wait() => match v {
+            Ok(x) => x
+            Err(_) => -1
+        }
+    }
+}
+
+fn nested_operand() int {
+    let a = chan[int](1)
+    let b = chan[int](1)
+    b.send(42)
+    select {
+        a.send(select {
+            let value = b.recv() => match value {
+                Ok(x) => x
+                Err(_) => -1
+            }
+        }) => {}
+    }
+    match a.recv() {
+        Ok(x) => x
+        Err(_) => -2
+    }
+}
+
+fn main() {
+    _ = sequential()
+    _ = repeated()
+    _ = nested()
+    _ = waited(async { 77 })
+    _ = nested_operand()
+}

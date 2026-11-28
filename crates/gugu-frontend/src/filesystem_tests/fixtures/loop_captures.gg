@@ -1,0 +1,60 @@
+fn closures() int {
+    let fs: Vec[fn(int) int] = Vec::new()
+    for i in 0..3 {
+        let k = i * 10
+        fs.push(fn(x: int) int = x + k)
+    }
+    let total = 0
+    for f in fs { total += f(1) }
+    total
+}
+
+fn async_slots() int {
+    let hs = Vec::new()
+    let values = [0; 3]
+    for i in 0..3 {
+        hs.push(async { values[i] = i })
+    }
+    for h in hs { _ = h.wait() }
+    values[0] + values[1] + values[2]
+}
+
+fn shared_outer() int {
+    let fs: Vec[fn() int] = Vec::new()
+    let shared = 0
+    for i in [1, 2, 3] {
+        fs.push(fn() int {
+            shared += i
+            shared
+        })
+    }
+    let total = 0
+    for f in fs { total += f() }
+    total + shared
+}
+
+fn static_closure() fn() int {
+    static value: int = 7
+    fn() int = value
+}
+
+fn or_pattern() int {
+    let fs: Vec[fn() int] = Vec::new()
+    for i in 0..2 {
+        match i {
+            x @ 0 | x @ 1 => { fs.push(fn() int = x) }
+            _ => {}
+        }
+    }
+    let total = 0
+    for f in fs { total += f() }
+    total
+}
+
+fn main() {
+    _ = closures()
+    _ = async_slots()
+    _ = shared_outer()
+    _ = static_closure()
+    _ = or_pattern()
+}
