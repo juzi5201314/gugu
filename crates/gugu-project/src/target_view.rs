@@ -87,7 +87,11 @@ fn validate_relative_path(path: &Path) -> Result<(), CacheError> {
     let text = path
         .to_str()
         .ok_or_else(|| invalid_error(path, "target 产物路径不是 UTF-8"))?;
-    if text.is_empty() || text.len() > 4096 || text.contains('\0') || text.contains('\\') {
+    if text.is_empty()
+        || text.len() > 4096
+        || text.contains('\0')
+        || (!cfg!(windows) && text.contains('\\'))
+    {
         return Err(invalid_error(path, "路径不是规范相对路径"));
     }
     if path.components().any(|component| {

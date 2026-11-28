@@ -799,7 +799,7 @@ impl std::error::Error for SourceMapError {}
 /// 把 package-relative 路径规范化为 `/` 分隔、不含 `.` 与 `..` 的逻辑路径。
 pub fn normalize_logical_path(path: &Path) -> Result<String, SourceError> {
     let original = path.to_string_lossy().into_owned();
-    if path.as_os_str().is_empty() || original.contains('\\') {
+    if path.as_os_str().is_empty() || (!cfg!(windows) && original.contains('\\')) {
         return Err(SourceError::InvalidPath { path: original });
     }
     let mut components: Vec<&str> = Vec::new();
@@ -963,7 +963,16 @@ mod tests {
             normalize_logical_path(Path::new("src/main.gg")).as_deref(),
             Ok("src/main.gg")
         );
-        for invalid in ["/abs/main.gg", "../escape.gg", "src\\main.gg", ""] {
+        let native = Path::new("src").join("main.gg");
+        assert_eq!(
+            normalize_logical_path(&native).as_deref(),
+            Ok("src/main.gg")
+        );
+        assert_eq!(
+            normalize_logical_path(Path::new("src\\main.gg")).is_ok(),
+            cfg!(windows)
+        );
+        for invalid in ["/abs/main.gg", "../escape.gg", ""] {
             assert!(
                 normalize_logical_path(Path::new(invalid)).is_err(),
                 "`{invalid}` 必须被拒绝"

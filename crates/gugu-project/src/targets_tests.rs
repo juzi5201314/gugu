@@ -7,6 +7,28 @@ use super::super::{
 use super::*;
 
 #[test]
+fn target_entry_accepts_host_separators_and_rejects_traversal() {
+    let directory = TempDir::new().unwrap();
+    let root = package(
+        &directory,
+        "demo",
+        "[package]\nname = \"demo\"\nversion = \"0.1.0\"\n",
+        &[("tests/basic.gg", "fn checks() {}\n")],
+    );
+    let manifest = root.join("gugu.toml");
+    let native = Path::new("tests").join("basic.gg");
+    assert_eq!(
+        resolve_entry(&root, &native, &manifest).unwrap(),
+        root.join(&native)
+    );
+    assert_eq!(
+        resolve_entry(&root, Path::new("tests\\basic.gg"), &manifest).is_ok(),
+        cfg!(windows)
+    );
+    assert!(resolve_entry(&root, Path::new("tests/../tests/basic.gg"), &manifest).is_err());
+}
+
+#[test]
 fn discovers_single_package_targets() {
     let root = TempDir::new().expect("tempdir");
     let package = package(

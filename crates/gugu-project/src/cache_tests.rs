@@ -263,12 +263,17 @@ fn action_key_contains_all_inputs_and_is_order_independent() {
 fn target_view_rejects_traversal_and_writes_artifacts_atomically() {
     let root = TempDir::new().expect("target root");
     let view = TargetView::new(root.path());
-    let artifact = TargetArtifact::new("bin/app", b"image".to_vec()).expect("artifact");
+    let artifact =
+        TargetArtifact::new(Path::new("bin").join("app"), b"image".to_vec()).expect("宿主路径产物");
     let paths = view
         .materialize("x86_64-linux", &[artifact])
         .expect("materialize target");
     assert_eq!(std::fs::read(&paths[0]).expect("read artifact"), b"image");
     assert!(TargetArtifact::new("../escape", Vec::new()).is_err());
+    assert_eq!(
+        TargetArtifact::new("bin\\app", Vec::new()).is_ok(),
+        cfg!(windows)
+    );
     assert!(view.materialize("../escape", &[]).is_err());
     assert!(!root.path().join("x86_64-linux/bin/app.tmp").exists());
 }
