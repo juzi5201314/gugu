@@ -1,20 +1,23 @@
 use gugu_compiler::{CompileRequest, Compiler, EMBEDDED_ARTIFACTS, Severity, TargetName};
 
-fn compile(request: CompileRequest) -> gugu_compiler::Compilation {
-    Compiler::with_artifacts(&EMBEDDED_ARTIFACTS).compile(request)
+fn compile(compiler: &Compiler, request: CompileRequest) -> gugu_compiler::Compilation {
+    compiler.compile_sema_for_test(request)
 }
 
-fn single_file(source: &str) -> gugu_compiler::Compilation {
-    compile(CompileRequest::single_file(
-        "main.gg",
-        source,
-        TargetName::X86_64Linux,
-    ))
+fn single_file(compiler: &Compiler, source: &str) -> gugu_compiler::Compilation {
+    compile(
+        compiler,
+        CompileRequest::single_file("main.gg", source, TargetName::X86_64Linux),
+    )
 }
 
 #[test]
-fn doc_world_collects_public_api() {
+fn doc_world_and_missing_docs_contracts() {
+    let compiler = Compiler::with_artifacts(&EMBEDDED_ARTIFACTS);
+
+    // 1. 公共 API 收集与成员过滤。
     let output = single_file(
+        &compiler,
         "//! 模块文档\n\
          /// 加一。\n\
          /// 细节第二行。\n\
@@ -49,7 +52,6 @@ fn doc_world_collects_public_api() {
         .find(|item| item.name == "Point")
         .expect("缺少 Point 项");
     assert_eq!(point.kind, "struct");
-    // 公开字段进入成员表，私有字段被过滤。
     assert!(point.members.iter().any(|member| member.name == "x"));
     assert!(!point.members.iter().any(|member| member.name == "y"));
     assert!(
@@ -59,16 +61,13 @@ fn doc_world_collects_public_api() {
             .any(|item| item.name == "private_helper"),
         "私有项不得进入文档"
     );
-    // `pub struct Hidden` 未写文档，仍收录但会触发 missing_docs。
     assert!(module.items.iter().any(|item| item.name == "Hidden"));
     assert_eq!(module.source_path.as_str(), "main.gg");
-}
 
-#[test]
-fn missing_docs_warns_by_default() {
-    let output = single_file("pub fn undocumented() {}\nfn main() {}\n");
-    assert!(output.is_success(), "{:?}", output.diagnostics().items());
-    let warning = output
+    // 2. 默认 missing_docs 警告与位置。
+    let warned = single_file(&compiler, "pub fn undocumented() {}\nfn main() {}\n");
+    assert!(warned.is_success(), "{:?}", warned.diagnostics().items());
+    let warning = warned
         .diagnostics()
         .items()
         .iter()
@@ -78,11 +77,12 @@ fn missing_docs_warns_by_default() {
     assert!(warning.message().contains("缺少"), "{}", warning.message());
     let span = warning.span().expect("lint 必须带位置");
     assert_eq!(span.line(), 1);
-}
 
-#[test]
-fn missing_docs_respects_lint_levels() {
-    let allowed = single_file("#![allow(missing_docs)]\npub fn f() {}\nfn main() {}\n");
+    // 3. allow / deny 级别切换。
+    let allowed = single_file(
+        &compiler,
+        "#![allow(missing_docs)]\npub fn f() {}\nfn main() {}\n",
+    );
     assert!(
         !allowed
             .diagnostics()
@@ -91,8 +91,10 @@ fn missing_docs_respects_lint_levels() {
             .any(|diagnostic| diagnostic.code().to_string() == "E0063"),
         "allow(missing_docs) 后不得报告 E0063"
     );
-
-    let denied = single_file("#![deny(missing_docs)]\npub fn f() {}\nfn main() {}\n");
+    let denied = single_file(
+        &compiler,
+        "#![deny(missing_docs)]\npub fn f() {}\nfn main() {}\n",
+    );
     assert!(!denied.is_success());
     let error = denied
         .diagnostics()
@@ -101,11 +103,10 @@ fn missing_docs_respects_lint_levels() {
         .find(|diagnostic| diagnostic.code().to_string() == "E0063")
         .expect("deny 后必须报告 E0063");
     assert_eq!(error.severity(), Severity::Error);
-}
 
-#[test]
-fn missing_docs_covers_public_members() {
-    let output = single_file(
+    // 4. 公开字段与 trait 方法成员覆盖。
+    let members = single_file(
+        &compiler,
         "#![deny(missing_docs)]\n\
          /// 有文档。\n\
          pub struct S {\n    pub field: int\n}\n\
@@ -113,8 +114,8 @@ fn missing_docs_covers_public_members() {
          pub trait T {\n    fn method(self: &Self)\n}\n\
          fn main() {}\n",
     );
-    assert!(!output.is_success(), "{:?}", output.diagnostics().items());
-    let missing: Vec<String> = output
+    assert!(!members.is_success(), "{:?}", members.diagnostics().items());
+    let missing: Vec<String> = members
         .diagnostics()
         .items()
         .iter()
@@ -129,19 +130,18 @@ fn missing_docs_covers_public_members() {
         missing.iter().any(|message| message.contains("method")),
         "{missing:?}"
     );
-}
 
-#[test]
-fn doctest_error_reanchors_to_fence() {
-    // 围栏开在 `/// ```gugu` 行（第 2 行）；生成模块中的语义错误必须
-    // 重锚定回围栏位置并给出宏展开链 note。
-    let output = compile(CompileRequest::single_file_test(
-        "main.gg",
-        "/// 文档。\n/// ```gugu\n/// nope()\n/// ```\npub fn f() {}\nfn main() {}\n",
-        TargetName::X86_64Linux,
-    ));
-    assert!(!output.is_success());
-    let error = output
+    // 5. doctest 错误回锚定与宏展开链 note。
+    let doctest_err = compile(
+        &compiler,
+        CompileRequest::single_file_test(
+            "main.gg",
+            "/// 文档。\n/// ```gugu\n/// nope()\n/// ```\npub fn f() {}\nfn main() {}\n",
+            TargetName::X86_64Linux,
+        ),
+    );
+    assert!(!doctest_err.is_success());
+    let error = doctest_err
         .diagnostics()
         .items()
         .iter()
@@ -151,28 +151,32 @@ fn doctest_error_reanchors_to_fence() {
     assert_eq!(span.path().to_str().unwrap_or(""), "main.gg", "{span:?}");
     assert_eq!(span.line(), 2, "错误必须锚定到围栏行：{span:?}");
     assert!(
-        output
+        doctest_err
             .diagnostics()
             .items()
             .iter()
             .any(|diagnostic| diagnostic.severity() == Severity::Note
                 && diagnostic.message().contains("宏调用位置")),
         "必须给出宏展开链 note：{:?}",
-        output.diagnostics().items()
+        doctest_err.diagnostics().items()
     );
-}
 
-#[test]
-fn generated_doctest_module_skips_missing_docs() {
-    // doctest 生成模块自身不带文档头，但 generated 模块不得触发 missing_docs。
-    let output = compile(CompileRequest::single_file_test(
-        "main.gg",
-        "//! 主模块文档\n/// 文档。\n/// ```gugu\n/// if 1 != 1 { panic(\"x\") }\n/// ```\npub fn f() {}\nfn main() {}\n",
-        TargetName::X86_64Linux,
-    ));
-    assert!(output.is_success(), "{:?}", output.diagnostics().items());
+    // 6. 生成的 doctest 模块不触发 missing_docs。
+    let doctest_ok = compile(
+        &compiler,
+        CompileRequest::single_file_test(
+            "main.gg",
+            "//! 主模块文档\n/// 文档。\n/// ```gugu\n/// if 1 != 1 { panic(\"x\") }\n/// ```\npub fn f() {}\nfn main() {}\n",
+            TargetName::X86_64Linux,
+        ),
+    );
     assert!(
-        !output
+        doctest_ok.is_success(),
+        "{:?}",
+        doctest_ok.diagnostics().items()
+    );
+    assert!(
+        !doctest_ok
             .diagnostics()
             .items()
             .iter()

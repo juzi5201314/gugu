@@ -3,7 +3,7 @@
 //! 位置只消费分配结果与编码后的指令边界，不重新推导寄存器。section 字节进入镜像
 //! 计划；`--strip` 不能删掉这些运行时必需的记录。
 
-use std::collections::BTreeSet;
+use std::cell::LazyCell;
 
 use crate::SourceMap;
 use crate::metadata::empty_bitmaps;
@@ -66,9 +66,10 @@ pub fn build(
     let mut prepared = Vec::with_capacity(fragments.len());
     for (index, body) in lir.bodies().iter().enumerate() {
         let fragment = &fragments[index];
+        let site_index = FragmentIndex::new(body, fragment);
         let anchors = stackmap::anchors(body).map_err(|error| vec![error])?;
-        let safepoints = machine_safepoints(body, fragment, target, &anchors)?;
-        let landings = landings_of(body, fragment)?;
+        let safepoints = machine_safepoints(body, fragment, &site_index, target, &anchors)?;
+        let landings = landings_of(body, fragment, &site_index)?;
         prepared.push(Prepared {
             rva: rvas[index],
             body,
@@ -238,29 +239,122 @@ fn assign_rvas(
     Ok(rvas)
 }
 
+/// 按稠密块号/指令号建好的片段站点索引，消除元数据生成中的多次 O(sites) 线性扫描。
+struct FragmentIndex {
+    /// 指令号 → `fragment.sites` 下标；`u32::MAX` 表示无对应站点。
+    inst_site: Vec<u32>,
+    /// 块号 → 终结符在 `fragment.sites` 中的下标；`u32::MAX` 表示无对应站点。
+    term_site: Vec<u32>,
+    /// 块号 → 该块首个站点字节偏移；`u32::MAX` 表示该块无站点。
+    block_start: Vec<u32>,
+    /// 入口 `morestack_or_poll` 的返回点（首个非 None 站点）。
+    morestack_pc: Option<u32>,
+}
+
+impl FragmentIndex {
+    fn new(body: &Body, fragment: &FragmentPayload) -> Self {
+        let mut inst_site = vec![u32::MAX; body.instructions.len()];
+        let mut term_site = vec![u32::MAX; body.blocks.len()];
+        let mut block_start = vec![u32::MAX; body.blocks.len()];
+        let mut morestack_pc = None;
+        for (site_idx, site) in fragment.sites.iter().enumerate() {
+            let site_idx = u32::try_from(site_idx).expect("站点数适配 u32");
+            if morestack_pc.is_none() {
+                morestack_pc = site.morestack_pc;
+            }
+            let block = site.block as usize;
+            if let Some(block_data) = body.blocks.get(block) {
+                if block_start[block] == u32::MAX {
+                    block_start[block] = site.bytes.0;
+                }
+                if site.instruction == block_data.instructions.end {
+                    if term_site[block] == u32::MAX {
+                        term_site[block] = site_idx;
+                    }
+                } else if let Some(slot) = inst_site.get_mut(site.instruction as usize)
+                    && *slot == u32::MAX
+                {
+                    *slot = site_idx;
+                }
+            }
+        }
+        Self {
+            inst_site,
+            term_site,
+            block_start,
+            morestack_pc,
+        }
+    }
+
+    fn site<'a>(
+        &self,
+        body: &Body,
+        fragment: &'a FragmentPayload,
+        block: u32,
+        instruction: u32,
+    ) -> Option<&'a SitePayload> {
+        let block_data = body.blocks.get(block as usize)?;
+        let idx = if instruction == block_data.instructions.end {
+            *self.term_site.get(block as usize)?
+        } else {
+            *self.inst_site.get(instruction as usize)?
+        };
+        if idx == u32::MAX {
+            return None;
+        }
+        let site = fragment.sites.get(idx as usize)?;
+        (site.block == block && site.instruction == instruction).then_some(site)
+    }
+
+    fn block_pc(&self, block: u32) -> Option<u32> {
+        let pc = *self.block_start.get(block as usize)?;
+        (pc != u32::MAX).then_some(pc)
+    }
+}
+
+/// 在按 `value` 升序排列的 `fragment.values` 中 O(1)/O(log V) 定位值分配项。
+fn find_value(fragment: &FragmentPayload, value: u32) -> Option<&super::codegen::ValuePayload> {
+    if let Some(item) = fragment.values.get(value as usize)
+        && item.value == value
+    {
+        return Some(item);
+    }
+    fragment
+        .values
+        .binary_search_by_key(&value, |item| item.value)
+        .ok()
+        .map(|index| &fragment.values[index])
+}
+
 fn machine_safepoints(
     body: &Body,
     fragment: &FragmentPayload,
+    site_index: &FragmentIndex,
     target: TargetName,
     anchors: &[LogicalSafepoint],
 ) -> Result<Vec<SafepointLayout>, Vec<Diagnostic>> {
-    let mut layouts = Vec::new();
+    if anchors.is_empty() {
+        return Ok(Vec::new());
+    }
+    let mut layouts = Vec::with_capacity(anchors.len());
     let boundaries = boundaries(fragment);
     let code_size = u32::try_from(fragment.bytes.len()).expect("代码长度适配 u32");
     // 逐根初始化证明按 body 求一次：判定哪些根字在安全点上还没有写成指针，从而必须留给
     // 帧内初始化字节在运行期门控。
     let graph = Graph::new(body).map_err(|error| vec![error])?;
     let init = InitSlots::new(body, &graph);
-    let live = LiveValues::new(body, &graph);
+    let live = LazyCell::new(|| LiveValues::new(body, &graph));
     for anchor in anchors {
-        for pc in safepoint_pcs(fragment, anchor)? {
-            if pc >= code_size || !boundaries.contains(&pc) {
+        for pc in safepoint_pcs(body, fragment, site_index, anchor)? {
+            if pc >= code_size || boundaries.binary_search(&pc).is_err() {
                 return Err(vec![invalid(&format!(
                     "{} 的安全点 PC 不在指令边界",
                     body.name
                 ))]);
             }
-            layouts.push(layout_of(body, fragment, target, anchor, pc, &init, &live)?);
+            layouts.push(layout_of(
+                body, fragment, site_index, target, anchor, pc, &init, &live,
+            )?);
         }
     }
     layouts.sort_by_key(|layout| layout.pc_offset);
@@ -278,21 +372,19 @@ fn machine_safepoints(
 /// 普通安全点取该站点所有 `call` 的返回点：同一 LIR 点可以发射多条收集 slow call，每条返回
 /// PC 都要落进同一语义 map，只登记最后一条会让先返回的那条找不到登记。
 fn safepoint_pcs(
+    body: &Body,
     fragment: &FragmentPayload,
+    site_index: &FragmentIndex,
     anchor: &LogicalSafepoint,
 ) -> Result<Vec<u32>, Vec<Diagnostic>> {
     if anchor.kind == stackmap::KIND_MORESTACK_ENTRY {
-        return fragment
-            .sites
-            .iter()
-            .find_map(|site| site.morestack_pc)
+        return site_index
+            .morestack_pc
             .map(|pc| vec![pc])
             .ok_or_else(|| vec![invalid("入口检查没有 morestack 返回点")]);
     }
-    let site = fragment
-        .sites
-        .iter()
-        .find(|site| site.block == anchor.block && site.instruction == anchor.instruction)
+    let site = site_index
+        .site(body, fragment, anchor.block, anchor.instruction)
         .ok_or_else(|| vec![invalid("安全点没有机器站点")])?;
     if site.call_return_pcs.is_empty() {
         return Err(vec![invalid("安全点没有调用返回 PC")]);
@@ -300,14 +392,19 @@ fn safepoint_pcs(
     Ok(site.call_return_pcs.clone())
 }
 
+#[expect(
+    clippy::too_many_arguments,
+    reason = "单点栈图布局需要 body/片段/索引/目标/锚点/PC/初始化与惰性活跃集"
+)]
 fn layout_of(
     body: &Body,
     fragment: &FragmentPayload,
+    site_index: &FragmentIndex,
     target: TargetName,
     anchor: &LogicalSafepoint,
     pc: u32,
     init: &InitSlots,
-    live: &LiveValues,
+    live: &LazyCell<LiveValues, impl FnOnce() -> LiveValues>,
 ) -> Result<SafepointLayout, Vec<Diagnostic>> {
     let slot_count = if anchor.kind == stackmap::KIND_MORESTACK_ENTRY {
         0
@@ -317,11 +414,13 @@ fn layout_of(
     let mut slots = empty_bitmaps(slot_count);
     let mut registers = [0_u16; 5];
     let mut typed = Vec::new();
+    let use_slot = safepoint_slot(body, fragment, site_index, anchor);
     place_roots(
         body,
         fragment,
         target,
         anchor,
+        use_slot,
         &mut slots,
         &mut registers,
         &mut typed,
@@ -392,7 +491,7 @@ fn verify_live_pointers_are_rooted(
         let Some(kind) = value.kind.provenance.and_then(|it| it.root_kind()) else {
             continue;
         };
-        let Some(found) = fragment.values.iter().find(|item| item.value == id(index)) else {
+        let Some(found) = find_value(fragment, id(index)) else {
             continue;
         };
         let Some(&(_, _, code)) = found.segments.first() else {
@@ -442,6 +541,7 @@ fn place_roots(
     fragment: &FragmentPayload,
     target: TargetName,
     anchor: &LogicalSafepoint,
+    use_slot: Option<u32>,
     slots: &mut [Vec<u64>; 5],
     registers: &mut [u16; 5],
     typed: &mut Vec<TypedRoot>,
@@ -458,8 +558,8 @@ fn place_roots(
     for (class, roots) in groups.iter().enumerate() {
         for root in *roots {
             place_root(
-                body, fragment, target, anchor, class, root, slots, registers, typed, init,
-                slot_count,
+                body, fragment, target, anchor, use_slot, class, root, slots, registers, typed,
+                init, slot_count,
             )?;
         }
     }
@@ -475,6 +575,7 @@ fn place_root(
     fragment: &FragmentPayload,
     target: TargetName,
     anchor: &LogicalSafepoint,
+    use_slot: Option<u32>,
     class: usize,
     root: &LogicalRoot,
     slots: &mut [Vec<u64>; 5],
@@ -494,7 +595,7 @@ fn place_root(
             body, fragment, anchor, class, *slot, *offset, slots, typed, init, slot_count,
         ),
         LogicalRoot::Value { value, .. } => place_value(
-            fragment, anchor, class, *value, slots, registers, slot_count,
+            fragment, anchor, use_slot, class, *value, slots, registers, slot_count,
         ),
     }
 }
@@ -615,19 +716,24 @@ fn place_slot(
     set_slot(slots, class, word, slot_count)
 }
 
+#[expect(
+    clippy::too_many_arguments,
+    reason = "值根放置需要片段、锚点、预查槽位与输出表"
+)]
 fn place_value(
     fragment: &FragmentPayload,
     anchor: &LogicalSafepoint,
+    use_slot: Option<u32>,
     class: usize,
     value: u32,
     slots: &mut [Vec<u64>; 5],
     registers: &mut [u16; 5],
     slot_count: u32,
 ) -> Result<(), Vec<Diagnostic>> {
-    let Some(found) = fragment.values.iter().find(|item| item.value == value) else {
+    let Some(found) = find_value(fragment, value) else {
         return Ok(());
     };
-    if let Some(slot) = safepoint_slot(fragment, anchor)
+    if let Some(slot) = use_slot
         && !covers_slot(found.range, slot)
     {
         return Ok(());
@@ -671,11 +777,13 @@ fn call_of<'a>(body: &'a Body, anchor: &LogicalSafepoint) -> Option<&'a crate::l
 }
 
 /// 安全点对应的 `use_slot`：用于判断值根占用的槽区间是否覆盖该点。
-fn safepoint_slot(fragment: &FragmentPayload, anchor: &LogicalSafepoint) -> Option<u32> {
-    let site = fragment
-        .sites
-        .iter()
-        .find(|site| site.block == anchor.block && site.instruction == anchor.instruction)?;
+fn safepoint_slot(
+    body: &Body,
+    fragment: &FragmentPayload,
+    site_index: &FragmentIndex,
+    anchor: &LogicalSafepoint,
+) -> Option<u32> {
+    let site = site_index.site(body, fragment, anchor.block, anchor.instruction)?;
     let start = site.points.0 as usize;
     let end = site.points.1 as usize;
     let points = fragment.points.get(start..end)?;
@@ -691,7 +799,11 @@ fn covers_slot(range: (u32, u32), use_slot: u32) -> bool {
     let def_slot = use_slot.saturating_add(1);
     use_slot <= range.1 && def_slot >= range.0
 }
-fn landings_of(body: &Body, fragment: &FragmentPayload) -> Result<Vec<Landing>, Vec<Diagnostic>> {
+fn landings_of(
+    body: &Body,
+    fragment: &FragmentPayload,
+    site_index: &FragmentIndex,
+) -> Result<Vec<Landing>, Vec<Diagnostic>> {
     let mut landings = Vec::new();
     for (index, block) in body.blocks.iter().enumerate() {
         let Terminator::Invoke { unwind, .. } = &block.terminator else {
@@ -701,17 +813,16 @@ fn landings_of(body: &Body, fragment: &FragmentPayload) -> Result<Vec<Landing>, 
             .edges
             .get(unwind.index())
             .ok_or_else(|| vec![invalid("unwind 边越界")])?;
-        let site = fragment
-            .sites
-            .iter()
-            .find(|site| site.block == index as u32 && site.instruction == block.instructions.end)
+        let site = site_index
+            .site(body, fragment, index as u32, block.instructions.end)
             .ok_or_else(|| vec![invalid("调用终结符没有机器站点")])?;
         let pc_end = site.call_return_pcs.last().copied().unwrap_or(site.bytes.1);
         if pc_end <= site.bytes.0 {
             return Err(vec![invalid("落地范围为空")]);
         }
-        let landing_pc =
-            block_start(fragment, edge.to.0).ok_or_else(|| vec![invalid("落地块没有机器字节")])?;
+        let landing_pc = site_index
+            .block_pc(edge.to.0)
+            .ok_or_else(|| vec![invalid("落地块没有机器字节")])?;
         let cleanup = cleanup_chain(body, edge.to.0);
         landings.push(Landing {
             pc_start: site.bytes.0,
@@ -734,14 +845,6 @@ fn cleanup_chain(body: &Body, block: u32) -> u32 {
         return u32::MAX;
     }
     block
-}
-
-fn block_start(fragment: &FragmentPayload, block: u32) -> Option<u32> {
-    fragment
-        .sites
-        .iter()
-        .find(|site| site.block == block)
-        .map(|site| site.bytes.0)
 }
 
 fn unwind_tables(prepared: &[Prepared<'_>]) -> Result<UnwindTables, Vec<Diagnostic>> {
@@ -838,16 +941,18 @@ fn check_joint(
     Ok(())
 }
 
-fn boundaries(fragment: &FragmentPayload) -> BTreeSet<u32> {
-    let mut set = BTreeSet::new();
+fn boundaries(fragment: &FragmentPayload) -> Vec<u32> {
+    let mut set = Vec::with_capacity(fragment.sites.len() * 2);
     for site in &fragment.sites {
-        set.insert(site.bytes.0);
-        set.insert(site.bytes.1);
+        set.push(site.bytes.0);
+        set.push(site.bytes.1);
         if let Some(pc) = site.morestack_pc {
-            set.insert(pc);
+            set.push(pc);
         }
         set.extend(site.call_return_pcs.iter().copied());
     }
+    set.sort_unstable();
+    set.dedup();
     set
 }
 

@@ -332,6 +332,10 @@ fn cage_decode_sites(
 ) -> u32 {
     let request = crate::CompileRequest::single_file("main.gg", COMPRESSED_CAPTURE, target)
         .with_compression_policy(CompressionPolicyV1::cage(4 * GC_ARENA_BYTES));
+    #[expect(
+        clippy::disallowed_methods,
+        reason = "后端基准报告完整编译的压缩配置与解码站点"
+    )]
     let compilation = crate::Compiler::with_artifacts(artifacts).compile(request);
     if !compilation.is_success() {
         return 0;

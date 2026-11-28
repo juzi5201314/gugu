@@ -4,8 +4,10 @@
 //! 物化表的结构校验与层 revision 比对由上层统一完成后才进入这里，因此本模块只解码并校验
 //! 语义层各表。
 
+use gugu_base::SharedTable;
 use gugu_compiler_core::RuntimePrebuiltV1;
 use serde::de::DeserializeOwned;
+use std::collections::BTreeMap;
 
 use crate::ParsedModule;
 use crate::names;
@@ -27,18 +29,25 @@ const EARLY_TABLE: &str = "early.constants";
 /// 类型检查表的层名：内建每个 body 的推断结果与义务证据。
 const CHECKED_TABLE: &str = "checked.semantics";
 
-/// 已校验的内建块语义层前缀：当前会话可直接安装的语义派生表。
-pub struct SemaPrefix {
+/// 已解码并通过结构校验、与会话源码表无关的语义层基底。
+pub struct DecodedSemaPrefix {
     names: names::NameResolution,
     identities: Identities,
     /// 内建模块的 HIR 片段：定义、类型与各侧表整段接管，用户侧只追加。已通过 verifier。
     hir: std::sync::Arc<crate::hir::Validated>,
+    type_index: BTreeMap<crate::hir::Type, crate::hir::TypeId>,
     /// 内建顶层 const/static 的 comptime 求值结果；用户定义照旧现算后追加。
     early_constants: crate::semantics::comptime::EarlyConstTable,
     /// 内建每个 body 的类型检查结果；用户 body 现算后按定义序追加。
     checked: crate::semantics::CheckedSemantics,
     modules: Vec<String>,
     identity: [u8; 32],
+}
+
+/// 已校验的内建块语义层前缀：共享不可变基底与当前会话重绑的名称位置。
+pub struct SemaPrefix {
+    base: std::sync::Arc<DecodedSemaPrefix>,
+    names: names::NameResolution,
 }
 
 impl SemaPrefix {
@@ -53,6 +62,38 @@ impl SemaPrefix {
         sources: usize,
         source_map: &crate::SourceMap,
     ) -> Result<Self, Vec<Diagnostic>> {
+        let identity = installed_tables_digest(prebuilt);
+        Self::install(
+            DecodedSemaPrefix::decode(prebuilt, identity)?,
+            sources,
+            source_map,
+        )
+    }
+
+    /// 把共享基底绑定到本次会话。Span 与源码前缀检查不能跨会话缓存。
+    pub fn install(
+        base: std::sync::Arc<DecodedSemaPrefix>,
+        sources: usize,
+        source_map: &crate::SourceMap,
+    ) -> Result<Self, Vec<Diagnostic>> {
+        verify_positions(&base.names, base.modules.len(), sources)?;
+        let (definition_spans, import_spans) = rebind_spans(&base.names, source_map)?;
+        let names = names::NameResolution::with_session_spans(
+            base.names.definitions.clone(),
+            base.names.imports.clone(),
+            definition_spans,
+            import_spans,
+        );
+        Ok(Self { base, names })
+    }
+}
+
+impl DecodedSemaPrefix {
+    /// 解码并校验不依赖会话的语义层表。
+    pub fn decode(
+        prebuilt: &RuntimePrebuiltV1,
+        identity: [u8; 32],
+    ) -> Result<std::sync::Arc<Self>, Vec<Diagnostic>> {
         let declared = declared_content_digest(prebuilt, NAMES_TABLE)
             .ok_or_else(|| invalid("内建块物化表缺少 names 表指纹"))?;
         if table_fingerprint(NAMES_TABLE, &[&prebuilt.names]).1 != declared {
@@ -63,15 +104,29 @@ impl SemaPrefix {
         if !names::resolution_is_valid(&names) {
             return Err(invalid("内建块的名称解析表结构不自洽"));
         }
-        verify_positions(&names, prebuilt.module_order.len(), sources)?;
-        rebind_spans(&mut names, source_map)?;
+        names.definitions.share();
+        names.imports.share();
         let identities: Identities =
             decode_table(prebuilt, IDENTITIES_TABLE, &prebuilt.identities)?;
         // HIR 片段在这里跑完整结构 verifier：定义稳定键唯一、侧表与 owner 下标自洽、类型与
         // 声明引用完整。表字节的摘要已在上面比对过，这里钉的是结构。
-        let (hir, _) =
-            crate::hir::Validated::freeze(decode_table(prebuilt, HIR_TABLE, &prebuilt.hir)?)
-                .map_err(|error| invalid(&format!("内建块 HIR 片段结构非法：{error:?}")))?;
+        let mut hir_module: crate::hir::Module = decode_table(prebuilt, HIR_TABLE, &prebuilt.hir)?;
+        hir_module.share();
+        let (hir, _) = crate::hir::Validated::freeze(hir_module)
+            .map_err(|error| invalid(&format!("内建块 HIR 片段结构非法：{error:?}")))?;
+        let type_index = hir
+            .module()
+            .types
+            .iter()
+            .cloned()
+            .enumerate()
+            .map(|(index, ty)| {
+                (
+                    ty,
+                    crate::hir::TypeId(u32::try_from(index).expect("HIR 类型表使用 u32 编号")),
+                )
+            })
+            .collect();
         if hir.module().definitions.len() != identities.origins().len()
             || hir.module().opaques.len() != identities.opaques.len()
             || hir.module().interfaces.len() != identities.interfaces.len()
@@ -79,34 +134,51 @@ impl SemaPrefix {
             return Err(invalid("内建块物化表的 HIR 与身份表不同源"));
         }
         verify_blocks(prebuilt, &hir)?;
-        let early_constants: crate::semantics::comptime::EarlyConstTable =
+        let mut early_constants: crate::semantics::comptime::EarlyConstTable =
             decode_table(prebuilt, EARLY_TABLE, &prebuilt.early_constants)?;
-        let checked: crate::semantics::CheckedSemantics =
+        early_constants.constants.share();
+        let mut checked: crate::semantics::CheckedSemantics =
             decode_table(prebuilt, CHECKED_TABLE, &prebuilt.checked)?;
-        Ok(Self {
+        checked.bodies.share();
+        checked.initialization.share();
+        checked.early_constants.constants.share();
+        Ok(std::sync::Arc::new(Self {
             names,
             identities,
             hir: std::sync::Arc::new(hir),
+            type_index,
             early_constants,
             checked,
             modules: prebuilt.module_order.clone(),
-            identity: installed_tables_digest(prebuilt),
-        })
+            identity,
+        }))
     }
 
+    /// 返回内建模块的冻结 HIR 片段，供上层解码期一次性校验 GIR body 前缀。
+    pub fn hir(&self) -> &crate::hir::Validated {
+        &self.hir
+    }
+}
+
+impl SemaPrefix {
     /// 内建每个 body 的类型检查结果。
     pub fn checked(&self) -> &crate::semantics::CheckedSemantics {
-        &self.checked
+        &self.base.checked
     }
 
     /// 内建顶层 const/static 的早期常量表。
     pub fn early_constants(&self) -> &crate::semantics::comptime::EarlyConstTable {
-        &self.early_constants
+        &self.base.early_constants
     }
 
     /// 内建模块的 HIR 片段：已通过 verifier，两条加载路径必须给出同一份。
     pub fn hir(&self) -> &crate::hir::Validated {
-        &self.hir
+        &self.base.hir
+    }
+
+    /// 内建类型驻留索引：用户 lowering 只查找，不遍历或复制整张前缀类型表。
+    pub fn type_index(&self) -> &BTreeMap<crate::hir::Type, crate::hir::TypeId> {
+        &self.base.type_index
     }
 
     /// 安装表的内容身份：参与 query 键，缓存不能跨 artifact 复用。
@@ -114,12 +186,12 @@ impl SemaPrefix {
     /// 世界身份（如 HIR `input_fingerprint`）只由源码与依赖决定，不带它；这里只保证会话内的
     /// 记忆化不会把另一份物化表的派生结果当成自己的。
     pub fn identity(&self) -> [u8; 32] {
-        self.identity
+        self.base.identity
     }
 
     /// 内建身份表：`DefRef` 与 `HIR DefId` 的映射，以及各 owner 的身份桶。
     pub fn identities(&self) -> &Identities {
-        &self.identities
+        &self.base.identities
     }
 
     /// 名称解析前缀的定义数量：用户定义的 `names::DefId` 从它开始。
@@ -129,12 +201,13 @@ impl SemaPrefix {
 
     /// 身份前缀的 `HIR DefId` 数量：用户定义的 HIR 编号从它开始。
     pub fn hir_definition_count(&self) -> u32 {
-        u32::try_from(self.identities.origins().len()).expect("内建身份数量必须落在 u32")
+        u32::try_from(self.base.identities.origins().len()).expect("内建身份数量必须落在 u32")
     }
 
     /// 该模块路径是否由物化表覆盖；未覆盖的内建模块（探针源）追加在物化块之后派生。
     pub fn covers_module(&self, path: &str) -> bool {
-        self.modules
+        self.base
+            .modules
             .binary_search_by(|candidate| candidate.as_str().cmp(path))
             .is_ok()
     }
@@ -149,10 +222,10 @@ impl SemaPrefix {
     /// 前缀位置是物化表下标的全部依据：物化模块一旦被未覆盖的模块插到中间，表里的模块下标
     /// 就会指向别的模块。
     pub fn verify_installed(&self, modules: &[ParsedModule]) -> Result<(), Vec<Diagnostic>> {
-        if modules.len() < self.modules.len() {
+        if modules.len() < self.base.modules.len() {
             return Err(invalid("模块表比内建块物化表短"));
         }
-        for (index, path) in self.modules.iter().enumerate() {
+        for (index, path) in self.base.modules.iter().enumerate() {
             if &modules[index].path != path {
                 return Err(invalid(&format!(
                     "物化模块 `{path}` 不在模块表前缀的第 {index} 位"
@@ -160,11 +233,11 @@ impl SemaPrefix {
             }
         }
         // 身份桶按会话 AST 的 arena 尺寸取值：长度不合说明物化表与本次源码树不是同一份。
-        for (index, parsed) in modules.iter().enumerate().take(self.modules.len()) {
-            let fits = self.identities.items[index].len() == parsed.arena.items.len()
-                && self.identities.functions[index].len() == parsed.arena.fns.len()
-                && self.identities.asynchronous[index].len() == parsed.arena.exprs.len()
-                && self.identities.local_statics[index].len() == parsed.arena.stmts.len();
+        for (index, parsed) in modules.iter().enumerate().take(self.base.modules.len()) {
+            let fits = self.base.identities.items[index].len() == parsed.arena.items.len()
+                && self.base.identities.functions[index].len() == parsed.arena.fns.len()
+                && self.base.identities.asynchronous[index].len() == parsed.arena.exprs.len()
+                && self.base.identities.local_statics[index].len() == parsed.arena.stmts.len();
             if !fits {
                 return Err(invalid(&format!(
                     "物化身份表的 `{}` 行与会话 AST 尺寸不符",
@@ -174,14 +247,15 @@ impl SemaPrefix {
         }
         // 身份表里的定义下标必须落在前缀内。
         let definitions =
-            u32::try_from(self.identities.origins().len()).expect("内建定义数量必须落在 u32");
+            u32::try_from(self.base.identities.origins().len()).expect("内建定义数量必须落在 u32");
         let buckets = self
+            .base
             .identities
             .items
             .iter()
-            .chain(&self.identities.functions)
-            .chain(&self.identities.asynchronous)
-            .chain(&self.identities.local_statics);
+            .chain(&self.base.identities.functions)
+            .chain(&self.base.identities.asynchronous)
+            .chain(&self.base.identities.local_statics);
         if buckets
             .flatten()
             .flatten()
@@ -204,9 +278,16 @@ fn verify_blocks(
     for (index, block) in prebuilt.blocks.iter().enumerate() {
         definitions += block.definitions.len as usize;
         owners += block.owners.len as usize;
-        for definition in &hir.module().definitions[block.definitions.start as usize
-            ..(block.definitions.start + block.definitions.len) as usize]
-        {
+        if definitions > hir.module().definitions.len() || owners > hir.module().owners.len() {
+            return Err(invalid("内建块物化表的模块块越出 HIR 表"));
+        }
+        let start = block.definitions.start as usize;
+        let end = (block.definitions.start + block.definitions.len) as usize;
+        if end > hir.module().definitions.len() {
+            return Err(invalid("内建块物化表的定义块越出 HIR 定义表"));
+        }
+        for definition_index in start..end {
+            let definition = &hir.module().definitions[definition_index];
             if definition.module as usize != index {
                 return Err(invalid("内建块物化表的模块块与定义归属不一致"));
             }
@@ -223,9 +304,9 @@ fn verify_blocks(
 /// 持久形式只保留稳定字段（文件下标、字节区间、展开下标）；源码表身份是 session 局部的，
 /// 跨会话沿用会让 HIR 的位置校验与诊断重锚定失效。
 fn rebind_spans(
-    names: &mut names::NameResolution,
+    names: &names::NameResolution,
     source_map: &crate::SourceMap,
-) -> Result<(), Vec<Diagnostic>> {
+) -> Result<(SharedTable<crate::Span>, SharedTable<crate::Span>), Vec<Diagnostic>> {
     let rebind = |span: &crate::Span| {
         source_map
             .span(
@@ -236,24 +317,55 @@ fn rebind_spans(
             )
             .map_err(|_| invalid("内建块物化表的源码位置不能在当前源码表里重建"))
     };
-    for definition in &mut names.definitions {
-        definition.span = rebind(&definition.span)?;
-    }
-    for import in &mut names.imports {
-        import.span = rebind(&import.span)?;
-    }
-    Ok(())
+    let mut definition_spans = SharedTable::from(
+        names
+            .definitions
+            .iter()
+            .map(|definition| rebind(&definition.span))
+            .collect::<Result<Vec<_>, _>>()?,
+    );
+    definition_spans.share();
+    let mut import_spans = SharedTable::from(
+        names
+            .imports
+            .iter()
+            .map(|import| rebind(&import.span))
+            .collect::<Result<Vec<_>, _>>()?,
+    );
+    import_spans.share();
+    Ok((definition_spans, import_spans))
 }
 
 /// 安装表的内容身份：容器 schema、层 revision 与各表字节。
 ///
 /// 覆盖全部安装表（含 GIR 层两张）：语义层 query 的记忆化同样不能跨 artifact 复用。
-fn installed_tables_digest(prebuilt: &RuntimePrebuiltV1) -> [u8; 32] {
+pub fn installed_tables_digest(prebuilt: &RuntimePrebuiltV1) -> [u8; 32] {
     let mut hash = blake3::Hasher::new_derive_key("gugu-builtin-prefix-v1");
     hash.update(&prebuilt.schema.to_le_bytes());
+    hash.update(&(prebuilt.revisions.len() as u64).to_le_bytes());
     for (layer, revision) in &prebuilt.revisions {
+        hash.update(&(layer.len() as u64).to_le_bytes());
         hash.update(layer.as_bytes());
         hash.update(&revision.to_le_bytes());
+    }
+    hash.update(&(prebuilt.module_order.len() as u64).to_le_bytes());
+    for module in &prebuilt.module_order {
+        hash.update(&(module.len() as u64).to_le_bytes());
+        hash.update(module.as_bytes());
+    }
+    hash.update(&(prebuilt.fingerprints.len() as u64).to_le_bytes());
+    for (domain, content) in &prebuilt.fingerprints {
+        hash.update(domain);
+        hash.update(content);
+    }
+    hash.update(&(prebuilt.blocks.len() as u64).to_le_bytes());
+    for block in &prebuilt.blocks {
+        hash.update(&(block.path.len() as u64).to_le_bytes());
+        hash.update(block.path.as_bytes());
+        hash.update(&block.definitions.start.to_le_bytes());
+        hash.update(&block.definitions.len.to_le_bytes());
+        hash.update(&block.owners.start.to_le_bytes());
+        hash.update(&block.owners.len.to_le_bytes());
     }
     for table in [
         &prebuilt.names[..],
@@ -266,6 +378,7 @@ fn installed_tables_digest(prebuilt: &RuntimePrebuiltV1) -> [u8; 32] {
         hash.update(&(table.len() as u64).to_le_bytes());
         hash.update(table);
     }
+    hash.update(&(prebuilt.gir_bodies.len() as u64).to_le_bytes());
     for body in &prebuilt.gir_bodies {
         hash.update(&(body.len() as u64).to_le_bytes());
         hash.update(body);

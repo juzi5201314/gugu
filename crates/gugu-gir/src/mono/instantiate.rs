@@ -9,7 +9,7 @@ use crate::{ast, hir};
 use serde::{Deserialize, Serialize};
 use std::collections::{BTreeMap, BTreeSet};
 
-pub const INSTANCE_SCHEMA: u32 = 10;
+pub const INSTANCE_SCHEMA: u32 = 11;
 
 /// 调用位点使用 owner 内的确定性编号，不把定义级 callee 当作实例身份。
 #[derive(Clone, Copy, Debug, Eq, PartialEq, Ord, PartialOrd, Serialize, Deserialize)]
@@ -62,6 +62,17 @@ pub struct InstanceRecordV1 {
 pub struct VtableRootV1 {
     pub interface: [u8; 32],
     pub self_type: Vec<u8>,
+    /// 擦除后的 `dyn Trait` 稳定类型键；同一具体类型可擦到多个接口。
+    pub dyn_type: [u8; 32],
+    /// 按 trait 声明槽顺序排列的具体方法实例。
+    pub methods: Vec<VtableMethodV1>,
+}
+
+#[derive(Clone, Debug, Eq, PartialEq, Ord, PartialOrd, Serialize, Deserialize)]
+pub struct VtableMethodV1 {
+    pub instance: [u8; 32],
+    /// trait 声明的 receiver 是否为 `self: &Self`；vtable shim 据此解包 dyn 载荷。
+    pub receiver_by_ref: bool,
 }
 
 #[derive(Clone)]
@@ -652,15 +663,13 @@ fn collect_vtable(
     let mut interface_bytes = Vec::new();
     context.encode_trait_ref_into(interface, &mut interface_bytes)?;
     let interface_key = hash_domain("gugu-mono-v1", &interface_bytes);
-    edges.vtable_roots.insert(VtableRootV1 {
-        interface: interface_key,
-        self_type: self_type.clone(),
-    });
-    edges.metadata_roots.insert(self_type);
+    edges.metadata_roots.insert(self_type.clone());
     let dyn_type = context.encode_type(&Ty::Dyn(vec![interface.clone()]))?;
     interner.intern_type(dyn_type.clone())?;
-    edges.metadata_roots.insert(dyn_type);
-    for name in context.model.interface_method_members(interface.id) {
+    edges.metadata_roots.insert(dyn_type.clone());
+    let members = context.model.interface_method_members(interface.id);
+    let mut methods = Vec::with_capacity(members.len());
+    for name in members {
         let method = context
             .model
             .method(module, source, Some(interface), &name, &[])?
@@ -670,8 +679,13 @@ fn collect_vtable(
                 .selected_impls
                 .insert(context.item_key(implementation));
         }
+        let receiver_by_ref = method
+            .signature
+            .signature()
+            .and_then(|(parameters, _)| parameters.first())
+            .is_some_and(|receiver| matches!(receiver, Ty::Ref(_)));
         if let Some(callable) = method.callable {
-            add_callee(
+            let instance = add_callee(
                 context,
                 interner,
                 context.identities.function(callable),
@@ -679,9 +693,22 @@ fn collect_vtable(
                 Vec::new(),
                 None,
                 edges,
-            )?;
+            )?
+            .ok_or_else(|| inconsistency("vtable 槽不能绑定外部函数"))?;
+            methods.push(VtableMethodV1 {
+                instance,
+                receiver_by_ref,
+            });
         }
+        // `Any::type_of` 这类语言内建槽没有普通 callable；它由 `dyn Any` 固有路径处理，
+        // 不占可调用 vtable 入口。
     }
+    edges.vtable_roots.insert(VtableRootV1 {
+        interface: interface_key,
+        self_type,
+        dyn_type: hash_domain("gugu-mono-v1", &dyn_type),
+        methods,
+    });
     Ok(())
 }
 
@@ -749,7 +776,7 @@ fn add_callee(
     constants: Vec<Vec<u8>>,
     site: Option<CallSite>,
     edges: &mut Edges,
-) -> Result<(), Diagnostic> {
+) -> Result<Option<[u8; 32]>, Diagnostic> {
     if let Some(callable) = context.callable_of[definition.index()]
         && context
             .model
@@ -764,7 +791,7 @@ fn add_callee(
             .and_then(|linkage| linkage.import_name.clone())
             .unwrap_or_else(|| context.module.definitions[definition.index()].name.clone());
         edges.externals.insert(name);
-        return Ok(());
+        return Ok(None);
     }
     let arguments = arguments
         .iter()
@@ -781,7 +808,7 @@ fn add_callee(
         arguments,
         value_arguments: constants,
     });
-    Ok(())
+    Ok(Some(digest))
 }
 
 fn contains_param(ty: &Ty) -> bool {

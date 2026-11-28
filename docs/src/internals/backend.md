@@ -95,7 +95,7 @@ rax, rbx, rcx, rdx, rdi, rsi, r8, r9, r10
 
 整数和浮点 bank 分别前进；某一 aggregate 的任意 piece 无法放入对应寄存器时，该 aggregate 的所有 piece 都放到 stack，避免半寄存器半内存。stack 参数按参数顺序放入 8 字节 slot（`V128` 占 16 字节），并满足自身更高对齐；caller 固定 outgoing 区承载。C ABI 侧 Linux 仍按 SysV 的独立 bank 前进，Windows 的 Microsoft x64 则让整数与浮点**按参数位置共用**同一组槽：位置 0..3 对应 `rcx/rdx/r8/r9` 与 `xmm0..xmm3`，例如 `(i64, f64)` 是 `rcx` + `xmm1`；位置越界的参数从 32 字节 shadow space 之后开始。
 
-双目标一致性回归固定在 `x64/abi_tests.rs` 与 `gugu-compiler/tests/abi_image_consistency.rs`：前者是 SysV/Microsoft x64 的槽位黄金表（0/1/2/16/17-byte aggregate 边界、shadow space、栈对齐填充、sret 隐藏指针、寄存器耗尽回退、按位置共享槽、混合返回），后者让同一组 FFI fixture（`repr(C)`/`packed`/`transparent`/`union`/`enum` 按值穿越 extern 边界、leaf/dirty/ordinary bridge、`#[os_thread_local]`/`#[coroutine_local]`、`#[export_name]`、panic 路径）在两个目标上各生成结构完整的 ELF/PE 镜像，并按字节断言入口、导入库/符号、导出符号、PT_INTERP 与 strip 后保留的运行时字符串。外部线程接入经 `NativeLink::THREAD_SYMBOLS` 的 glibc 导入登记，缺导入时 `BackendInvariant` 拒绝镜像。
+双目标一致性回归固定在 `x64/abi_tests.rs` 与 `gugu-compiler/tests/integration/abi_image_consistency.rs`：前者是 SysV/Microsoft x64 的槽位黄金表（0/1/2/16/17-byte aggregate 边界、shadow space、栈对齐填充、sret 隐藏指针、寄存器耗尽回退、按位置共享槽、混合返回），后者让同一组 FFI fixture（`repr(C)`/`packed`/`transparent`/`union`/`enum` 按值穿越 extern 边界、leaf/dirty/ordinary bridge、`#[os_thread_local]`/`#[coroutine_local]`、`#[export_name]`、panic 路径）在两个目标上各生成结构完整的 ELF/PE 镜像，并按字节断言入口、导入库/符号、导出符号、PT_INTERP 与 strip 后保留的运行时字符串。外部线程接入经 `NativeLink::THREAD_SYMBOLS` 的 glibc 导入登记，缺导入时 `BackendInvariant` 拒绝镜像。
 
 内部 ABI 的间接 aggregate 不是借用 caller 原 place。通常 caller 先按 value descriptor在 outgoing 区物化完整语义副本并把地址传入；该存储在调用期间归 callee参数 local所有，callee可以修改并必须在正常/panic出口执行相应 drop/resource cleanup，caller返回后不再 drop同一副本。若 `EscapeAndPlacement` 已证明参数地址越过调用，caller改为物化独立 managed box，callee cleanup只结束参数绑定，box内 value由 GC/resource descriptor管理。trivial bit-copy 类型也不能因地址分析猜测而把可变参数别名到原值。
 
@@ -226,7 +226,7 @@ GPR 和 XMM 独立分配。可用 GPR 池是 `rax, rcx, rdx, rbx, rsi, rdi, r8, 
 机器点位的 use/def slot 同序递增；候选掩码及跨调用查询先二分跳过 `def_slot < interval.start` 的前缀，只遍历 `use_slot <= interval.end` 的覆盖部分，区间端点语义保持不变。
 重载内存地址后，全宽 GPR 纯写输出可复用读取地址所用的临时寄存器，因为 x64 先读取源/有效地址再写目标；其他已选输出仍独占临时位置。窄写和 ReadWrite 不复用，也不能以预先重载未初始化的旧输出值占用额外 scratch。该规则使高压力下的 `lea dst,[base+index]` 即便 base 与 dst 都溢出，也能用唯一保留的 `r11` 完成，不牺牲活跃寄存器。
 指令表必须真实描述旧目标的读取：二操作数 `imul` 与 `cmovcc` 的目标是 ReadWrite，前者参与乘积，后者在条件不成立时保留原值。若错标为纯 Write，溢出重写可能用源重载槽覆盖旧目标，导致乘积变成源值平方或丢失选择的默认分支；三操作数 `imul` 才是纯写目标。
-仅寄存器目标的 ReadWrite 指令在 spill 后必须重载旧值，并在最后一次写入后把仍活跃的完整结果写回原槽；不能因为 `imul`/`cmovcc` 有读写语义就省略回写。可直接使用内存目标的指令仍在原槽上更新，不重复搬运。两地址 lowering 在同一站点内先写结果、再把结果作为 ReadWrite 输入继续运算时，spill rewrite 必须在每次 scratch 写入后立刻保持 spill slot 可见值同步；不得让后续指令从中途的 spill slot 重载尚未包含前序写入的旧值。最后一次写入之后仍可按活跃性省略不再需要的结果写回。
+仅寄存器目标的 ReadWrite 指令在 spill 后必须重载旧值，并在最后一次写入后把仍活跃的完整结果写回原槽；不能因为 `imul`/`cmovcc` 有读写语义就省略回写。可直接使用内存目标的指令仍在原槽上更新，不重复搬运。两地址 lowering 在同一站点内先写结果、再把结果作为 ReadWrite 输入继续运算时，spill rewrite 必须在每次 scratch 写入后立刻保持 spill slot 可见值同步；不得让后续指令从中途的 spill slot 重载尚未包含前序写入的旧值。最后一次写入之后仍可按活跃性省略不再需要的结果写回，但最终结果已死不能省略此前仍供站点内读取的中间写回。
 逐根初始化查询直接检查当前块中该根的最后一条有效事件；没有对应事件时读取块入口的 must 位图，不为单个根复制全部槽状态。根为未初始化时仍保留动态位图检查，不能通过性能优化放宽精确根条件。
 块入口初始化事实按槽顺序拼接为连续根位图，槽起点由前缀和定位；零根槽不单独分配位图。前驱交集与事件应用仍使用相同根编号和 must 语义。
 

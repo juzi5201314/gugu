@@ -9,25 +9,41 @@ pub(super) fn put(memory: &mut [u8], at: u64, value: u64) {
     memory[at as usize..at as usize + 8].copy_from_slice(&value.to_le_bytes());
 }
 
-pub(super) fn runtime_bodies() -> (crate::frontend::hir::Module, Vec<Body>) {
+pub(super) fn runtime_bodies() -> &'static (crate::frontend::hir::Module, Vec<Body>) {
     runtime_bodies_for(super::TargetName::X86_64Linux)
 }
 
 pub(super) fn runtime_bodies_for(
     target: super::TargetName,
-) -> (crate::frontend::hir::Module, Vec<Body>) {
-    let artifact = crate::testing::provider()
-        .artifact(target)
-        .expect("目标构建期 artifact");
-    let resources = crate::runtime::RuntimeResources::new(artifact);
-    let prebuilt = resources.prebuilt().expect("构建期生产函数表");
-    let hir = crate::canonical::from_slice(&prebuilt.hir).expect("生产 HIR 可解码");
-    let bodies = prebuilt
-        .functions
-        .iter()
-        .map(|function| crate::canonical::from_slice(&function.lir).expect("生产 LIR 可解码"))
-        .collect();
-    (hir, bodies)
+) -> &'static (crate::frontend::hir::Module, Vec<Body>) {
+    use std::sync::OnceLock;
+    static LINUX_X64: OnceLock<(crate::frontend::hir::Module, Vec<Body>)> = OnceLock::new();
+    static WINDOWS_X64: OnceLock<(crate::frontend::hir::Module, Vec<Body>)> = OnceLock::new();
+    static MACOS_X64: OnceLock<(crate::frontend::hir::Module, Vec<Body>)> = OnceLock::new();
+    static LINUX_A64: OnceLock<(crate::frontend::hir::Module, Vec<Body>)> = OnceLock::new();
+    static MACOS_A64: OnceLock<(crate::frontend::hir::Module, Vec<Body>)> = OnceLock::new();
+
+    let slot = match target {
+        super::TargetName::X86_64Linux => &LINUX_X64,
+        super::TargetName::X86_64Windows => &WINDOWS_X64,
+        super::TargetName::X86_64Macos => &MACOS_X64,
+        super::TargetName::Aarch64Linux => &LINUX_A64,
+        super::TargetName::Aarch64Macos => &MACOS_A64,
+    };
+    slot.get_or_init(|| {
+        let artifact = crate::testing::provider()
+            .artifact(target)
+            .expect("目标构建期 artifact");
+        let resources = crate::runtime::RuntimeResources::new(artifact);
+        let prebuilt = resources.prebuilt().expect("构建期生产函数表");
+        let hir = crate::canonical::from_slice(&prebuilt.hir).expect("生产 HIR 可解码");
+        let bodies = prebuilt
+            .functions
+            .iter()
+            .map(|function| crate::canonical::from_slice(&function.lir).expect("生产 LIR 可解码"))
+            .collect();
+        (hir, bodies)
+    })
 }
 
 type ParkHook = fn(&mut Harness<'_>, &mut Vec<u8>);
@@ -65,6 +81,22 @@ pub(super) struct Harness<'a> {
     scheduled: Vec<Option<([u8; 32], Vec<u64>)>>,
 }
 impl<'a> Harness<'a> {
+    pub(super) fn reset_for_next_call(&mut self, memory: &mut [u8]) {
+        let used = self.heap.min(memory.len());
+        memory[..used].fill(0);
+        self.heap = 4096;
+        self.globals.clear();
+        self.script.clear();
+        self.calls.clear();
+        self.woken.clear();
+        self.close_requests.clear();
+        self.allocations.clear();
+        self.freed.clear();
+        self.functions.clear();
+        self.type_section = 0;
+        self.resources.clear();
+        self.scheduled.clear();
+    }
     pub(super) fn new(output: &'a Compilation) -> Self {
         let mut harness = Self::from_bodies(
             output.hir.as_ref().unwrap().module(),

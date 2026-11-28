@@ -40,7 +40,7 @@ fn load(target: TargetName) -> RuntimeArtifactV1 {
             path.display()
         )
     });
-    RuntimeArtifactV1::decode(&bytes).expect("物化产物必须可解码")
+    RuntimeArtifactV1::decode(bytes.into()).expect("物化产物必须可解码")
 }
 
 /// x86_64-linux 的物化产物。

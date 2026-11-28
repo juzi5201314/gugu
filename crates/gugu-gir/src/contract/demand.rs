@@ -9,29 +9,36 @@ pub const IMAGE_ENTRIES: &[&str] = &["rt0_start", "panic_dispatch", "panic_unwin
 
 /// 只入队已落地的源定义；尚未落地的 intrinsic 由最终 LIR glue 门禁拒绝。
 pub fn definition(context: &MonoContext<'_>, glue: &str) -> Option<hir::DefId> {
-    let Some(GlueDef {
+    let (index, entry) = GLUE_DEFS
+        .iter()
+        .enumerate()
+        .find(|(_, entry)| entry.glue == glue)?;
+    let GlueDef {
         def: GlueDefKind::Item { source, item },
         ..
-    }) = GLUE_DEFS.iter().find(|entry| entry.glue == glue)
+    } = entry
     else {
         return None;
     };
-    context
-        .module
-        .definitions
-        .iter()
-        .enumerate()
-        .find(|(index, definition)| {
-            context.owner_of[*index].is_some()
-                && definition.name == *item
-                && definition.location.as_ref().is_some_and(|location| {
-                    context.module.sources
-                        [usize::try_from(location.source).expect("源编号适配宿主")]
-                    .path
-                        == *source
-                })
-        })
-        .map(|(index, _)| hir::DefId(u32::try_from(index).expect("定义编号适配 u32")))
+    debug_assert_eq!(context.glue_definitions.len(), GLUE_DEFS.len());
+    *context.glue_definitions[index].get_or_init(|| {
+        context
+            .module
+            .definitions
+            .iter()
+            .enumerate()
+            .find(|(index, definition)| {
+                context.owner_of[*index].is_some()
+                    && definition.name == *item
+                    && definition.location.as_ref().is_some_and(|location| {
+                        context.module.sources
+                            [usize::try_from(location.source).expect("源编号适配宿主")]
+                        .path
+                            == *source
+                    })
+            })
+            .map(|(index, _)| hir::DefId(u32::try_from(index).expect("定义编号适配 u32")))
+    })
 }
 
 pub fn referenced(
