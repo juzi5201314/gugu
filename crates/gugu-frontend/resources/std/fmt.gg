@@ -171,6 +171,44 @@ impl DebugMap {
     pub fn finish(self: &Self) { self.inner.finish() }
 }
 
+impl Print for () { fn print(self: &Self, out: &Formatter) { out.pad("()") } }
+impl Debug for () { fn debug(self: &Self, out: &Formatter) { out.pad("()") } }
+
+impl[T: Debug] Print for Option[T] {
+    fn print(self: &Self, out: &Formatter) { self.debug(out) }
+}
+impl[T: Debug] Debug for Option[T] {
+    fn debug(self: &Self, out: &Formatter) {
+        match *self {
+            Some(value) => out.debug_tuple("Some").entry(&value).finish(),
+            None => out.write_str("None"),
+        }
+    }
+}
+impl[T: Debug, E: Debug] Print for Result[T, E] {
+    fn print(self: &Self, out: &Formatter) { self.debug(out) }
+}
+impl[T: Debug, E: Debug] Debug for Result[T, E] {
+    fn debug(self: &Self, out: &Formatter) {
+        match *self {
+            Ok(value) => out.debug_tuple("Ok").entry(&value).finish(),
+            Err(error) => out.debug_tuple("Err").entry(&error).finish(),
+        }
+    }
+}
+fn format_array[T: Debug, comptime N: int](values: &[T; N], out: &Formatter) {
+    let builder = out.debug_list()
+    for i in 0..N { builder.entry(&values[i]) }
+    builder.finish()
+}
+
+fn format_tuple[Ts: Debug...](values: &Ts, out: &Formatter) {
+    let builder = out.debug_tuple("")
+    let fields = *values
+    for field in fields { builder.entry(&field) }
+    builder.finish()
+}
+
 impl Print for f64 { fn print(self: &Self, out: &Formatter) { out.float(unsafe { std.mem.transmute[f64, uint](*self) }, 52, 11, 0) } }
 impl Debug for f64 { fn debug(self: &Self, out: &Formatter) { out.float(unsafe { std.mem.transmute[f64, uint](*self) }, 52, 11, 1) } }
 impl LowerExp for f64 { fn lower_exp(self: &Self, out: &Formatter) { out.float(unsafe { std.mem.transmute[f64, uint](*self) }, 52, 11, 2) } }

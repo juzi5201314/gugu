@@ -320,6 +320,8 @@ trait UpperExp  { fn upper_exp(self: &Self, out: &Formatter) }
 
 运行时 f-string 通过普通 trait 调用构建字符串；用户定义的 `Print` 实现与标准库实现使用相同的 `&Formatter` 目标。每个插值先求值一次，再读取该插值的动态 width / precision。`Formatter::new()` 建立空目标，`finish()` 返回当前字符串；每个插值的说明由编译器设置，不由用户格式 trait 修改。当前运行时标准库提供 string、char、bool 与全部整数类型的格式实现，以及 f32 / f64 的 `Print`、`Debug`、`LowerExp`、`UpperExp`；浮点值可直接传给 `print` / `println` 等输出函数。上述文本、padding 和结构化 debug builder 方法均已实现。
 
+unit、元组、定长数组、`Option` 与 `Result` 可直接用于 `print` / `println`、默认插值和 `?` 调试插值。聚合值的 `Print` 与 `Debug` 使用同一结构化表示，内部元素须实现 `Debug`，因此字符串载荷保留引号与转义；仅实现 `Debug` 的用户类型也能作为这些聚合的元素。空 unit、数组与 `Option` 分别输出 `()`、`[]` 与 `None`。嵌套聚合递归使用相同规则，`#?` 使用下述 builder 的缩进语义。用户结构体与枚举本身仍须提供对应格式 trait；缺少实现或聚合元素不满足约束时，在输出调用或插值处报告类型错误，不能延迟成内部 lowering 错误。
+
 结构化 debug API 的签名如下（类型均在 `std.fmt` 中）：
 
 ```text

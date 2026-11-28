@@ -111,12 +111,20 @@ impl Model<'_> {
         }
         stack.push((ty.clone(), interface.clone()));
         let selected = self.select_impl_inner(ty, interface, assumptions, stack);
-        if !matches!(selected, Ok(Some(_)))
-            && self.traits.interfaces[interface.id].name == "Hash"
-            && let Ty::Tuple(elements) = ty
+        let name = self.traits.interfaces[interface.id].name.as_str();
+        let elements = match (name, ty) {
+            ("Hash" | "Print" | "Debug", Ty::Tuple(elements)) => Some(elements.as_slice()),
+            ("Print" | "Debug", Ty::Array(element, _)) => {
+                Some(std::slice::from_ref(element.as_ref()))
+            }
+            _ => None,
+        };
+        if matches!(selected, Ok(None))
+            && let Some(elements) = elements
         {
+            let element_interface = self.aggregate_element_trait(interface);
             let result = elements.iter().try_for_each(|element| {
-                self.require_trait_inner(element, interface, assumptions, stack)
+                self.require_trait_inner(element, &element_interface, assumptions, stack)
             });
             stack.pop();
             return result;
@@ -305,7 +313,16 @@ impl Model<'_> {
                 if core_scalar(ty, true) {
                     return Some(true);
                 }
-                algebraic(self)
+                let element_interface = self.aggregate_element_trait(interface);
+                Some(match ty {
+                    Ty::Array(element, _) => {
+                        self.require_trait(element, &element_interface, &[]).is_ok()
+                    }
+                    Ty::Tuple(elements) => elements.iter().all(|element| {
+                        self.require_trait(element, &element_interface, &[]).is_ok()
+                    }),
+                    _ => false,
+                })
             }
             "Hash" => {
                 if matches!(ty, Ty::Float(_)) {
@@ -330,6 +347,20 @@ impl Model<'_> {
             "LowerExp" | "UpperExp" => Some(matches!(ty, Ty::Float(_))),
             "Error" => Some(false),
             _ => None,
+        }
+    }
+    fn aggregate_element_trait(&self, interface: &TraitRef) -> TraitRef {
+        if self.traits.interfaces[interface.id].name != "Print" {
+            return interface.clone();
+        }
+        TraitRef {
+            id: self
+                .traits
+                .interfaces
+                .iter()
+                .position(|item| item.definition.is_none() && item.name == "Debug")
+                .expect("语言 Debug trait 已注册"),
+            arguments: Vec::new(),
         }
     }
     pub fn normalize(&self, ty: &Ty, assumptions: &[Obligation]) -> Result<Ty, Diagnostic> {
@@ -611,9 +642,10 @@ impl Model<'_> {
         assumptions: &[Obligation],
     ) -> bool {
         self.builtin_trait(ty, interface)
-            || (self.traits.interfaces[interface.id].name == "Hash"
-                && matches!(ty, Ty::Tuple(_))
-                && self.require_trait(ty, interface, assumptions).is_ok())
+            || (matches!(
+                (self.traits.interfaces[interface.id].name.as_str(), ty),
+                ("Hash", Ty::Tuple(_)) | ("Print" | "Debug", Ty::Tuple(_) | Ty::Array(..))
+            ) && self.require_trait(ty, interface, assumptions).is_ok())
     }
 
     pub(in super::super) fn resolved_method(

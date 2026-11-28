@@ -398,6 +398,30 @@ impl Checker<'_, '_> {
                             ));
                         }
                     }
+                    if let BoundKind::Path(path) = bound.kind {
+                        let requirement = self
+                            .model
+                            .trait_ref(id.module, path, &bindings)
+                            .and_then(|interface| {
+                                self.assumptions(span)
+                                    .map(|assumptions| (interface, assumptions))
+                            });
+                        match requirement {
+                            Ok((interface, assumptions)) => {
+                                for element in elements {
+                                    self.trait_constraints.push((
+                                        super::super::traits::Obligation {
+                                            ty: element.clone(),
+                                            interface: interface.clone(),
+                                            span: span.clone(),
+                                        },
+                                        assumptions.clone(),
+                                    ));
+                                }
+                            }
+                            Err(error) => self.errors.push(error),
+                        }
+                    }
                 }
             }
         }

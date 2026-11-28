@@ -1,0 +1,34 @@
+use std.io.{println}
+use std.test.{assert_eq}
+
+struct Point { x: int }
+impl Debug for Point {
+    fn debug(self: &Self, out: &Formatter) {
+        out.debug_struct("Point").field("x", &self.x).finish()
+    }
+}
+
+fn main() {
+    let tuple = (1, "a")
+    let array = [1, 2, 3]
+    let some: Option[int] = Some(3)
+    let none: Option[int] = None
+    let ok: Result[int, string] = Ok(1)
+    let error: Result[int, string] = Err("bad")
+    let empty: [int; 0] = []
+    let unit: Result[(), string] = Ok(())
+    println(tuple)
+    println(array)
+    println(some, "|", none, "|", ok, "|", error)
+    println((), "|", empty, "|", unit)
+    let nested = (some, array)
+    println(f"{nested}|{tuple:?}")
+    let point = Point { x: 7 }
+    let wrapped: Result[Point, string] = Ok(point)
+    println((point,), "|", [point], "|", Some(point), "|", wrapped)
+    println(f"{tuple:#?}")
+    assert_eq(tuple, (1, "a"))
+    assert_eq(array, [1, 2, 3])
+    assert_eq(some, Some(3))
+    assert_eq(ok, Ok(1))
+}

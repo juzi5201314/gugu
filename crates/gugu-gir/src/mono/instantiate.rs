@@ -483,24 +483,41 @@ fn resolve_dispatch(
                 .insert(context.item_key(implementation));
         }
         let Some(callable) = method.callable else {
-            if context.model.traits.interfaces[interface.id].name == "Hash"
-                && matches!(self_ty, Ty::Tuple(_))
-            {
+            let helper = match (
+                context.model.traits.interfaces[interface.id].name.as_str(),
+                &self_ty,
+            ) {
+                ("Hash", Ty::Tuple(_)) => Some(("std/hash.gg", "hash_tuple")),
+                ("Print" | "Debug", Ty::Tuple(_)) => Some(("std/fmt.gg", "format_tuple")),
+                ("Print" | "Debug", Ty::Array(..)) => Some(("std/fmt.gg", "format_array")),
+                _ => None,
+            };
+            if let Some((path, name)) = helper {
                 let definition = context
                     .module
                     .definitions
                     .iter()
                     .position(|definition| {
-                        definition.name == "hash_tuple"
+                        definition.name == name
                             && definition.location.as_ref().is_some_and(|location| {
-                                context.module.sources[location.source as usize].path
-                                    == "std/hash.gg"
+                                context.module.sources[location.source as usize].path == path
                             })
                     })
-                    .ok_or_else(|| inconsistency("std.hash 缺少元组 Hash 馈送函数"))?;
+                    .ok_or_else(|| inconsistency("标准库缺少聚合 trait 实现函数"))?;
+                let declared = context.module.definitions[definition]
+                    .signature
+                    .ok_or_else(|| inconsistency("聚合 trait 实现函数缺少签名"))?;
+                let Ty::Callable(_, arguments, declared) = context.semantic_type(declared)? else {
+                    return Err(inconsistency("聚合 trait 实现不是函数项"));
+                };
+                let mut bindings = BTreeMap::new();
+                unify(declared, &signature, &mut bindings)?;
                 return Ok(Some(ResolvedCallee {
                     definition: hir::DefId(definition as u32),
-                    arguments: vec![self_ty],
+                    arguments: arguments
+                        .iter()
+                        .map(|ty| substitute(ty, &bindings))
+                        .collect(),
                     signature,
                 }));
             }

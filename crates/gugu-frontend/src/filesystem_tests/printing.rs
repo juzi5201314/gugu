@@ -203,6 +203,97 @@ fn main() {
     );
 }
 
+#[test]
+fn aggregate_printing_and_debug_formatting() {
+    let actual = output(include_str!("fixtures/aggregate_printing.gg"), &[]);
+    let expected = [
+        "(1, \"a\")\n",
+        "[1, 2, 3]\n",
+        "Some(3)|None|Ok(1)|Err(\"bad\")\n",
+        "()|[]|Ok(())\n",
+        "(Some(3), [1, 2, 3])|(1, \"a\")\n",
+        "(Point { x: 7 })|[Point { x: 7 }]|Some(Point { x: 7 })|Ok(Point { x: 7 })\n",
+        "(\n    1,\n    \"a\",\n)\n",
+    ];
+    assert_eq!(
+        actual,
+        expected
+            .into_iter()
+            .map(|text| (1, text.as_bytes().to_vec()))
+            .collect::<Vec<_>>()
+    );
+}
+
+#[test]
+fn aggregate_printing_rejects_missing_format_traits_at_use() {
+    for (declaration, value, expression) in [
+        (
+            "struct Point { x: int }",
+            "Point { x: 1 }",
+            "println(value)",
+        ),
+        (
+            "struct Point { x: int }",
+            "Point { x: 1 }",
+            "println((value,))",
+        ),
+        (
+            "struct Point { x: int }",
+            "Point { x: 1 }",
+            "_ = f\"{value}\"",
+        ),
+        ("enum Shape { Dot }", "Shape::Dot", "println(value)"),
+    ] {
+        let source = format!(
+            "use std.io.{{println}}\n{declaration}\nfn main() {{\n    let value = {value}\n    {expression}\n}}"
+        );
+        let compiled = Compiler::shared().compile_to_lir(CompileRequest::single_file(
+            "main.gg",
+            &source,
+            TargetName::X86_64Linux,
+        ));
+        assert!(!compiled.is_success());
+        let diagnostics = compiled.diagnostics().items();
+        assert!(
+            diagnostics.iter().any(|diagnostic| {
+                diagnostic.code() == crate::DiagnosticCode::InvalidType
+                    && (diagnostic.message().contains("Print")
+                        || diagnostic.message().contains("Debug"))
+                    && diagnostic.span().is_some_and(|span| span.line() == 5)
+            }),
+            "{expression}: {diagnostics:?}"
+        );
+        assert!(diagnostics.iter().all(|diagnostic| {
+            !diagnostic.message().contains("内部") && !diagnostic.message().contains("已检查接口")
+        }));
+    }
+}
+
+#[test]
+fn aggregate_printing_keeps_builtin_impls_authoritative() {
+    for ty in ["(int,)", "[int; 1]"] {
+        let source = format!(
+            "impl Print for {ty} {{ fn print(self: &Self, out: &Formatter) {{}} }}\nfn main() {{}}"
+        );
+        let compiled = Compiler::shared().compile_sema_for_test(CompileRequest::single_file(
+            "main.gg",
+            &source,
+            TargetName::X86_64Linux,
+        ));
+        assert!(!compiled.is_success());
+        assert!(
+            compiled.diagnostics().items().iter().any(|diagnostic| {
+                diagnostic.code() == crate::DiagnosticCode::InvalidDeclaration
+                    && diagnostic
+                        .message()
+                        .contains("不能覆盖编译器提供的语言实现")
+            }),
+            "{ty}: {:?}",
+            compiled.diagnostics().items()
+        );
+    }
+}
+
 fn formatting_fixture_oracle() -> String {
     use super::formatting::oracle;
     use gugu_sema::string::fmt;
