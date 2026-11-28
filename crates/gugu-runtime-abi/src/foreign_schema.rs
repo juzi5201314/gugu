@@ -97,6 +97,157 @@ pub struct RuntimePressureState {
 }
 pub const RUNTIME_PRESSURE_OFFSET: usize = 3888;
 
+/// 从优化后 LIR / GIR 数出来的外调与汇编站点。
+#[derive(Clone, Copy, Debug, Default, Eq, PartialEq, Serialize, Deserialize)]
+#[serde(rename_all = "kebab-case")]
+pub struct ForeignDemand {
+    /// 普通 `ForeignBridge` 调用点。
+    pub ordinary: u32,
+    /// `ForeignBridge[DirtyCpu]` 调用点。
+    pub dirty: u32,
+    /// 直接 `ForeignLeaf` 调用点。
+    pub leaf: u32,
+    /// 受管 inline `asm` 站点。
+    pub asm: u32,
+    /// 模块级 `global_asm` 声明。
+    pub global_asm: u32,
+    /// 阻塞 I/O 原语站点。每条同时计入 `ordinary`。
+    pub blocking_io: u32,
+}
+
+/// 已验证的外调 runtime 契约。
+#[derive(Clone, Debug, Eq, PartialEq, Serialize, Deserialize)]
+#[serde(rename_all = "kebab-case")]
+pub struct ForeignRuntimeContract {
+    /// 内部 schema 版本。
+    pub schema: u32,
+    /// 普通 blocking worker 上限。
+    pub max_blocking_workers: u32,
+    /// 压力期间的普通 blocking 准入目标；不会撤销在途 credit。
+    pub pressure_blocking_workers: u32,
+    /// 每个 waiter 的元数据字节。
+    pub waiter_bytes: u32,
+    /// waiter 队列字节上限。
+    pub queue_cap_bytes: u32,
+    /// 一次 service 的 credit 预算。
+    pub service_budget: u32,
+    /// blocking worker 的 system stack 字节。
+    pub worker_stack_bytes: u32,
+    /// 压力 retake 的逻辑宽限。
+    pub retake_grace_us: u64,
+    /// 机器请求记录大小与字段偏移；顺序由 native_request_layout 固定。
+    pub native_request_layout: [u32; 10],
+    /// 单 processor dirty 池的执行上限与同页偏移。
+    pub dirty_pool: [u32; 2],
+    /// 普通与 dirty C worker 共同消费的 native 包布局。
+    pub packet_layout: [u32; 7],
+    /// 上游需求。
+    pub demand: ForeignDemand,
+}
+
+fn native_request_layout() -> [u32; 10] {
+    [
+        NATIVE_REQUEST_BYTES,
+        NATIVE_REQUEST_OPERATION,
+        NATIVE_REQUEST_ARGUMENTS,
+        NATIVE_REQUEST_VALUE,
+        NATIVE_REQUEST_ERROR,
+        NATIVE_REQUEST_THREAD_HANDLE,
+        NATIVE_REQUEST_EXTRA_ARGUMENTS,
+        NATIVE_REQUEST_OWNER,
+        NATIVE_REQUEST_CANCEL,
+        NATIVE_REQUEST_CANCELLED,
+    ]
+    .map(|offset| u32::try_from(offset).expect("native 请求布局适配 u32"))
+}
+
+impl ForeignRuntimeContract {
+    pub fn build(demand: ForeignDemand) -> Result<Self, RawModelError> {
+        let contract = Self {
+            schema: FOREIGN_SCHEMA,
+            max_blocking_workers: MAX_BLOCKING_WORKERS,
+            pressure_blocking_workers: PRESSURE_BLOCKING_WORKERS,
+            waiter_bytes: BLOCKING_WAITER_BYTES,
+            queue_cap_bytes: BLOCKING_QUEUE_CAP_BYTES,
+            service_budget: BLOCKING_SERVICE_BUDGET,
+            worker_stack_bytes: BLOCKING_WORKER_STACK_BYTES,
+            retake_grace_us: RETAKE_GRACE_US,
+            native_request_layout: native_request_layout(),
+            dirty_pool: [MAX_DIRTY_WORKERS, DIRTY_POOL_OFFSET],
+            packet_layout: super::foreign_packet::layout(),
+            demand,
+        };
+        contract.verify()?;
+        Ok(contract)
+    }
+
+    pub fn verify(&self) -> Result<(), RawModelError> {
+        if self.schema != FOREIGN_SCHEMA
+            || self.max_blocking_workers != MAX_BLOCKING_WORKERS
+            || self.pressure_blocking_workers != PRESSURE_BLOCKING_WORKERS
+            || self.waiter_bytes != BLOCKING_WAITER_BYTES
+            || self.queue_cap_bytes != BLOCKING_QUEUE_CAP_BYTES
+            || self.service_budget != BLOCKING_SERVICE_BUDGET
+            || self.worker_stack_bytes != BLOCKING_WORKER_STACK_BYTES
+            || self.retake_grace_us != RETAKE_GRACE_US
+            || self.native_request_layout != native_request_layout()
+            || self.dirty_pool != [MAX_DIRTY_WORKERS, DIRTY_POOL_OFFSET]
+            || self.packet_layout != super::foreign_packet::layout()
+        {
+            return Err(RawModelError::new(
+                "外调 worker、waiter 或 retake 宽限与登记 profile 不一致",
+            ));
+        }
+        if !self.queue_cap_bytes.is_multiple_of(self.waiter_bytes) {
+            return Err(RawModelError::new(
+                "BlockingBridge 队列容量不是 waiter 字节的整数倍",
+            ));
+        }
+        if self.demand.blocking_io > self.demand.ordinary {
+            return Err(RawModelError::new("阻塞 I/O 站点超过普通 bridge 站点"));
+        }
+        Ok(())
+    }
+
+    pub fn canonical_bytes(&self) -> Vec<u8> {
+        crate::canonical::to_vec(self).expect("外调契约可序列化")
+    }
+
+    /// 外调契约的域隔离内容身份。
+    pub fn fingerprint(&self) -> [u8; 32] {
+        *blake3::Hasher::new_derive_key("gugu-foreign-runtime-v1")
+            .update(&self.canonical_bytes())
+            .finalize()
+            .as_bytes()
+    }
+
+    pub fn dump(&self) -> String {
+        let mut output = String::new();
+        writeln!(
+            output,
+            "foreign schema={} blocking-workers={} waiter-bytes={} queue-cap={} grace-us={}",
+            self.schema,
+            self.max_blocking_workers,
+            self.waiter_bytes,
+            self.queue_cap_bytes,
+            self.retake_grace_us,
+        )
+        .expect("String写入");
+        writeln!(
+            output,
+            "foreign-demand ordinary={} dirty={} leaf={} asm={} global-asm={} blocking-io={}",
+            self.demand.ordinary,
+            self.demand.dirty,
+            self.demand.leaf,
+            self.demand.asm,
+            self.demand.global_asm,
+            self.demand.blocking_io,
+        )
+        .expect("String写入");
+        output
+    }
+}
+
 #[cfg(test)]
 mod image_profile_tests {
     use super::*;
@@ -358,156 +509,5 @@ mod image_profile_tests {
                 DIRTY_POOL_OFFSET + 64 + MAX_BLOCKING_WORKERS * 128 + MAX_DIRTY_WORKERS * 8 <= 4096
             )
         };
-    }
-}
-
-/// 从优化后 LIR / GIR 数出来的外调与汇编站点。
-#[derive(Clone, Copy, Debug, Default, Eq, PartialEq, Serialize, Deserialize)]
-#[serde(rename_all = "kebab-case")]
-pub struct ForeignDemand {
-    /// 普通 `ForeignBridge` 调用点。
-    pub ordinary: u32,
-    /// `ForeignBridge[DirtyCpu]` 调用点。
-    pub dirty: u32,
-    /// 直接 `ForeignLeaf` 调用点。
-    pub leaf: u32,
-    /// 受管 inline `asm` 站点。
-    pub asm: u32,
-    /// 模块级 `global_asm` 声明。
-    pub global_asm: u32,
-    /// 阻塞 I/O 原语站点。每条同时计入 `ordinary`。
-    pub blocking_io: u32,
-}
-
-/// 已验证的外调 runtime 契约。
-#[derive(Clone, Debug, Eq, PartialEq, Serialize, Deserialize)]
-#[serde(rename_all = "kebab-case")]
-pub struct ForeignRuntimeContract {
-    /// 内部 schema 版本。
-    pub schema: u32,
-    /// 普通 blocking worker 上限。
-    pub max_blocking_workers: u32,
-    /// 压力期间的普通 blocking 准入目标；不会撤销在途 credit。
-    pub pressure_blocking_workers: u32,
-    /// 每个 waiter 的元数据字节。
-    pub waiter_bytes: u32,
-    /// waiter 队列字节上限。
-    pub queue_cap_bytes: u32,
-    /// 一次 service 的 credit 预算。
-    pub service_budget: u32,
-    /// blocking worker 的 system stack 字节。
-    pub worker_stack_bytes: u32,
-    /// 压力 retake 的逻辑宽限。
-    pub retake_grace_us: u64,
-    /// 机器请求记录大小与字段偏移；顺序由 native_request_layout 固定。
-    pub native_request_layout: [u32; 10],
-    /// 单 processor dirty 池的执行上限与同页偏移。
-    pub dirty_pool: [u32; 2],
-    /// 普通与 dirty C worker 共同消费的 native 包布局。
-    pub packet_layout: [u32; 7],
-    /// 上游需求。
-    pub demand: ForeignDemand,
-}
-
-fn native_request_layout() -> [u32; 10] {
-    [
-        NATIVE_REQUEST_BYTES,
-        NATIVE_REQUEST_OPERATION,
-        NATIVE_REQUEST_ARGUMENTS,
-        NATIVE_REQUEST_VALUE,
-        NATIVE_REQUEST_ERROR,
-        NATIVE_REQUEST_THREAD_HANDLE,
-        NATIVE_REQUEST_EXTRA_ARGUMENTS,
-        NATIVE_REQUEST_OWNER,
-        NATIVE_REQUEST_CANCEL,
-        NATIVE_REQUEST_CANCELLED,
-    ]
-    .map(|offset| u32::try_from(offset).expect("native 请求布局适配 u32"))
-}
-
-impl ForeignRuntimeContract {
-    pub fn build(demand: ForeignDemand) -> Result<Self, RawModelError> {
-        let contract = Self {
-            schema: FOREIGN_SCHEMA,
-            max_blocking_workers: MAX_BLOCKING_WORKERS,
-            pressure_blocking_workers: PRESSURE_BLOCKING_WORKERS,
-            waiter_bytes: BLOCKING_WAITER_BYTES,
-            queue_cap_bytes: BLOCKING_QUEUE_CAP_BYTES,
-            service_budget: BLOCKING_SERVICE_BUDGET,
-            worker_stack_bytes: BLOCKING_WORKER_STACK_BYTES,
-            retake_grace_us: RETAKE_GRACE_US,
-            native_request_layout: native_request_layout(),
-            dirty_pool: [MAX_DIRTY_WORKERS, DIRTY_POOL_OFFSET],
-            packet_layout: super::foreign_packet::layout(),
-            demand,
-        };
-        contract.verify()?;
-        Ok(contract)
-    }
-
-    pub fn verify(&self) -> Result<(), RawModelError> {
-        if self.schema != FOREIGN_SCHEMA
-            || self.max_blocking_workers != MAX_BLOCKING_WORKERS
-            || self.pressure_blocking_workers != PRESSURE_BLOCKING_WORKERS
-            || self.waiter_bytes != BLOCKING_WAITER_BYTES
-            || self.queue_cap_bytes != BLOCKING_QUEUE_CAP_BYTES
-            || self.service_budget != BLOCKING_SERVICE_BUDGET
-            || self.worker_stack_bytes != BLOCKING_WORKER_STACK_BYTES
-            || self.retake_grace_us != RETAKE_GRACE_US
-            || self.native_request_layout != native_request_layout()
-            || self.dirty_pool != [MAX_DIRTY_WORKERS, DIRTY_POOL_OFFSET]
-            || self.packet_layout != super::foreign_packet::layout()
-        {
-            return Err(RawModelError::new(
-                "外调 worker、waiter 或 retake 宽限与登记 profile 不一致",
-            ));
-        }
-        if !self.queue_cap_bytes.is_multiple_of(self.waiter_bytes) {
-            return Err(RawModelError::new(
-                "BlockingBridge 队列容量不是 waiter 字节的整数倍",
-            ));
-        }
-        if self.demand.blocking_io > self.demand.ordinary {
-            return Err(RawModelError::new("阻塞 I/O 站点超过普通 bridge 站点"));
-        }
-        Ok(())
-    }
-
-    pub fn canonical_bytes(&self) -> Vec<u8> {
-        crate::canonical::to_vec(self).expect("外调契约可序列化")
-    }
-
-    /// 外调契约的域隔离内容身份。
-    pub fn fingerprint(&self) -> [u8; 32] {
-        *blake3::Hasher::new_derive_key("gugu-foreign-runtime-v1")
-            .update(&self.canonical_bytes())
-            .finalize()
-            .as_bytes()
-    }
-
-    pub fn dump(&self) -> String {
-        let mut output = String::new();
-        writeln!(
-            output,
-            "foreign schema={} blocking-workers={} waiter-bytes={} queue-cap={} grace-us={}",
-            self.schema,
-            self.max_blocking_workers,
-            self.waiter_bytes,
-            self.queue_cap_bytes,
-            self.retake_grace_us,
-        )
-        .expect("String写入");
-        writeln!(
-            output,
-            "foreign-demand ordinary={} dirty={} leaf={} asm={} global-asm={} blocking-io={}",
-            self.demand.ordinary,
-            self.demand.dirty,
-            self.demand.leaf,
-            self.demand.asm,
-            self.demand.global_asm,
-            self.demand.blocking_io,
-        )
-        .expect("String写入");
-        output
     }
 }

@@ -2,7 +2,7 @@ use gugu_compiler::{CompileRequest, Compiler, EMBEDDED_ARTIFACTS, TargetName};
 
 fn compile(source: &str, target: TargetName) -> gugu_compiler::Compilation {
     let output = Compiler::with_artifacts(&EMBEDDED_ARTIFACTS)
-        .compile(CompileRequest::single_file("main.gg", source, target));
+        .compile_full_for_test(CompileRequest::single_file("main.gg", source, target));
     assert!(output.is_success(), "{:?}", output.diagnostics().items());
     output
 }
@@ -10,7 +10,7 @@ fn compile(source: &str, target: TargetName) -> gugu_compiler::Compilation {
 #[test]
 fn macos_process_image_imports_spawn_and_wait_from_libsystem() {
     let output = compile(
-        include_str!("fixtures/process_output.gg"),
+        include_str!("../fixtures/process_output.gg"),
         TargetName::X86_64Macos,
     );
     let image = output.image_plan().unwrap().macos_image();
@@ -22,7 +22,7 @@ fn macos_process_image_imports_spawn_and_wait_from_libsystem() {
 #[test]
 fn linux_process_image_imports_environment_as_data_not_a_plt_function() {
     let output = compile(
-        include_str!("fixtures/process_env.gg"),
+        include_str!("../fixtures/process_env.gg"),
         TargetName::X86_64Linux,
     );
     let image = output.image_plan().unwrap();
@@ -112,7 +112,7 @@ fn linux_process_image_imports_environment_as_data_not_a_plt_function() {
 #[test]
 fn windows_process_image_uses_explicit_system_imports_without_crt() {
     let output = compile(
-        include_str!("fixtures/process_protocol.gg"),
+        include_str!("../fixtures/process_protocol.gg"),
         TargetName::X86_64Windows,
     );
     let bytes = output.image_plan().unwrap().windows_image();

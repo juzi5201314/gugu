@@ -6,7 +6,11 @@
 //! 内建块物化（[`prebuild`]）与安装（`prefix`）也在本层：它们的表覆盖 sema 层与 GIR 层。
 //! 只依赖 `gugu-base`、`gugu-runtime-abi` 与 `gugu-sema`；LIR、后端与镜像在上层。
 
-use std::{collections::BTreeSet, path::PathBuf};
+use std::{
+    collections::BTreeSet,
+    path::PathBuf,
+    sync::{Arc, Mutex, OnceLock},
+};
 
 use gugu_base::{canonical, diagnostics, hash, query, source, target};
 use gugu_runtime_abi as runtime;
@@ -27,6 +31,8 @@ pub mod mono;
 mod pipeline;
 pub mod prebuild;
 mod prefix;
+#[cfg(any(test, feature = "test-support"))]
+pub use prefix::BuiltinPrefix;
 #[cfg(all(test, feature = "runtime-gc-probes"))]
 mod probe_source_tests;
 #[cfg(any(test, feature = "test-support"))]
@@ -137,6 +143,28 @@ pub fn bootstrap_with(
     resources: crate::runtime::RuntimeResources<'_>,
     mode: PrefixMode,
 ) -> Result<FrontendOutput, Vec<Diagnostic>> {
+    bootstrap_stage(input, queries, resources, mode, true)
+}
+
+/// 测试专用前端入口：仅执行解析、宏展开、名称解析、语义检查、HIR 与文档/lint 诊断，
+/// 跳过 GIR/单态化/全程序分析与 GIR 优化 pass。
+#[cfg(any(test, feature = "test-support"))]
+pub fn bootstrap_sema_with(
+    input: SourceInput<'_>,
+    queries: &crate::query::QueryEngine,
+    resources: crate::runtime::RuntimeResources<'_>,
+    mode: PrefixMode,
+) -> Result<FrontendOutput, Vec<Diagnostic>> {
+    bootstrap_stage(input, queries, resources, mode, false)
+}
+
+fn bootstrap_stage(
+    input: SourceInput<'_>,
+    queries: &crate::query::QueryEngine,
+    resources: crate::runtime::RuntimeResources<'_>,
+    mode: PrefixMode,
+    derive_gir: bool,
+) -> Result<FrontendOutput, Vec<Diagnostic>> {
     match input {
         SourceInput::EmptyPackage => Ok(FrontendOutput {
             path: None,
@@ -183,6 +211,7 @@ pub fn bootstrap_with(
             queries,
             resources,
             mode,
+            derive_gir,
         ),
     }
 }
@@ -192,22 +221,53 @@ pub fn installs_builtin_source(logical_path: &str, entry: &str) -> bool {
     !is_probe_builtin_source(logical_path) || is_probe_builtin_source(entry)
 }
 
-/// 把 build-time artifact 的 source blob 适配为本次 session 的 frontend 编号前缀。
+/// 缓存进程内构建过的内建源码快照与路径集合，避免每次编译对 96 份内建 `.gg`
+/// 重复执行 UTF-8 校验、BLAKE3 摘要与行首表构建。
 ///
-/// source table 的唯一权威是嵌入 artifact；compiler 不再通过 runtime 模块的 `include_str!`
-/// 持有第二份源码表。内建源占据文件 ID 前缀（artifact manifest 顺序），用户源码排序追加在后，
-/// 物化表的每个下标因此在新会话里仍然指向同一个内建单元。
-fn install_builtin_sources(
-    source_map: &mut SourceMap,
+/// 最多登记 8 份（5 目标 × 普通/探针风味）；`SourceSnapshot` 内部使用 `Arc`，克隆 O(1)。
+const BUILTIN_SOURCES_CACHE_CAPACITY: usize = 8;
+
+type BuiltinPathSet = Arc<BTreeSet<String>>;
+
+#[derive(Clone)]
+struct CachedBuiltinSources {
+    target: String,
+    manifest_digest: [u8; 32],
+    include_probes: bool,
+    snapshots: Arc<[SourceSnapshot]>,
+    paths: BuiltinPathSet,
+    runtime_paths: BuiltinPathSet,
+}
+
+fn builtin_sources_cache() -> &'static Mutex<Vec<CachedBuiltinSources>> {
+    static CACHE: OnceLock<Mutex<Vec<CachedBuiltinSources>>> = OnceLock::new();
+    CACHE.get_or_init(|| Mutex::new(Vec::new()))
+}
+
+fn cached_builtin_sources(
     resources: crate::runtime::RuntimeResources<'_>,
-    entry: &str,
-) -> Result<(BTreeSet<String>, BTreeSet<String>), Vec<Diagnostic>> {
+    include_probes: bool,
+) -> Result<CachedBuiltinSources, Vec<Diagnostic>> {
+    let target = resources.target_name();
+    let manifest_digest = resources.manifest_digest();
+    {
+        let cache = builtin_sources_cache()
+            .lock()
+            .expect("内建源码快照缓存锁中毒");
+        if let Some(entry) = cache.iter().find(|entry| {
+            entry.target == target
+                && entry.manifest_digest == manifest_digest
+                && entry.include_probes == include_probes
+        }) {
+            return Ok(entry.clone());
+        }
+    }
     let mut paths = BTreeSet::new();
     let mut runtime_paths = BTreeSet::new();
     let mut snapshots = Vec::new();
     for source in resources.source_blobs() {
         let logical = source.logical_path.as_str();
-        if !installs_builtin_source(logical, entry) {
+        if !include_probes && is_probe_builtin_source(logical) {
             continue;
         }
         let snapshot =
@@ -228,8 +288,44 @@ fn install_builtin_sources(
     // 未覆盖的源追加在物化块之后。组内保持 manifest 顺序（稳定排序），不能按路径重排：
     // 物化表里的位置以「物化源占前缀」为前提，顺序不能与构建期不同。
     snapshots.sort_by_key(|snapshot| is_probe_builtin_source(snapshot.logical_path()));
+    let entry = CachedBuiltinSources {
+        target: target.to_owned(),
+        manifest_digest,
+        include_probes,
+        snapshots: Arc::from(snapshots),
+        paths: Arc::new(paths),
+        runtime_paths: Arc::new(runtime_paths),
+    };
+    let mut cache = builtin_sources_cache()
+        .lock()
+        .expect("内建源码快照缓存锁中毒");
+    if let Some(existing) = cache.iter().find(|item| {
+        item.target == entry.target
+            && item.manifest_digest == entry.manifest_digest
+            && item.include_probes == entry.include_probes
+    }) {
+        return Ok(existing.clone());
+    }
+    if cache.len() == BUILTIN_SOURCES_CACHE_CAPACITY {
+        cache.remove(0);
+    }
+    cache.push(entry.clone());
+    Ok(entry)
+}
+
+/// 把 build-time artifact 的 source blob 适配为本次 session 的 frontend 编号前缀。
+///
+/// source table 的唯一权威是嵌入 artifact；compiler 不再通过 runtime 模块的 `include_str!`
+/// 持有第二份源码表。内建源占据文件 ID 前缀（artifact manifest 顺序），用户源码排序追加在后，
+/// 物化表的每个下标因此在新会话里仍然指向同一个内建单元。
+fn install_builtin_sources(
+    source_map: &mut SourceMap,
+    resources: crate::runtime::RuntimeResources<'_>,
+    entry: &str,
+) -> Result<(BuiltinPathSet, BuiltinPathSet), Vec<Diagnostic>> {
+    let cached = cached_builtin_sources(resources, is_probe_builtin_source(entry))?;
     source_map
-        .prepend_builtin_prefix(snapshots)
+        .prepend_builtin_prefix(cached.snapshots.iter().cloned())
         .map_err(|error| {
             vec![Diagnostic::error(
                 DiagnosticCode::ModuleInvalidPath,
@@ -237,7 +333,7 @@ fn install_builtin_sources(
                 None,
             )]
         })?;
-    Ok((paths, runtime_paths))
+    Ok((cached.paths, cached.runtime_paths))
 }
 
 #[expect(
@@ -256,6 +352,7 @@ fn check_sources(
     queries: &crate::query::QueryEngine,
     resources: crate::runtime::RuntimeResources<'_>,
     mode: PrefixMode,
+    derive_gir: bool,
 ) -> Result<FrontendOutput, Vec<Diagnostic>> {
     // 物化表按 target 派生：目标不一致时内建块的裁剪与物化位置都会错位，必须在这里失败。
     if resources.target_name() != cfg.target().name() {
@@ -281,6 +378,7 @@ fn check_sources(
                 .count();
             Some(prefix::BuiltinPrefix::decode(
                 resources.prebuilt(),
+                resources.target_name(),
                 materialized_sources,
                 source_map,
             )?)
@@ -360,6 +458,52 @@ fn check_sources(
             "target 入口在 cfg 裁项与宏展开后必须包含 `fn main() { ... }` 或 `fn main() = ...`",
             Some(span),
         )]);
+    }
+    if !derive_gir {
+        let sema_prefix = prefix.as_ref().map(prefix::BuiltinPrefix::sema);
+        let names =
+            names::analyze_with_prefix(package_identity, external_packages, &modules, sema_prefix)?;
+        let (layouts, registry_identity, checked, hir, lints) = {
+            let sema = semantics::check(
+                &modules,
+                &names,
+                source_map,
+                cfg,
+                entry_function,
+                queries,
+                &runtime_paths,
+                sema_prefix,
+                embed.cloned(),
+            )
+            .map_err(|errors| expand::reanchor_errors(errors, source_map))?;
+            let mut lints = semantics::must_use_lints(&modules, &sema.checked, source_map)
+                .map_err(|errors| expand::reanchor_errors(errors, source_map))?;
+            lints.extend(docs::missing_docs_lints(&modules, source_map));
+            (
+                sema.layouts,
+                sema.registry_identity,
+                sema.checked,
+                sema.hir,
+                lints,
+            )
+        };
+        return Ok(frontend_output(
+            entry,
+            source_map,
+            modules,
+            names,
+            layouts,
+            registry_identity,
+            expansion_inputs,
+            checked,
+            hir,
+            analysis::empty_world(),
+            functions::InstalledFunctions::default(),
+            mono::empty_world(),
+            gir::empty_world(),
+            gir::pass::GirPassStats::default(),
+            lints,
+        ));
     }
     let (names, derived) = derive_world(
         &modules,

@@ -5,7 +5,7 @@ use crate::{CompileRequest, Compiler, DiagnosticCode, TargetName};
 #[test]
 fn direct_blocking_call_counts_as_ordinary_and_blocking() {
     let source = "fn main() {}";
-    let compilation = Compiler::shared().compile(CompileRequest::single_file(
+    let compilation = Compiler::shared().compile_to_lir(CompileRequest::single_file(
         "main.gg",
         source,
         TargetName::X86_64Linux,
@@ -51,13 +51,13 @@ fn direct_blocking_call_counts_as_ordinary_and_blocking() {
 #[test]
 fn std_io_and_path_compile_and_user_path_stays_reserved() {
     let source = "use std.io\nuse std.path\nfn main() {}";
-    let cold = Compiler::new().compile(CompileRequest::single_file(
+    let cold = Compiler::new().compile_full_for_test(CompileRequest::single_file(
         "main.gg",
         source,
         TargetName::X86_64Linux,
     ));
     assert!(cold.is_success(), "{:?}", cold.diagnostics().items());
-    let warm = Compiler::new().compile(CompileRequest::single_file(
+    let warm = Compiler::new().compile_full_for_test(CompileRequest::single_file(
         "main.gg",
         source,
         TargetName::X86_64Linux,
@@ -66,7 +66,7 @@ fn std_io_and_path_compile_and_user_path_stays_reserved() {
     assert_eq!(cold.dump_runtime(), warm.dump_runtime());
     // runtime 的 fs service 池常驻镜像并自带一处 blocking-io 站点；断言
     // std.io/std.path 相对空程序基线不新增站点。
-    let baseline = Compiler::new().compile(CompileRequest::single_file(
+    let baseline = Compiler::new().compile_full_for_test(CompileRequest::single_file(
         "main.gg",
         "fn main() {}",
         TargetName::X86_64Linux,
@@ -83,7 +83,7 @@ fn std_io_and_path_compile_and_user_path_stays_reserved() {
     );
     let dump = cold.dump_runtime().expect("dump");
     assert!(dump.contains("blocking-io="));
-    let reserved = Compiler::new().compile(CompileRequest::single_file(
+    let reserved = Compiler::new().compile_full_for_test(CompileRequest::single_file(
         "main.gg",
         "struct Path {}\nfn main() {}",
         TargetName::X86_64Linux,

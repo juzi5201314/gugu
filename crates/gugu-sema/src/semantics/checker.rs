@@ -253,23 +253,26 @@ pub(super) fn check(
             Vec::new()
         }
     };
-    if let Some(prefix) = installed {
+    let initialization = if let Some(prefix) = installed {
         // 内建模块未参与检查：初始化计划与 body 结果按前缀补齐，用户部分按定义序追加。
         let materialized = |definition: super::DefRef| {
             prefix.covers_module(&model.modules[definition.module].path)
         };
         initialization.retain(|entry| !materialized(entry.definition));
         let mut merged = prefix.checked().initialization.clone();
-        merged.append(&mut initialization);
-        initialization = merged;
-    }
+        merged.extend(initialization);
+        merged
+    } else {
+        initialization.into()
+    };
     if errors.is_empty() {
-        let mut bodies = bodies;
-        if let Some(prefix) = installed {
+        let bodies = if let Some(prefix) = installed {
             let mut merged = prefix.checked().bodies.clone();
-            merged.append(&mut bodies);
-            bodies = merged;
-        }
+            merged.extend(bodies);
+            merged
+        } else {
+            bodies.into()
+        };
         let output = super::output::CheckedSemantics {
             early_constants: early.clone(),
             bodies,

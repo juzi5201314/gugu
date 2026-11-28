@@ -6,4 +6,5 @@ description = "Target-independent Gugu compiler artifact schemas and build-time 
 
 [dependencies]
 blake3 = "1"
+bytes = { workspace = true, features = ["serde"] }
 serde.workspace = true

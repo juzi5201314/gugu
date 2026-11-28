@@ -10,10 +10,14 @@ const GPR: u64 = 49152;
 const CODE_BASE: u64 = 1048576;
 const LOAD_BIAS: u64 = 4096;
 
-#[test]
+pub(super) fn run_all() {
+    callback_poll_parent_keeps_exact_roots_during_yield();
+    foreign_return_maps_preserve_caller_resource_during_native_wait();
+    parked_stack_preserves_file_until_coroutine_leaves_registry();
+}
+
 fn callback_poll_parent_keeps_exact_roots_during_yield() {
-    let (hir, bodies) = runtime_bodies();
-    let mut harness = ResourceHarness::from_bodies(&hir, &bodies);
+    let mut harness = runtime_harness();
     harness.block_budget = 32768;
     let (mut memory, _) = graph_memory();
     install_caller(&mut memory, 1, false);
@@ -21,11 +25,9 @@ fn callback_poll_parent_keeps_exact_roots_during_yield() {
     remove_roots(&mut harness, &mut memory);
 }
 
-#[test]
 fn foreign_return_maps_preserve_caller_resource_during_native_wait() {
-    let output = compile();
     for dirty in [false, true] {
-        let mut harness = ResourceHarness::new(&output);
+        let mut harness = runtime_harness();
         harness.gc_config = CONFIG;
         harness.block_budget = 32768;
         let (mut memory, _) = graph_memory();
@@ -56,10 +58,8 @@ fn foreign_return_maps_preserve_caller_resource_during_native_wait() {
     }
 }
 
-#[test]
 fn parked_stack_preserves_file_until_coroutine_leaves_registry() {
-    let (hir, bodies) = runtime_bodies();
-    let mut harness = ResourceHarness::from_bodies(&hir, &bodies);
+    let mut harness = runtime_harness();
     harness.gc_config = CONFIG;
     harness.block_budget = 32768;
     let (mut memory, _) = graph_memory();

@@ -8,7 +8,7 @@ const DESC: u64 = 7100;
 
 #[test]
 fn native_error_one_does_not_complete_join() {
-    let output = Compiler::shared().compile(CompileRequest::single_file(
+    let output = Compiler::shared().compile_to_lir(CompileRequest::single_file(
         "main.gg",
         include_str!("../../../../gugu-compiler/tests/fixtures/fs_join_error.gg"),
         TargetName::X86_64Linux,

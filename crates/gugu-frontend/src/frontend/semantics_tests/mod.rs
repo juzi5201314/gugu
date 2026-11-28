@@ -7,6 +7,8 @@ mod array_init;
 mod callable;
 #[cfg(feature = "slow-tests")]
 mod comptime;
+#[cfg(feature = "slow-tests")]
+mod discarded_if;
 mod expand;
 mod hir;
 #[cfg(feature = "slow-tests")]
@@ -30,7 +32,7 @@ mod type_aliases;
 mod unsafety;
 
 pub(super) fn accepts(source: &str) -> bool {
-    let c = Compiler::shared().compile(CompileRequest::single_file(
+    let c = Compiler::shared().compile_sema_for_test(CompileRequest::single_file(
         "main.gg",
         source,
         TargetName::X86_64Linux,
@@ -42,7 +44,7 @@ pub(super) fn accepts(source: &str) -> bool {
 }
 
 #[test]
-fn discarded_if_without_else_is_accepted_in_nested_statement_positions() {
+fn if_without_else_statement_and_value_position_contracts() {
     assert!(accepts(
         "fn stmt_block(a: int) { { if a > 3 { panic(\"a\") } }\n _ = a }\n\
          fn nested_if(a: int) { if a > 0 { if a > 1 { panic(\"b\") } }\n _ = a }\n\
@@ -53,10 +55,6 @@ fn discarded_if_without_else_is_accepted_in_nested_statement_positions() {
          loop { if a > 0 { break } } }\n\
          fn main() {}"
     ));
-}
-
-#[test]
-fn value_used_if_without_else_is_still_rejected_through_blocks() {
     assert!(!accepts(
         "fn f(b: bool) int { let x = { if b { 1 } }\n x }\nfn main() {}"
     ));
@@ -416,6 +414,21 @@ accept_cases! {
         "fn main() { let x: int\n while { x = 1\n false } {}\n _ = x }";
     condition_bindings_and_loop_initialization_follow_execution_04: false,
         "fn main() { let x: int\n while false { x = 1 }\n _ = x }";
+    condition_bindings_and_loop_initialization_follow_execution_05: true,
+        "fn main() { let v: Result[int, string] = Err(\"e\")\n if let Ok(x) = v { _ = x } else if let Err(e) = v { _ = e } }";
+    condition_bindings_and_loop_initialization_follow_execution_06: false,
+        "fn main() { let v: Result[int, string] = Err(\"e\")\n let n = if let Ok(x) = v { x } else if let Err(_) = v { 0 }\n _ = n }";
+    /* 语句位置丢弃整条 if-let 链时，分支尾值不统一类型。*/
+    condition_bindings_and_loop_initialization_follow_execution_07: true,
+        "fn main() { let v: Result[int, string] = Err(\"e\")\n if let Ok(x) = v { x } else if let Err(_) = v { 0 } }";
+    condition_bindings_and_loop_initialization_follow_execution_08: true,
+        "fn main() { let v: Result[int, string] = Err(\"e\")\n if let Ok(x) = v { x } else if let Err(e) = v { e } else { 1.0 }\n _ = 0 }";
+    condition_bindings_and_loop_initialization_follow_execution_09: true,
+        "fn main() { let v: Result[int, string] = Err(\"e\")\n let n = if let Ok(x) = v { x } else if let Err(_) = v { 0 } else { 0 }\n _ = n }";
+    condition_bindings_and_loop_initialization_follow_execution_10: false,
+        "fn main() { let v: Result[int, string] = Err(\"e\")\n let n = if let Ok(x) = v { x } else if let Err(e) = v { e } else { 1.0 }\n _ = n }";
+    condition_bindings_and_loop_initialization_follow_execution_11: true,
+        "fn main() { let v: Result[int, string] = Err(\"e\")\n if let Ok(x) = v { x } else { panic(\"e\") }\n _ = 0 }";
 }
 
 #[cfg(feature = "slow-tests")]
@@ -675,12 +688,12 @@ fn runtime_checks_survive_queries_and_reach_the_backend_plan() {
     assert_eq!(operand_type(*float), &Ty::Float(64));
     assert_eq!(operand_type(*scalar), &Ty::int());
     let compiler = Compiler::shared();
-    let first = compiler.compile(CompileRequest::single_file(
+    let first = compiler.compile_full_for_test(CompileRequest::single_file(
         "main.gg",
         "fn main() { let x = 1 }",
         TargetName::X86_64Linux,
     ));
-    let second = compiler.compile(CompileRequest::single_file(
+    let second = compiler.compile_full_for_test(CompileRequest::single_file(
         "main.gg",
         "fn main() { let x = 2 }",
         TargetName::X86_64Linux,
@@ -697,7 +710,7 @@ fn failed_cached_queries_rebind_source_locations_and_stop_lowering() {
     let compiler = Compiler::new();
     let source = "fn main() { let x: int\n _ = x }";
     for _ in 0..2 {
-        let failed = compiler.compile(CompileRequest::single_file(
+        let failed = compiler.compile_full_for_test(CompileRequest::single_file(
             "main.gg",
             source,
             TargetName::X86_64Linux,

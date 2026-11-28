@@ -3,6 +3,7 @@
 //! 该 crate 不读取源码、不依赖 compiler frontend；runtime builder 在 build-time 生成
 //! `GUGURT01` 容器，compiler façade 只解码经过验证的静态 bytes。
 
+use bytes::Bytes;
 use serde::{Deserialize, Serialize};
 use std::fmt;
 
@@ -135,11 +136,11 @@ pub struct RuntimeFunctionArtifactV1 {
     /// 层字节的内容摘要（[`Self::content_fingerprint`]）；只作断言，安装端重算比对。
     pub fingerprint: [u8; 32],
     /// 该实例的分析分片：函数摘要与本 owner 的证明。
-    pub analysis: Vec<u8>,
+    pub analysis: Bytes,
     /// 该实例 poll 之后的 LIR body 规范编码。
-    pub lir: Vec<u8>,
+    pub lir: Bytes,
     /// 该实例 absorb 之前的 x64 片段规范编码；空表示该实例的片段依赖本 world，不录制。
-    pub x64: Vec<u8>,
+    pub x64: Bytes,
 }
 
 impl RuntimeFunctionArtifactV1 {
@@ -234,19 +235,19 @@ pub struct RuntimePrebuiltV1 {
     /// 内建模块的逻辑路径，按 artifact 规范顺序。
     pub module_order: Vec<String>,
     /// canonical(NameResolution 内建片段)。
-    pub names: Vec<u8>,
+    pub names: Bytes,
     /// canonical(Identities 内建片段)。
-    pub identities: Vec<u8>,
+    pub identities: Bytes,
     /// canonical(CheckedSemantics 内建片段)。
-    pub checked: Vec<u8>,
+    pub checked: Bytes,
     /// canonical(早期常量表内建片段)。
-    pub early_constants: Vec<u8>,
+    pub early_constants: Bytes,
     /// canonical(hir::Module 内建片段)。
-    pub hir: Vec<u8>,
+    pub hir: Bytes,
     /// 按 owner 顺序的 canonical(GirBody) 序列。
-    pub gir_bodies: Vec<Vec<u8>>,
+    pub gir_bodies: Vec<Bytes>,
     /// canonical(Vec<RecordTypes>)。
-    pub record_types: Vec<u8>,
+    pub record_types: Bytes,
     /// 每张表的 (标识域摘要, 内容摘要)，与表的声明顺序一致。
     pub fingerprints: Vec<([u8; 32], [u8; 32])>,
     /// 函数表各层的 revision（层名 → 版本），按层名严格排序；函数表为空时也可为空。
@@ -622,8 +623,8 @@ impl RuntimeArtifactV1 {
         Ok(output)
     }
 
-    /// 解码并验证 GUGURT01 容器。
-    pub fn decode(bytes: &[u8]) -> Result<Self, RuntimeArtifactError> {
+    /// 解码并验证 GUGURT01 容器；层字节共享输入所有权，不复制已编码的大表。
+    pub fn decode(bytes: Bytes) -> Result<Self, RuntimeArtifactError> {
         const HEADER: usize = 8 + 4 + 8 + 8;
         if bytes.len() < HEADER + 32 {
             return Err(RuntimeArtifactError::Truncated);
@@ -655,12 +656,12 @@ impl RuntimeArtifactV1 {
         if end != bytes.len() {
             return Err(RuntimeArtifactError::Truncated);
         }
-        let manifest = decode_manifest(&bytes[HEADER..payload_start])?;
-        let payload_bytes = &bytes[payload_start..digest_start];
-        if bytes[digest_start..] != digest(ARTIFACT_DOMAIN.as_bytes(), payload_bytes) {
+        let manifest = decode_manifest(&bytes.slice(HEADER..payload_start))?;
+        let payload_bytes = bytes.slice(payload_start..digest_start);
+        if bytes[digest_start..] != digest(ARTIFACT_DOMAIN.as_bytes(), &payload_bytes) {
             return Err(RuntimeArtifactError::Digest);
         }
-        let payload = decode_payload(payload_bytes)?;
+        let payload = decode_payload(&payload_bytes)?;
         let artifact = Self { manifest, payload };
         artifact.validate()?;
         Ok(artifact)
@@ -701,7 +702,7 @@ fn encode_manifest(manifest: &RuntimeArtifactManifestV1) -> Result<Vec<u8>, Runt
     Ok(encoder.finish())
 }
 
-fn decode_manifest(bytes: &[u8]) -> Result<RuntimeArtifactManifestV1, RuntimeArtifactError> {
+fn decode_manifest(bytes: &Bytes) -> Result<RuntimeArtifactManifestV1, RuntimeArtifactError> {
     let mut decoder = CodecDecoder::new(bytes);
     let schema = decoder.u32()?;
     let target = decoder.string()?;
@@ -819,7 +820,7 @@ fn encode_payload(payload: &RuntimeArtifactPayloadV1) -> Result<Vec<u8>, Runtime
     Ok(encoder.finish())
 }
 
-fn decode_payload(bytes: &[u8]) -> Result<RuntimeArtifactPayloadV1, RuntimeArtifactError> {
+fn decode_payload(bytes: &Bytes) -> Result<RuntimeArtifactPayloadV1, RuntimeArtifactError> {
     let mut decoder = CodecDecoder::new(bytes);
     let module_interface = RuntimeModuleInterfaceV1 {
         schema: decoder.u32()?,
@@ -1009,12 +1010,12 @@ impl CodecEncoder {
 }
 
 struct CodecDecoder<'a> {
-    bytes: &'a [u8],
+    bytes: &'a Bytes,
     offset: usize,
 }
 
 impl<'a> CodecDecoder<'a> {
-    const fn new(bytes: &'a [u8]) -> Self {
+    const fn new(bytes: &'a Bytes) -> Self {
         Self { bytes, offset: 0 }
     }
 
@@ -1060,22 +1061,21 @@ impl<'a> CodecDecoder<'a> {
         self.take()
     }
 
-    fn bytes(&mut self) -> Result<Vec<u8>, RuntimeArtifactError> {
+    fn bytes(&mut self) -> Result<Bytes, RuntimeArtifactError> {
         let length = self.len()?;
-        let end = self
-            .offset
+        let start = self.offset;
+        let end = start
             .checked_add(length)
             .ok_or(RuntimeArtifactError::Truncated)?;
-        let bytes = self
-            .bytes
-            .get(self.offset..end)
+        self.bytes
+            .get(start..end)
             .ok_or(RuntimeArtifactError::Truncated)?;
         self.offset = end;
-        Ok(bytes.to_owned())
+        Ok(self.bytes.slice(start..end))
     }
 
     fn string(&mut self) -> Result<String, RuntimeArtifactError> {
-        String::from_utf8(self.bytes()?)
+        String::from_utf8(self.bytes()?.to_vec())
             .map_err(|error| RuntimeArtifactError::Codec(error.to_string()))
     }
 
@@ -1131,7 +1131,7 @@ mod tests {
         .expect("build artifact");
         let bytes = artifact.encode().expect("encode artifact");
         assert_eq!(
-            RuntimeArtifactV1::decode(&bytes).expect("decode artifact"),
+            RuntimeArtifactV1::decode(bytes.clone().into()).expect("decode artifact"),
             artifact
         );
         assert_eq!(artifact.encode().expect("encode again"), bytes);
@@ -1143,13 +1143,13 @@ mod tests {
             schema: PREBUILT_SCHEMA,
             revisions: vec![("gir.body".to_owned(), 6), ("hir.module".to_owned(), 2)],
             module_order: vec!["runtime/core.gg".to_owned(), "std/prelude.gg".to_owned()],
-            names: vec![1, 2, 3],
-            identities: Vec::new(),
-            checked: Vec::new(),
-            early_constants: Vec::new(),
-            hir: vec![9],
-            gir_bodies: vec![vec![4], vec![5, 6]],
-            record_types: vec![7],
+            names: Bytes::from_static(&[1, 2, 3]),
+            identities: Bytes::new(),
+            checked: Bytes::new(),
+            early_constants: Bytes::new(),
+            hir: Bytes::from_static(&[9]),
+            gir_bodies: vec![Bytes::from_static(&[4]), Bytes::from_static(&[5, 6])],
+            record_types: Bytes::from_static(&[7]),
             fingerprints: vec![([1; 32], [2; 32])],
             function_revisions: vec![("analysis.shard".to_owned(), 1)],
             functions: vec![sample_function("0a"), sample_function("ff")],
@@ -1175,9 +1175,9 @@ mod tests {
         RuntimeFunctionArtifactV1 {
             stable_mono_key: format!("{prefix:0<64}"),
             fingerprint: [3; 32],
-            analysis: vec![1],
-            lir: vec![2],
-            x64: vec![4],
+            analysis: Bytes::from_static(&[1]),
+            lir: Bytes::from_static(&[2]),
+            x64: Bytes::from_static(&[4]),
         }
     }
 
@@ -1201,9 +1201,9 @@ mod tests {
         let artifact = with_prebuilt(sample_prebuilt());
         artifact.validate().expect("物化表结构合法");
         let bytes = artifact.encode().expect("encode");
-        let decoded = RuntimeArtifactV1::decode(&bytes).expect("decode");
+        let decoded = RuntimeArtifactV1::decode(bytes.clone().into()).expect("decode");
         assert_eq!(decoded, artifact, "物化表必须逐字节往返");
-        assert_eq!(artifact.encode().expect("encode again"), bytes);
+        assert_eq!(decoded.encode().expect("encode again"), bytes);
         assert_eq!(
             canonical_manifest_bytes(&decoded.manifest),
             canonical_manifest_bytes(&artifact.manifest),
@@ -1281,7 +1281,7 @@ mod tests {
         let last = bytes.len() - 1;
         bytes[last] ^= 1;
         assert_eq!(
-            RuntimeArtifactV1::decode(&bytes),
+            RuntimeArtifactV1::decode(bytes.into()),
             Err(RuntimeArtifactError::Digest)
         );
         artifact
@@ -1296,19 +1296,19 @@ mod tests {
         let mut magic = bytes.clone();
         magic[0] ^= 1;
         assert_eq!(
-            RuntimeArtifactV1::decode(&magic),
+            RuntimeArtifactV1::decode(magic.into()),
             Err(RuntimeArtifactError::Magic)
         );
         let mut schema = bytes.clone();
         schema[8..12].copy_from_slice(&99_u32.to_le_bytes());
         assert_eq!(
-            RuntimeArtifactV1::decode(&schema),
+            RuntimeArtifactV1::decode(schema.into()),
             Err(RuntimeArtifactError::Schema(99))
         );
         let mut length = bytes;
         length[12..20].copy_from_slice(&u64::MAX.to_le_bytes());
         assert_eq!(
-            RuntimeArtifactV1::decode(&length),
+            RuntimeArtifactV1::decode(length.into()),
             Err(RuntimeArtifactError::Truncated)
         );
         let mut invalid = artifact;
@@ -1334,15 +1334,16 @@ mod tests {
         let mut trailing = bytes.clone();
         trailing.push(0);
         assert_eq!(
-            RuntimeArtifactV1::decode(&trailing),
+            RuntimeArtifactV1::decode(trailing.into()),
             Err(RuntimeArtifactError::Truncated)
         );
         assert_eq!(
-            RuntimeArtifactV1::decode(&bytes[..bytes.len() - 1]),
+            RuntimeArtifactV1::decode(Bytes::copy_from_slice(&bytes[..bytes.len() - 1])),
             Err(RuntimeArtifactError::Truncated)
         );
         let mut payload = encode_payload(&artifact.payload).expect("编码 payload");
-        let mut decoder = CodecDecoder::new(&payload);
+        let payload_view = Bytes::copy_from_slice(&payload);
+        let mut decoder = CodecDecoder::new(&payload_view);
         decoder.u32().expect("接口 schema");
         decoder.digest().expect("接口摘要");
         decoder.len().expect("source 数量");
@@ -1352,14 +1353,17 @@ mod tests {
         let role = decoder.offset;
         payload[role..role + 2].copy_from_slice(&u16::MAX.to_le_bytes());
         assert!(matches!(
-            decode_payload(&payload),
+            decode_payload(&payload.into()),
             Err(RuntimeArtifactError::Codec(_))
         ));
         let mut huge = encode_payload(&artifact.payload).expect("编码 payload");
         huge[36..44].copy_from_slice(&u64::MAX.to_le_bytes());
-        assert_eq!(decode_payload(&huge), Err(RuntimeArtifactError::Truncated));
         assert_eq!(
-            RuntimeArtifactV1::decode(br#"{"manifest":{}}"#),
+            decode_payload(&huge.into()),
+            Err(RuntimeArtifactError::Truncated)
+        );
+        assert_eq!(
+            RuntimeArtifactV1::decode(Bytes::from_static(br#"{"manifest":{}}"#)),
             Err(RuntimeArtifactError::Truncated)
         );
     }
