@@ -217,6 +217,8 @@ runtime 契约签名的记录目录不计入 executable mono/GIR/LIR body 数量
 
 `build`/`check` 返回成功计划时，机器统计行以目标指令集架构的短名作前缀：x86-64 目标为 `x64:`，AArch64 目标为 `a64:`。该行反映实际代码生成目标，不随宿主平台变化。`build` 成功摘要中的 `image N bytes` 是所选目标镜像格式（ELF、PE 或 Mach-O）的实际镜像字节数，不随宿主平台或交叉编译方向变化。
 
+例如在 x86-64 Linux 上执行 `gugu build --target aarch64-macos hello.gg`，成功摘要按写出的 Mach-O 镜像统计字节数；不能因为 ELF 镜像槽为空而报告 `image 0 bytes`。
+
 ### json
 
 NDJSON，每行一个 JSON 对象。信封：
