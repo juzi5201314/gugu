@@ -299,7 +299,12 @@ fn spawn_image(path: &Path, args: &[OsString], format: OutputFormat) -> i32 {
         .stderr(Stdio::inherit())
         .status();
     match status {
-        Ok(status) => status.code().unwrap_or(1),
+        Ok(status) => {
+            if !status.success() {
+                emit_cli_error(format, &format!("执行 `{}` 失败：{status}", path.display()));
+            }
+            status.code().unwrap_or(1)
+        }
         Err(error) => fail(
             format,
             1,
@@ -308,7 +313,11 @@ fn spawn_image(path: &Path, args: &[OsString], format: OutputFormat) -> i32 {
     }
 }
 
-/// 编译选定 target 集并逐个执行产物；返回最大退出码。
+fn merge_exit_codes(current: i32, next: i32) -> i32 {
+    if current == 0 { next } else { current }
+}
+
+/// 编译选定 target 集并逐个执行产物；保留首个失败退出码。
 #[expect(clippy::too_many_arguments, reason = "编排需要完整的编译与执行上下文")]
 fn compile_and_exec(
     context: &ProjectContext,
@@ -401,7 +410,7 @@ fn compile_and_exec(
             }
             let child = spawn_image(&path, args, format);
             executed = true;
-            exit_code = exit_code.max(child);
+            exit_code = merge_exit_codes(exit_code, child);
         }
     }
     if !executed && let Some(report) = crate::output::empty_suite_report(domain, format) {
@@ -574,6 +583,19 @@ fn run_test_or_bench(test: bool, args: &[OsString], options: &GlobalArgs) -> i32
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn execution_result_preserves_the_first_failure_including_windows_exceptions() {
+        let access_violation = 0xc0000005_u32 as i32;
+        for (codes, expected) in [
+            ([0, 0, 0], 0),
+            ([0, access_violation, 0], access_violation),
+            ([access_violation, 1, 0], access_violation),
+            ([7, access_violation, 0], 7),
+        ] {
+            assert_eq!(codes.into_iter().fold(0, merge_exit_codes), expected);
+        }
+    }
 
     #[test]
     fn package_name_sanitizes_dir_basename() {
