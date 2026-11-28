@@ -223,16 +223,15 @@ impl Builder<'_> {
         // 不产生 Discriminant 读取（LIR 要求 tag_bytes > 0）。
         if self.single_variant_record(place) {
             let downcast = self.project(place, Projection::Downcast(variant));
-            let patterns: Vec<_> = self.owner.pattern_fields
-                [fields.start as usize..fields.end as usize]
-                .iter()
-                .map(|field| field.pattern)
-                .collect();
+            let pattern_fields =
+                &self.owner.pattern_fields[fields.start as usize..fields.end as usize];
+            let indexes: Vec<_> = pattern_fields.iter().map(|field| field.field).collect();
+            let patterns: Vec<_> = pattern_fields.iter().map(|field| field.pattern).collect();
             return self.test_fields(
                 downcast,
                 &patterns,
                 |index, ty| Projection::Field {
-                    index,
+                    index: indexes[index as usize],
                     field_ty: ty,
                     access: Access::Normal,
                 },
@@ -250,16 +249,14 @@ impl Builder<'_> {
         });
         self.switch_to(payload);
         let downcast = self.project(place, Projection::Downcast(variant));
-        let patterns: Vec<_> = self.owner.pattern_fields
-            [fields.start as usize..fields.end as usize]
-            .iter()
-            .map(|field| field.pattern)
-            .collect();
+        let pattern_fields = &self.owner.pattern_fields[fields.start as usize..fields.end as usize];
+        let indexes: Vec<_> = pattern_fields.iter().map(|field| field.field).collect();
+        let patterns: Vec<_> = pattern_fields.iter().map(|field| field.pattern).collect();
         self.test_fields(
             downcast,
             &patterns,
             |index, ty| Projection::Field {
-                index,
+                index: indexes[index as usize],
                 field_ty: ty,
                 access: Access::Normal,
             },
@@ -425,16 +422,13 @@ impl Builder<'_> {
             }
             hir::PatternKind::Construct { variant, fields } => {
                 let downcast = self.project(place, Projection::Downcast(*variant));
-                for (index, field) in self.owner.pattern_fields
-                    [fields.start as usize..fields.end as usize]
-                    .iter()
-                    .enumerate()
+                for field in &self.owner.pattern_fields[fields.start as usize..fields.end as usize]
                 {
                     let ty = self.owner.patterns[field.pattern.index()].ty;
                     let projected = self.project(
                         downcast,
                         Projection::Field {
-                            index: index as u32,
+                            index: field.field,
                             field_ty: ty,
                             access: Access::Normal,
                         },

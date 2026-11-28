@@ -2,7 +2,7 @@ use crate::{CompileRequest, Compiler, TargetName, backend, runtime};
 
 #[test]
 fn a64_catalog_uses_canonical_frozen_runtime_definitions_not_names_or_aliases() {
-    let compilation = Compiler::new().compile(CompileRequest::single_file(
+    let compilation = Compiler::new().compile_to_lir(CompileRequest::single_file(
         "main.gg",
         "fn main() {}",
         TargetName::X86_64Linux,

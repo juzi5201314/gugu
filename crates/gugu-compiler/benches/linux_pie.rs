@@ -263,6 +263,10 @@ fn launch(name: &str, source: &str, code: i32, stdout: &str, stderr: &str) {
 }
 
 fn launch_request(name: &str, request: CompileRequest, code: i32, stdout: &str, stderr: &str) {
+    #[expect(
+        clippy::disallowed_methods,
+        reason = "Linux PIE bench 测量完整编译到镜像的路径"
+    )]
     let compilation = Compiler::with_artifacts(&EMBEDDED_ARTIFACTS).compile(request);
     if !compilation.is_success() {
         eprintln!("{name} 编译失败: {:?}", compilation.diagnostics().items());

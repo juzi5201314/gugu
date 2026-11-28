@@ -19,7 +19,7 @@ use std::{num::NonZeroU32, ops::Range};
 /// 25：C 聚合描述保留区别于对象对齐的自然对齐。
 /// 26：C 聚合的自然对齐保留 packed 成员约束。
 /// 27：合并数组初始化的动态逐根字节地址与 C 聚合自然对齐。
-pub const REVISION: u32 = 27;
+pub const REVISION: u32 = 28;
 
 macro_rules! ids {
     ($($name:ident),* $(,)?) => { $(
@@ -362,7 +362,6 @@ pub enum RuntimeCall {
     ResourceRelease,
     ResourceTransfer,
     ResourceFinalize,
-    DynamicErase,
     TypeIs,
     Downcast,
     DowncastCopy,
@@ -671,6 +670,34 @@ pub enum Terminator {
     },
 }
 
+impl Terminator {
+    /// 按固定顺序遍历出边；switch 借用表，其余变体最多两个直接边，不分配集合。
+    #[inline]
+    pub fn edges<'a>(
+        &'a self,
+        switch_cases: &'a [(u64, EdgeId)],
+    ) -> impl DoubleEndedIterator<Item = EdgeId> + Clone + 'a {
+        let (direct, cases, otherwise) = match self {
+            Self::Jump(edge) => ([Some(*edge), None], &[][..], None),
+            Self::Branch { yes, no, .. } => ([Some(*yes), Some(*no)], &[][..], None),
+            Self::Switch {
+                cases, otherwise, ..
+            } => ([None; 2], &switch_cases[range(cases)], Some(*otherwise)),
+            Self::Invoke { normal, unwind, .. } => ([Some(*normal), Some(*unwind)], &[][..], None),
+            Self::Return { .. }
+            | Self::ResumePanic { .. }
+            | Self::TailCall { .. }
+            | Self::Trap { .. }
+            | Self::Unreachable { .. } => ([None; 2], &[][..], None),
+        };
+        direct
+            .into_iter()
+            .flatten()
+            .chain(cases.iter().map(|(_, edge)| *edge))
+            .chain(otherwise)
+    }
+}
+
 #[derive(Clone, Debug, Eq, PartialEq, Serialize, Deserialize)]
 pub struct Parameter {
     pub value: ValueId,
@@ -848,10 +875,42 @@ impl Body {
     pub fn params(&self, block: BlockId) -> &[Parameter] {
         &self.parameters[range(&self.blocks[block.index()].parameters)]
     }
+    /// 保留终结符的边顺序与重边；可达性、数据流和 backend 共用同一借用视图。
+    #[inline]
+    pub fn successors(
+        &self,
+        block: BlockId,
+    ) -> impl DoubleEndedIterator<Item = BlockId> + Clone + '_ {
+        self.blocks[block.index()]
+            .terminator
+            .edges(&self.switch_cases)
+            .map(move |edge| self.edges[edge.index()].to)
+    }
     pub fn fingerprint(&self) -> [u8; 32] {
-        crate::hash::hash_domain(
-            "gugu-lir-body-v1",
-            &crate::canonical::to_vec(self).expect("LIR 编码"),
-        )
+        crate::canonical::hash_domain("gugu-lir-body-v1", self).expect("LIR 编码")
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::{EdgeId, Terminator, ValueId};
+
+    #[test]
+    fn switch_edges_respect_the_case_range_and_preserve_duplicates() {
+        let cases = [
+            (0, EdgeId(9)),
+            (1, EdgeId(2)),
+            (2, EdgeId(2)),
+            (3, EdgeId(9)),
+        ];
+        let terminator = Terminator::Switch {
+            value: ValueId(0),
+            cases: 1..3,
+            otherwise: EdgeId(3),
+        };
+        assert_eq!(
+            terminator.edges(&cases).collect::<Vec<_>>(),
+            [EdgeId(2), EdgeId(2), EdgeId(3)]
+        );
     }
 }

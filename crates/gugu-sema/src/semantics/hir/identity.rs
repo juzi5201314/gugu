@@ -5,6 +5,7 @@ use super::super::{
 };
 use crate::{Diagnostic, DiagnosticCode, SourceMap, Span};
 use crate::{ast, hir, names};
+use gugu_base::shared_table::SharedTable;
 use std::collections::BTreeMap;
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq, serde::Serialize, serde::Deserialize)]
@@ -70,28 +71,35 @@ pub(super) fn collect(
     checked: &CheckedSemantics,
     sources: &SourceMap,
     prefix: Option<&crate::sema_prefix::SemaPrefix>,
-) -> Result<(Vec<hir::Definition>, Identities, usize), Diagnostic> {
+) -> Result<(SharedTable<hir::Definition>, Identities, usize), Diagnostic> {
     let mut candidates: Vec<_> = names
         .definitions
         .iter()
         .enumerate()
-        .map(|(index, definition)| Candidate {
-            origin: Origin::Named(index),
-            module: definition.module.index(),
-            track_caller: model.modules[definition.module.index()]
-                .arena
-                .items
-                .iter()
-                .find(|item| item.span == definition.span)
-                .is_some_and(|item| {
-                    model.has_attribute(definition.module.index(), item.attributes, "track_caller")
-                }),
-            span: Some(definition.span.clone()),
-            name: definition.name.clone().unwrap_or_default(),
-            kind: definition_kind(definition.kind),
-            key: definition.stable_key,
-            parent: definition.parent.map(|parent| parent.index()),
-            public: definition.visibility == ast::Visibility::Pub,
+        .map(|(index, definition)| {
+            let span = names.definition_span(index);
+            Candidate {
+                origin: Origin::Named(index),
+                module: definition.module.index(),
+                track_caller: model.modules[definition.module.index()]
+                    .arena
+                    .items
+                    .iter()
+                    .find(|item| &item.span == span)
+                    .is_some_and(|item| {
+                        model.has_attribute(
+                            definition.module.index(),
+                            item.attributes,
+                            "track_caller",
+                        )
+                    }),
+                span: Some(span.clone()),
+                name: definition.name.clone().unwrap_or_default(),
+                kind: definition_kind(definition.kind),
+                key: definition.stable_key,
+                parent: definition.parent.map(|parent| parent.index()),
+                public: definition.visibility == ast::Visibility::Pub,
+            }
         })
         .collect();
     let mut functions = model
@@ -292,12 +300,13 @@ pub(super) fn collect(
         .iter()
         .map(|&index| candidates[index].origin)
         .collect::<Vec<_>>();
-    let mut definitions = Vec::with_capacity(order.len());
-    if let Some(installed) = prefix {
+    let mut definitions = if let Some(installed) = prefix {
         // 物化片段的定义整段接管：稳定键与签名/参数/义务都按构建期派生原样沿用，用户侧才走
         // 下面的 lowering。片段的顺序与本次现算逐项相同，装载前已在 origins 上核对过。
-        definitions.extend_from_slice(&installed.hir().module().definitions);
-    }
+        installed.hir().module().definitions.clone()
+    } else {
+        SharedTable::default()
+    };
     let installed_definitions = definitions.len();
     for index in order {
         if remap[index] < installed_definitions {

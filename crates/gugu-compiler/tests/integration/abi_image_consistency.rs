@@ -24,7 +24,7 @@ fn compile(source: &str, target: TargetName, symbols: &[&str]) -> (Compilation, 
                 .map(|name| NativeImport::function("libc.so.6", name)),
         );
     }
-    let output = Compiler::with_artifacts(&EMBEDDED_ARTIFACTS).compile(
+    let output = Compiler::with_artifacts(&EMBEDDED_ARTIFACTS).compile_full_for_test(
         CompileRequest::single_file("main.gg", source, target).with_native_link(NativeLink {
             imports,
             interpreter: (target == TargetName::X86_64Linux).then(|| "/toolchain/ld.so".into()),
@@ -76,67 +76,57 @@ fn assert_pe(bytes: &[u8]) {
 }
 
 /// pin/bridge/leaf/dirty 四种调用模式与 TLS 槽在双目标上均产出合法镜像，
-/// 导入库名、导入符号与导出符号按目标格式登记。
+/// 导入库名、导入符号与导出符号按目标格式登记；strip 保留入口与运行时 metadata；
+/// 双目标输出具有不同的 action key 与镜像格式字节。
 #[test]
-fn ffi_modes_produce_structurally_complete_images() {
+fn ffi_modes_images_strip_and_dual_target_distinct() {
     let symbols = ["leaf_probe", "dirty_probe", "native_probe"];
-    for target in [TargetName::X86_64Linux, TargetName::X86_64Windows] {
-        let (_output, bytes) = compile(include_str!("fixtures/ffi_modes.gg"), target, &symbols);
+    let source = include_str!("../fixtures/ffi_modes.gg");
+    let ((linux, linux_bytes), (windows, windows_bytes)) = std::thread::scope(|scope| {
+        let linux = scope.spawn(|| compile(source, TargetName::X86_64Linux, &symbols));
+        let windows = compile(source, TargetName::X86_64Windows, &symbols);
+        (linux.join().expect("linux compile thread"), windows)
+    });
+
+    assert_ne!(linux.action_key(), windows.action_key());
+    assert_eq!(&linux_bytes[0..4], b"\x7fELF");
+    assert_eq!(&windows_bytes[0..2], b"MZ");
+    assert!(!contains(&linux_bytes, b"probe.dll\0"));
+    assert!(!contains(&windows_bytes, b"libprobe.so"));
+
+    for (target, bytes) in [
+        (TargetName::X86_64Linux, &linux_bytes),
+        (TargetName::X86_64Windows, &windows_bytes),
+    ] {
         match target {
             TargetName::X86_64Linux => {
-                assert_elf(&bytes);
-                assert!(contains(&bytes, b"/toolchain/ld.so"), "PT_INTERP");
-                assert!(contains(&bytes, b"libprobe.so"), "DT_NEEDED");
+                assert_elf(bytes);
+                assert!(contains(bytes, b"/toolchain/ld.so"), "PT_INTERP");
+                assert!(contains(bytes, b"libprobe.so"), "DT_NEEDED");
             }
             _ => {
-                assert_pe(&bytes);
-                assert!(contains(&bytes, b"probe.dll"), "import dll");
+                assert_pe(bytes);
+                assert!(contains(bytes, b"probe.dll"), "import dll");
             }
         }
         for symbol in symbols {
             let mut name = symbol.as_bytes().to_vec();
             name.push(0);
-            assert!(contains(&bytes, &name), "{target:?} 缺导入 {symbol}");
+            assert!(contains(bytes, &name), "{target:?} 缺导入 {symbol}");
         }
         assert!(
-            contains(&bytes, b"abi_probe_export"),
+            contains(bytes, b"abi_probe_export"),
             "{target:?} 缺导出符号"
         );
         assert!(
-            contains(&bytes, b"tls corrupt"),
+            contains(bytes, b"tls corrupt"),
             "{target:?} 缺 panic 字符串"
         );
-    }
-}
 
-/// repr(C)/packed/transparent/enum 聚合按值穿越 extern 边界：两目标均生成镜像。
-#[test]
-fn aggregate_by_value_abi_compiles_for_both_targets() {
-    let symbols = ["native_pair", "native_wide", "native_bits"];
-    for target in [TargetName::X86_64Linux, TargetName::X86_64Windows] {
-        let (_output, bytes) = compile(include_str!("fixtures/ffi_abi.gg"), target, &symbols);
-        match target {
-            TargetName::X86_64Linux => assert_elf(&bytes),
-            _ => assert_pe(&bytes),
-        }
-        for symbol in symbols {
-            let mut name = symbol.as_bytes().to_vec();
-            name.push(0);
-            assert!(contains(&bytes, &name), "{target:?} 缺导入 {symbol}");
-        }
-    }
-}
-
-/// strip 保留可执行入口与运行时 metadata：导入库、导入符号与 panic 字符串不丢。
-#[test]
-fn strip_preserves_entry_and_runtime_metadata() {
-    let symbols = ["leaf_probe", "dirty_probe", "native_probe"];
-    for target in [TargetName::X86_64Linux, TargetName::X86_64Windows] {
         let backend_target =
             gugu_base::target::TargetName::parse(target.name()).expect("目标名必须可映射");
-        let (_output, bytes) = compile(include_str!("fixtures/ffi_modes.gg"), target, &symbols);
         let stripped =
-            gugu_backend::x64::strip::strip_image(backend_target, &bytes).expect("strip 必须成功");
+            gugu_backend::x64::strip::strip_image(backend_target, bytes).expect("strip 必须成功");
         match target {
             TargetName::X86_64Linux => assert_elf(&stripped.bytes),
             _ => assert_pe(&stripped.bytes),
@@ -165,23 +155,27 @@ fn strip_preserves_entry_and_runtime_metadata() {
     }
 }
 
-/// 同一输入在两个目标上得到不同 action key 与格式字节——目标切换不被缓存混淆。
+fn assert_aggregate_by_value_abi(target: TargetName) {
+    let symbols = ["native_pair", "native_wide", "native_bits"];
+    let (_output, bytes) = compile(include_str!("../fixtures/ffi_abi.gg"), target, &symbols);
+    match target {
+        TargetName::X86_64Linux => assert_elf(&bytes),
+        _ => assert_pe(&bytes),
+    }
+    for symbol in symbols {
+        let mut name = symbol.as_bytes().to_vec();
+        name.push(0);
+        assert!(contains(&bytes, &name), "{target:?} 缺导入 {symbol}");
+    }
+}
+
+/// repr(C)/packed/transparent/enum 聚合按值穿越 extern 边界：两目标均生成镜像。
 #[test]
-fn dual_target_outputs_are_format_distinct() {
-    let symbols = ["leaf_probe", "dirty_probe", "native_probe"];
-    let (linux, linux_bytes) = compile(
-        include_str!("fixtures/ffi_modes.gg"),
-        TargetName::X86_64Linux,
-        &symbols,
-    );
-    let (windows, windows_bytes) = compile(
-        include_str!("fixtures/ffi_modes.gg"),
-        TargetName::X86_64Windows,
-        &symbols,
-    );
-    assert_ne!(linux.action_key(), windows.action_key());
-    assert_eq!(&linux_bytes[0..4], b"\x7fELF");
-    assert_eq!(&windows_bytes[0..2], b"MZ");
-    assert!(!contains(&linux_bytes, b"probe.dll\0"));
-    assert!(!contains(&windows_bytes, b"libprobe.so"));
+fn aggregate_by_value_abi_compiles_for_linux() {
+    assert_aggregate_by_value_abi(TargetName::X86_64Linux);
+}
+
+#[test]
+fn aggregate_by_value_abi_compiles_for_windows() {
+    assert_aggregate_by_value_abi(TargetName::X86_64Windows);
 }

@@ -35,8 +35,7 @@ impl fmt::Display for EncodeError {
 
 impl std::error::Error for EncodeError {}
 
-/// 返回单条指令的编码字节数（与写入共用同一 layout）；仅供字节 fixture 断言。
-#[cfg(any(test, feature = "test-support"))]
+/// 返回单条指令的编码字节数（与写入共用同一 layout）。
 pub fn encoded_len(inst: &Inst) -> Result<u32, EncodeError> {
     Ok(build(inst)?.len())
 }

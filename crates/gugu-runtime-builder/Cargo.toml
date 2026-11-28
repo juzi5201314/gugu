@@ -4,6 +4,10 @@ version = "0.1.0"
 edition = "2024"
 description = "Build-time Gugu runtime artifact source table"
 
+[lib]
+test = false
+doctest = false
+
 [features]
 runtime-gc-probes = []
 

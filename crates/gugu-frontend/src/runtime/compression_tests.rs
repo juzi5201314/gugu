@@ -29,7 +29,7 @@ fn enabled_contract() -> CompressionRuntimeContract {
 fn real_compilation_defaults_to_disabled_compression() {
     let source = "fn main() { let value = 1 _ = value }";
     let compile = || {
-        crate::Compiler::shared().compile(crate::CompileRequest::single_file(
+        crate::Compiler::shared().compile_full_for_test(crate::CompileRequest::single_file(
             "main.gg",
             source,
             crate::TargetName::X86_64Linux,

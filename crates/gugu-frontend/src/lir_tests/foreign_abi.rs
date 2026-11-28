@@ -31,7 +31,11 @@ fn verify(target: TargetName) {
             interpreter: None,
         });
     }
-    let compilation = Compiler::shared().compile(request);
+    let compilation = if target == TargetName::X86_64Macos {
+        Compiler::shared().compile_full_for_test(request)
+    } else {
+        Compiler::shared().compile_to_lir(request)
+    };
     if target == TargetName::X86_64Macos {
         let errors: Vec<_> = compilation
             .diagnostics()
@@ -128,7 +132,7 @@ fn verify(target: TargetName) {
 #[test]
 fn overaligned_composites_keep_object_alignment_but_use_linux_natural_pcs_alignment() {
     use crate::backend::a64::foreign::{Platform, Slot, classify};
-    let compilation = Compiler::shared().compile(CompileRequest::single_file(
+    let compilation = Compiler::shared().compile_to_lir(CompileRequest::single_file(
         "main.gg",
         include_str!("fixtures/foreign_overaligned.gg"),
         TargetName::X86_64Linux,
@@ -182,7 +186,7 @@ fn overaligned_composites_keep_object_alignment_but_use_linux_natural_pcs_alignm
 fn packed_composites_honor_packing_before_outer_alignment() {
     use crate::backend::a64::foreign::{Platform, Slot, classify};
     use crate::lir::foreign::Kind;
-    let compilation = Compiler::shared().compile(CompileRequest::single_file(
+    let compilation = Compiler::shared().compile_to_lir(CompileRequest::single_file(
         "main.gg",
         include_str!("fixtures/foreign_packed.gg"),
         TargetName::X86_64Linux,

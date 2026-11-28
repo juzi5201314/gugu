@@ -124,7 +124,12 @@ fn predecessor_count(editor: &Editor, block: BlockId) -> usize {
     editor
         .live_blocks()
         .into_iter()
-        .filter(|candidate| editor.terminator(*candidate).successors().contains(&block))
+        .filter(|candidate| {
+            editor
+                .terminator(*candidate)
+                .successors()
+                .any(|target| target == block)
+        })
         .count()
 }
 

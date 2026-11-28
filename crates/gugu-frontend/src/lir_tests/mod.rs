@@ -12,9 +12,7 @@ use crate::lir::{
     },
     verify,
 };
-use crate::{
-    Compilation, CompileRequest, Compiler, DiagnosticCode, NativeImport, NativeLink, TargetName,
-};
+use crate::{Compilation, CompileRequest, Compiler, DiagnosticCode, TargetName};
 use std::num::NonZeroU32;
 
 /// 测试用目标 oracle：与 driver 注入的同一 x86_64 实现。
@@ -261,39 +259,24 @@ fn borrowed_slot_roots_are_registered_at_call_sites() {
 /// 静态访问必须带惰性初始化守卫：模块 static 与函数局部 static 都在首次读取时发布值。
 ///
 /// 三段由小到大：只有模块 static、只有局部 static、两者同时出现在被调用两次的函数里。
-///
-/// 程序规模递增，逐个成测：一次整体编译约 1 秒，三段合测会超出单项耗时上限。
-fn static_access_compiles(source: &str) {
-    let compilation = Compiler::shared().compile(CompileRequest::single_file(
-        "main.gg",
-        source,
-        TargetName::X86_64Linux,
-    ));
-    assert!(
-        compilation.is_success(),
-        "程序失败：{:?}",
-        compilation.diagnostics().items()
-    );
-}
-
 #[test]
 fn static_access_compiles_with_only_module_static() {
-    static_access_compiles("static M: int = 41\nfn main() { _ = M }");
+    compile("static M: int = 41\nfn main() { _ = M }");
 }
 
 #[test]
 fn static_access_compiles_with_only_local_static() {
-    static_access_compiles("fn take() int {\n static L: int = 9\n L\n}\nfn main() { _ = take() }");
+    compile("fn take() int {\n static L: int = 9\n L\n}\nfn main() { _ = take() }");
 }
 
 #[test]
 fn static_access_compiles_with_module_and_local_static() {
-    static_access_compiles(
+    compile_image(
         "static M: int = 41\nfn take() int {\n static L: int = 9\n L + M\n}\nfn main() {\n if take() != 50 { panic(\"static\") }\n if take() != 50 { panic(\"static-again\") }\n}",
     );
 }
 
-/// 初始化器必须在镜像里真实发布：调用点保留成调用，实例末尾 release 置位。
+/// 初始化器在 LIR 中必须保留调用与实例末尾的 release 置位。
 ///
 /// 这两条一起挡住「内联把发布动作静默抹掉」的回退：只断言能编译会漏掉整类错误。
 #[test]
@@ -328,11 +311,18 @@ fn static_initializer_call_survives_and_publishes() {
 }
 
 fn compile(source: &str) -> Compilation {
-    let compilation = Compiler::shared().compile(CompileRequest::single_file(
-        "main.gg",
-        source,
-        TargetName::X86_64Linux,
-    ));
+    require_success(Compiler::shared().compile_to_lir(request(source)))
+}
+
+fn compile_image(source: &str) -> Compilation {
+    require_success(Compiler::shared().compile_full_for_test(request(source)))
+}
+
+fn request(source: &str) -> CompileRequest {
+    CompileRequest::single_file("main.gg", source, TargetName::X86_64Linux)
+}
+
+fn require_success(compilation: Compilation) -> Compilation {
     assert!(
         compilation.is_success(),
         "{:?}",
@@ -341,22 +331,10 @@ fn compile(source: &str) -> Compilation {
     compilation
 }
 
-/// EFFECTS 夹具的 `extern "C" fn external` 是普通 ForeignBridge 目标：按平台
-/// ABI 契约显式登记目标符号、glibc 解释器与 pthread 导入。
-fn compile_effects() -> Compilation {
-    let compilation = Compiler::shared().compile(
-        CompileRequest::single_file("main.gg", EFFECTS, TargetName::X86_64Linux)
-            .with_native_link(effects_link()),
-    );
-    assert!(
-        compilation.is_success(),
-        "{:?}",
-        compilation.diagnostics().items()
-    );
-    compilation
-}
-
-pub(crate) fn effects_link() -> NativeLink {
+/// EFFECTS 夹具的完整编译按平台 ABI 契约登记 ForeignBridge 目标符号、glibc 解释器与 pthread 导入。
+#[cfg(feature = "slow-tests")]
+pub(crate) fn effects_link() -> crate::NativeLink {
+    use crate::{NativeImport, NativeLink};
     let mut imports: Vec<_> = NativeLink::THREAD_SYMBOLS
         .into_iter()
         .map(|name| NativeImport::function("libc.so.6", name))
@@ -592,7 +570,7 @@ fn concrete_instances_preserve_scalar_and_wide_returns() {
 
 #[test]
 fn memory_chain_cannot_skip_a_volatile_effect() {
-    let compilation = compile_effects();
+    let compilation = compile(EFFECTS);
     let mut body = named(&compilation, "main").clone();
     let block = body
         .blocks
@@ -653,7 +631,7 @@ fn integer_pointer_cast_cannot_forge_a_managed_root() {
 
 #[test]
 fn atomic_load_rejects_release_order() {
-    let compilation = compile_effects();
+    let compilation = compile(EFFECTS);
     let mut body = named(&compilation, "main").clone();
     let load = body
         .instructions
@@ -1116,13 +1094,13 @@ fn missing_safepoint_and_unclosed_region_are_rejected() {
 fn cached_lir_matches_fresh_output_and_action_identity() {
     let compiler = Compiler::new();
     let request = || CompileRequest::single_file("main.gg", SSA, TargetName::X86_64Linux);
-    let cold = compiler.compile(request());
-    let warm = compiler.compile(request());
+    let cold = compiler.compile_full_for_test(request());
+    let warm = compiler.compile_full_for_test(request());
     assert!(cold.is_success(), "{:?}", cold.diagnostics().items());
     assert!(warm.is_success(), "{:?}", warm.diagnostics().items());
     assert_eq!(cold.dump_lir(), warm.dump_lir());
     assert_eq!(cold.action_key(), warm.action_key());
-    let changed = compiler.compile(CompileRequest::single_file(
+    let changed = compiler.compile_full_for_test(CompileRequest::single_file(
         "main.gg",
         SSA.replace("value + 2", "value + 3"),
         TargetName::X86_64Linux,
@@ -1153,7 +1131,7 @@ fn effect_signature(body: &Body) -> Vec<String> {
 
 #[test]
 fn pipeline_preserves_observable_effects() {
-    let compilation = compile_effects();
+    let compilation = compile(EFFECTS);
     let body = named(&compilation, "main").clone();
     let before = effect_signature(&body);
     assert!(
@@ -1543,8 +1521,8 @@ fn stackmap_world_covers_call_poll_suspend_and_select() {
     // 冷热编译的栈图需求一致。
     let compiler = Compiler::new();
     let request = || CompileRequest::single_file("main.gg", STACKMAP, TargetName::X86_64Linux);
-    let cold = compiler.compile(request());
-    let warm = compiler.compile(request());
+    let cold = compiler.compile_full_for_test(request());
+    let warm = compiler.compile_full_for_test(request());
     assert!(cold.is_success() && warm.is_success());
     assert_eq!(
         cold.image_plan().expect("image-plan").stackmap_demand(),
@@ -1729,7 +1707,7 @@ fn foreign_call_with_decoded_argument(body: &Body, pass_to_call: bool) -> Option
 /// `DecodeCompressedRef` 的结果作为非 Managed 调用参数必须被 verifier 拒绝。
 #[test]
 fn compressed_ref_as_foreign_argument_is_rejected() {
-    let compilation = compile_effects();
+    let compilation = compile(EFFECTS);
     let module = compilation.hir.as_ref().unwrap().module();
     // 对照组：同一个解码点不跨调用边界时通过，证明拒绝来自调用 ABI 规则而不是解码指令本身。
     let control = foreign_call_with_decoded_argument(&named(&compilation, "main").clone(), false)
@@ -1750,22 +1728,15 @@ fn compressed_ref_as_foreign_argument_is_rejected() {
 /// （turn 私有的 region 环境本阶段不压缩，因此夹具必须让环境落 stable storage）。
 const COMPRESSED_CAPTURE: &str = "fn make() fn() int {\n let value = 1\n return fn() int { return value }\n}\nfn main() {\n let closure = make()\n _ = closure()\n}";
 
-fn compile_with_compression(source: &str) -> Compilation {
+fn compression_request(source: &str) -> CompileRequest {
     use crate::runtime::compression_schema::CompressionPolicyV1;
-    let mut request = CompileRequest::single_file("main.gg", source, TargetName::X86_64Linux)
-        .with_compression_policy(CompressionPolicyV1::cage(
-            4 * crate::runtime::gc_metadata_contract::GC_ARENA_BYTES,
-        ));
-    if source == EFFECTS {
-        request = request.with_native_link(effects_link());
-    }
-    let compilation = Compiler::shared().compile(request);
-    assert!(
-        compilation.is_success(),
-        "{:?}",
-        compilation.diagnostics().items()
-    );
-    compilation
+    request(source).with_compression_policy(CompressionPolicyV1::cage(
+        4 * crate::runtime::gc_metadata_contract::GC_ARENA_BYTES,
+    ))
+}
+
+fn compile_with_compression(source: &str) -> Compilation {
+    require_success(Compiler::shared().compile_full_for_test(compression_request(source)))
 }
 
 /// cage 开启的捕获闭包：构造侧 encode、实例侧 decode、非零解码点与冷热一致指纹。
@@ -1881,7 +1852,7 @@ fn compression_enabled_captures_produce_encode_and_decode_sequences() {
 /// 关闭态同一源码：零解码点、无 encode/decode 序列，分配不带压缩标志。
 #[test]
 fn compression_disabled_captures_keep_full_pointer_slots() {
-    let compilation = compile(COMPRESSED_CAPTURE);
+    let compilation = compile_image(COMPRESSED_CAPTURE);
     let raw = compilation.raw_contract().expect("真实契约必须存在");
     assert!(!raw.compression().enabled());
     assert_eq!(raw.compression().demand().decode_sites, 0);
@@ -1959,7 +1930,8 @@ fn shared_environment_stays_uncompressed_with_cage_enabled() {
 /// 开启路径上的真实 lowering 同样拒绝压缩引用跨非 Managed 调用边界。
 #[test]
 fn compressed_ref_as_foreign_argument_is_rejected_with_cage_enabled() {
-    let compilation = compile_with_compression(EFFECTS);
+    let compilation =
+        require_success(Compiler::shared().compile_to_lir(compression_request(EFFECTS)));
     let module = compilation.hir.as_ref().unwrap().module();
     let body = foreign_call_with_decoded_argument(&named(&compilation, "main").clone(), true)
         .expect("effects 夹具必须含挂起的 foreign 调用");
@@ -2294,7 +2266,7 @@ fn turn_region_ops_close_at_suspend_boundaries() {
 /// channel send 在 sender 之后不再使用该闭包时整区移交，而不是复制或保留。
 #[test]
 fn channel_send_transfers_region_when_sender_is_dead() {
-    let compilation = compile(
+    let compilation = compile_image(
         "fn main() {\n let channel = chan[fn() int](1)\n let value = 1\n let closure = fn() int { return value }\n channel.send(closure)\n }",
     );
     let body = named(&compilation, "main");
@@ -2323,7 +2295,7 @@ fn channel_send_transfers_region_when_sender_is_dead() {
 /// sender 在 send 之后仍使用闭包时不得选择 region，退回 SharedHeap。
 #[test]
 fn channel_send_with_live_sender_keeps_stable_storage() {
-    let compilation = compile(
+    let compilation = compile_image(
         "fn main() {\n let channel = chan[fn() int](1)\n let value = 1\n let closure = fn() int { return value }\n channel.send(closure)\n _ = closure()\n }",
     );
     let body = named(&compilation, "main");

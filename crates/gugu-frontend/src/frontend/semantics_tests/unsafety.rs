@@ -120,8 +120,8 @@ fn windows_c_signature_rejects_nested_128_bit_values() {
     use crate::{CompileRequest, Compiler, TargetName};
     let source = "#[repr(C)] struct Wide { value: i128 }\nextern \"C\" fn pass(value: Wide) Wide\nfn main() {}";
     for target in [TargetName::X86_64Linux, TargetName::X86_64Windows] {
-        let result =
-            Compiler::shared().compile(CompileRequest::single_file("main.gg", source, target));
+        let result = Compiler::shared()
+            .compile_to_lir(CompileRequest::single_file("main.gg", source, target));
         assert_eq!(result.is_success(), target == TargetName::X86_64Linux);
     }
 }
@@ -181,7 +181,7 @@ fn naked_requires_one_asm_and_an_unsafe_c_definition_00() {
         .map(|name| crate::NativeImport::function("libc.so.6", name))
         .collect();
     imports.push(crate::NativeImport::function("libprobe.so", "identity"));
-    let output = crate::Compiler::shared().compile(
+    let output = crate::Compiler::shared().compile_full_for_test(
         crate::CompileRequest::single_file(
             "main.gg",
             "#[naked] unsafe extern \"C\" fn identity(n: int) int = asm(\"mov %rdi, %rax; ret\")\nfn main() { unsafe { _ = identity(1) } }",
@@ -335,7 +335,7 @@ accept_cases! {
 fn linkage_section_rejects_windows_target() {
     use crate::{CompileRequest, Compiler, TargetName};
     let source = "#[link_section = \".text.custom\"] fn main() {}";
-    let result = Compiler::shared().compile(CompileRequest::single_file(
+    let result = Compiler::shared().compile_to_lir(CompileRequest::single_file(
         "main.gg",
         source,
         TargetName::X86_64Windows,
