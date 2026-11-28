@@ -27,6 +27,20 @@ pub struct Location {
     pub expansion: u32,
 }
 
+impl Location {
+    /// HIR 与当前编译会话共享源码编号；恢复诊断时保留宏展开身份。
+    pub fn span(&self, sources: &crate::source::SourceMap) -> crate::source::Span {
+        sources
+            .span(
+                crate::source::SourceFileId::new(self.source),
+                self.start as usize,
+                self.end as usize,
+                crate::source::ExpansionId::new(self.expansion),
+            )
+            .expect("已验证 HIR 位置属于当前源码表")
+    }
+}
+
 #[derive(Clone, Debug, Eq, PartialEq, Serialize, Deserialize)]
 pub struct Source {
     pub path: String,

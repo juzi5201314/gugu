@@ -41,7 +41,7 @@ pub fn verify() -> Result<(), Error> {
         }
         for other in &FORMS[..index] {
             if form.key == other.key || ((form.fixed ^ other.fixed) & form.mask & other.mask) == 0 {
-                return Err(Error(format!(
+                return Err(Error::new(format!(
                     "A64 form 歧义：{} / {}",
                     other.key, form.key
                 )));

@@ -4,6 +4,10 @@
 
 外部 C ABI、目标名称和稳定镜像边界以[平台与 ABI 参考](../spec/platform-abi.md)为准。本章的 Gugu 内部 ABI、符号、frame 和 metadata 可以随 `CompilerIdentity` 一起改变，但同一镜像中的 compiler/runtime 必须完全一致。
 
+机器 lowering 的错误必须保留 LIR 指令或终结符的源码位置，增加函数名、块号等错误上下文时不得清除已有位置。A64 的未定义符号错误单独保存缺失符号身份，在失败路径上回查该符号的 LIR 引用位置，再由前端按当前源码表恢复 span；不能借用入口或无关表达式的位置。只与整个函数相关、无法细化到指令的错误使用该 body 的源码作用域。x64 的片段 query 在缓存诊断前附上同一 body 的位置，并在恢复缓存时保留已有精确范围。
+
+`CODEGEN_SCHEMA = 9` 使旧的无源码位置片段诊断失效；query 缓存与内建机器片段物化版本同步更新。
+
 ## 权威边界
 
 [类型](../spec/types.md)、[unsafe](../spec/unsafe.md)、[程序模型](../spec/program-model.md)和[平台 ABI](../spec/platform-abi.md)唯一规定整数/浮点结果、可接受的 asm、目标、C ABI、导入导出与稳定镜像面。本章只固定官方 compiler如何把合法 LIR实现为这些结果。内部 ABI、CPU指令选择、frame、mangling、relocation计划和直接写出算法随 `CompilerIdentity` 版本化，不能扩大或缩小公开接受面。

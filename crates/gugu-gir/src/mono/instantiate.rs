@@ -140,8 +140,13 @@ pub fn instantiate(
                     source.content_hash(),
                 );
             }
-            let record = walk_instance(context, interner, entry)
-                .map_err(|error| crate::semantics::query::store_errors(&[error]))?;
+            let record = walk_instance(context, interner, entry).map_err(|error| {
+                let error = match &context.module.definitions[entry.definition.index()].location {
+                    Some(location) => error.with_span(location.span(context.sources)),
+                    None => error,
+                };
+                crate::semantics::query::store_errors(&[error])
+            })?;
             let bytes = crate::canonical::to_vec(&record).expect("实例记录编码");
             fresh = Some(record);
             Ok((bytes, Vec::new()))
@@ -262,7 +267,12 @@ fn collect_owner(
     let dispatches = owner
         .dispatches
         .iter()
-        .map(|dispatch| resolve_dispatch(context, entry, module, dispatch, edges))
+        .enumerate()
+        .map(|(index, dispatch)| {
+            resolve_dispatch(context, entry, module, dispatch, edges).map_err(|error| {
+                error.with_span(dispatch_location(owner, index as u32).span(context.sources))
+            })
+        })
         .collect::<Result<Vec<_>, _>>()?;
     for (index, resolved) in dispatches.iter().enumerate() {
         if let Some(resolved) = resolved
@@ -277,7 +287,10 @@ fn collect_owner(
                 Vec::new(),
                 Some(site),
                 edges,
-            )?;
+            )
+            .map_err(|error| {
+                error.with_span(dispatch_location(owner, index as u32).span(context.sources))
+            })?;
         }
     }
     let mut direct_values = BTreeSet::new();
@@ -306,7 +319,8 @@ fn collect_owner(
                 &dispatches,
                 &mut direct_values,
                 edges,
-            )?;
+            )
+            .map_err(|error| error.with_span(expression.location.span(context.sources)))?;
         }
     }
     for index in 0..owner.expressions.len() {
@@ -328,7 +342,9 @@ fn collect_owner(
                 )?;
             }
         }
-        collect_expression(context, interner, entry, owner, id, edges)?;
+        collect_expression(context, interner, entry, owner, id, edges).map_err(|error| {
+            error.with_span(owner.expressions[id.index()].location.span(context.sources))
+        })?;
     }
     for (index, statement) in owner.statements.iter().enumerate() {
         if let hir::StatementKind::Static { definition, .. } = statement.kind {
@@ -351,6 +367,51 @@ fn collect_owner(
         }
     }
     Ok(())
+}
+
+fn dispatch_location(owner: &hir::Owner, dispatch: u32) -> &hir::Location {
+    use hir::{CallTarget, ExprKind};
+    for expression in &owner.expressions {
+        let candidates = match &expression.kind {
+            ExprKind::Call {
+                target: CallTarget::Dispatch(index),
+                ..
+            }
+            | ExprKind::SpawnCall {
+                target: CallTarget::Dispatch(index),
+                ..
+            } => [Some(*index), None],
+            ExprKind::Binary { dispatch, .. } => [*dispatch, None],
+            ExprKind::For {
+                into_iter, next, ..
+            } => [*into_iter, *next],
+            ExprKind::Try { from_value, .. } => [*from_value, None],
+            ExprKind::TryExit {
+                branch, from_error, ..
+            } => [*branch, *from_error],
+            ExprKind::Index { read, write, .. } => [*read, *write],
+            _ => continue,
+        };
+        if candidates.contains(&Some(dispatch)) {
+            return &expression.location;
+        }
+    }
+    for statement in &owner.statements {
+        if matches!(statement.kind, hir::StatementKind::Assign { dispatch: Some(index), .. } if index == dispatch)
+        {
+            return &statement.location;
+        }
+    }
+    &owner.expressions[owner.body.index()].location
+}
+
+pub(crate) fn call_location(owner: &hir::Owner, site: CallSite) -> &hir::Location {
+    match site {
+        CallSite::Expression(index) => &owner.expressions[index as usize].location,
+        CallSite::Dispatch(index) => dispatch_location(owner, index),
+        CallSite::Initializer(index) => &owner.statements[index as usize].location,
+        CallSite::StaticInit(_) => &owner.expressions[owner.body.index()].location,
+    }
 }
 
 #[expect(

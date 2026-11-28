@@ -71,7 +71,16 @@ pub(super) fn bind(
                 crate::mono::universe::concrete(layouts.context, &self_ty)?.into_owned(),
             );
             let ty = layouts.context.type_at(dispatch.signature, &bindings)?;
-            (ty, protocol(layouts.context.module, dispatch)?)
+            let location = crate::mono::instantiate::call_location(owner, *site);
+            (
+                ty,
+                protocol(
+                    layouts.context.module,
+                    dispatch,
+                    location,
+                    layouts.context.sources,
+                )?,
+            )
         } else {
             continue;
         };
@@ -104,7 +113,10 @@ pub(super) fn bind(
 fn protocol(
     module: &hir::Module,
     dispatch: &hir::Dispatch,
+    location: &hir::Location,
+    sources: &crate::SourceMap,
 ) -> Result<Option<Protocol>, Diagnostic> {
+    let invalid = |message| invalid(message).with_span(location.span(sources));
     if dispatch.function.is_some() {
         return Err(invalid("已选静态方法没有闭合调用目标"));
     }
@@ -130,4 +142,65 @@ fn protocol(
         _ => return Err(invalid("内建 trait 方法没有登记 lowering")),
     };
     Ok(Some(protocol))
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn missing_builtin_protocol_reports_the_call_expression() {
+        let source = "fn main() {\n    value.print(out)\n}";
+        let sources = crate::SourceMap::new(vec![
+            crate::SourceSnapshot::from_str("main.gg", source).unwrap(),
+        ])
+        .unwrap();
+        let start = source.find("value.print").unwrap() as u32;
+        let location = hir::Location {
+            source: 0,
+            start,
+            end: start + "value.print(out)".len() as u32,
+            expansion: 0,
+        };
+        let mut module = hir::Module::default();
+        module.definitions.push(hir::Definition {
+            key: [0; 32],
+            module: 0,
+            name: "Print".into(),
+            parent: None,
+            location: None,
+            kind: hir::DefinitionKind::Builtin,
+            signature: None,
+            parameters: Vec::new(),
+            obligations: Vec::new(),
+            public: true,
+            track_caller: false,
+        });
+        let dispatch = hir::Dispatch {
+            function: None,
+            arguments: Vec::new(),
+            implementation: None,
+            interface: Some(hir::TraitRef {
+                definition: hir::DefId(0),
+                arguments: Vec::new(),
+            }),
+            member: Some(0),
+            member_name: Some("print".into()),
+            dereferences: 0,
+            borrow: true,
+            implicit_receiver: true,
+            self_ty: hir::TypeId(0),
+            signature: hir::TypeId(0),
+            dynamic: false,
+        };
+        let error = protocol(&module, &dispatch, &location, &sources).unwrap_err();
+        assert_eq!(error.code(), crate::DiagnosticCode::LirInvariant);
+        assert_eq!(error.message(), "内建 trait 方法没有登记 lowering");
+        let span = error.span().expect("协议错误必须有调用点");
+        assert_eq!((span.line(), span.column()), (2, 5));
+        assert_eq!(
+            &source[span.start() as usize..span.end() as usize],
+            "value.print(out)"
+        );
+    }
 }

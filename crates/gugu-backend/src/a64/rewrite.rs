@@ -52,11 +52,11 @@ pub(crate) fn rewrite_runtime(
             if let Item::Poll { block, instruction } = site.item {
                 runtime
                     .poll(&mut out, block, instruction)
-                    .map_err(|e| Error(format!("{}: {e}", site.context)))?;
+                    .map_err(|e| e.context(&site.context))?;
                 continue;
             }
             rewrite_item(&mut out, &site.item, allocation, frame, &mut runtime)
-                .map_err(|e| Error(format!("{}: {e}", site.context)))?;
+                .map_err(|e| e.context(&site.context))?;
         }
     }
     Ok((out, runtime.anchors))

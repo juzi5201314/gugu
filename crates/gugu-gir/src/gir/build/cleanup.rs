@@ -116,7 +116,7 @@ impl Builder<'_> {
             hir::Registration::Static => self.emit_saved(cleanup),
             hir::Registration::Flag => {
                 let flag = self.cleanup_flags[cleanup as usize]
-                    .ok_or_else(|| gir_error("Flag 清理缺少标志 local", None))?;
+                    .ok_or_else(|| gir_error("Flag 清理缺少标志 local"))?;
                 let taken = self.fresh(true);
                 self.terminate(Terminator::SwitchInt {
                     value: copy_of(flag),
@@ -263,7 +263,7 @@ impl Builder<'_> {
     fn push_chain(&mut self, action: u32) -> Result<(), Diagnostic> {
         let head = self
             .chain_head
-            .ok_or_else(|| gir_error("Chain 清理缺少链头", None))?;
+            .ok_or_else(|| gir_error("Chain 清理缺少链头"))?;
         let env = match &self.saved[action as usize] {
             SavedCleanup::Call { args, .. } => args.clone(),
             SavedCleanup::Body(_) => Vec::new(),
@@ -288,7 +288,7 @@ impl Builder<'_> {
     ) -> Result<(), Diagnostic> {
         let head = self
             .chain_head
-            .ok_or_else(|| gir_error("DrainChain 缺少链头", None))?;
+            .ok_or_else(|| gir_error("DrainChain 缺少链头"))?;
         let header = self.current;
         let empty = self.temp(self.primitives.bool_ty);
         let empty_const = self.intrinsic_temp(

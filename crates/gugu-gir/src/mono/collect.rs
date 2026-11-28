@@ -205,7 +205,30 @@ impl<'a, 'b> Driver<'a, 'b> {
                 type_structure: arguments_structure(&arguments),
             };
             for callee in &record.callees {
-                self.enqueue_callee(&digest, &ancestry, &link, callee)?;
+                self.enqueue_callee(&digest, &ancestry, &link, callee)
+                    .map_err(|errors| {
+                        let owner = entry.body.map(|index| &self.context.module.owners[index]);
+                        let location = owner
+                            .and_then(|owner| {
+                                record
+                                    .call_targets
+                                    .iter()
+                                    .find(|(_, key)| *key == callee.key.digest())
+                                    .map(|(site, _)| instantiate::call_location(owner, *site))
+                            })
+                            .or(self.context.module.definitions[entry.definition.index()]
+                                .location
+                                .as_ref());
+                        errors
+                            .into_iter()
+                            .map(|error| match location {
+                                Some(location) => {
+                                    error.with_span(location.span(self.context.sources))
+                                }
+                                None => error,
+                            })
+                            .collect::<Vec<_>>()
+                    })?;
             }
             if let Some(body) = gir
                 .bodies

@@ -1021,10 +1021,7 @@ impl Builder<'_> {
             }
         };
         if dest.is_none() {
-            return Err(gir_error(
-                &format!("退出目标没有对应控制流帧：{target:?}"),
-                None,
-            ));
+            return Err(gir_error(&format!("退出目标没有对应控制流帧：{target:?}")));
         }
         let cleanup = self.intern_cleanup(plan, CleanupChain::Normal, dest)?;
         self.goto(cleanup);

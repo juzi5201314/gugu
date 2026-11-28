@@ -25,7 +25,7 @@ fn target(
     }
     let mut at = *symbols
         .get(name)
-        .ok_or_else(|| fail(format!("undefined A64 symbol {name}")))?;
+        .ok_or_else(|| Error::undefined_symbol(name))?;
     at.offset = at
         .offset
         .checked_add_signed(addend)
@@ -54,7 +54,7 @@ impl World {
             symbols
                 .get(name)
                 .copied()
-                .ok_or_else(|| fail(format!("undefined A64 symbol {name}")))
+                .ok_or_else(|| Error::undefined_symbol(name))
         };
         Ok(super::elf::ElfRequest {
             sections: self.sections.clone(),

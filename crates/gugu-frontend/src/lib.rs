@@ -1442,7 +1442,7 @@ fn build_machine_codegen(
         vec![Diagnostic::error(
             DiagnosticCode::BackendInvariant,
             error.0,
-            None,
+            error.1.as_ref().map(|location| location.span(source_map)),
         )]
     };
     let catalog = backend::a64::runtime::Catalog::from_resolved(&glues, lir).map_err(a64_error)?;

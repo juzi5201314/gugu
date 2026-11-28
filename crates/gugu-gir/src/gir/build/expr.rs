@@ -12,6 +12,16 @@ impl Builder<'_> {
         id: ExprId,
         materialize: bool,
     ) -> Result<Option<LocalId>, Diagnostic> {
+        self.lower_expr(id, materialize).map_err(|error| {
+            error.with_span(
+                self.owner.expressions[id.index()]
+                    .location
+                    .span(self.sources),
+            )
+        })
+    }
+
+    fn lower_expr(&mut self, id: ExprId, materialize: bool) -> Result<Option<LocalId>, Diagnostic> {
         if self.terminated() {
             return Ok(None);
         }
@@ -523,9 +533,9 @@ impl Builder<'_> {
             match part {
                 hir::StringPart::Text(part) => text.push_str(part),
                 hir::StringPart::Value { .. } => {
-                    return Err(gir_error(
+                    return Err(self.error(
                         "运行时插值需要 std.fmt.Formatter",
-                        Some(&self.source_of(id).location),
+                        &self.source_of(id).location,
                     ));
                 }
             }

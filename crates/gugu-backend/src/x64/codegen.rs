@@ -51,7 +51,8 @@ use super::verify;
 /// 的多条收集 slow call 各自命中同一语义 map，而不是只有最后一条被登记；
 /// 版本 8 去掉 payload 里的 LIR world 指纹：输入身份只由 query key 绑定，
 /// 同一 body 在任何 world 里产出同一份 payload。
-pub const CODEGEN_SCHEMA: u32 = 8;
+/// 版本 9 在缓存失败诊断前绑定 body 源码位置，失效旧的无来源诊断。
+pub const CODEGEN_SCHEMA: u32 = 9;
 
 /// 片段 query key 的域。
 const FRAGMENT_KEY_DOMAIN: &str = "gugu-x64-fragment-key-v1";
@@ -1230,7 +1231,8 @@ pub fn fragments(
                 glues,
             )?,
         };
-        validate_fragment(&fragment, body, target, encoder, !freshly_assembled)?;
+        validate_fragment(&fragment, body, target, encoder, !freshly_assembled)
+            .map_err(|errors| locate_fragment_errors(errors, body, sources))?;
         fragments.push(fragment);
     }
     Ok((contract, fragments))
@@ -1303,18 +1305,44 @@ fn fragment_query(
             raw.fingerprint(),
         );
         let fragment = assemble_fragment(body, universe, raw, target, encoder, contract, glues)
-            .map_err(|errors| store_errors(&errors))?;
+            .map_err(|errors| store_errors(&locate_fragment_errors(errors, body, sources)))?;
         let bytes = crate::canonical::to_vec(&fragment).expect("机器片段编码");
         fresh = Some(fragment);
         Ok((bytes, Vec::new()))
     });
-    let computed = computed.map_err(|error| restore_errors(error, sources))?;
+    let computed = computed
+        .map_err(|error| locate_fragment_errors(restore_errors(error, sources), body, sources))?;
     match fresh {
         Some(fragment) => Ok((fragment, true)),
         None => crate::canonical::from_slice(computed.payload())
             .map(|fragment| (fragment, false))
-            .map_err(|_| vec![invalid("缓存机器片段不是合法 schema")]),
+            .map_err(|_| {
+                locate_fragment_errors(vec![invalid("缓存机器片段不是合法 schema")], body, sources)
+            }),
     }
+}
+
+fn locate_fragment_errors(
+    errors: Vec<Diagnostic>,
+    body: &Body,
+    sources: &SourceMap,
+) -> Vec<Diagnostic> {
+    let location = body
+        .source_scopes
+        .first()
+        .map(|scope| &scope.location)
+        .or_else(|| {
+            body.blocks
+                .get(body.entry.index())
+                .map(|block| &block.source.location)
+        });
+    errors
+        .into_iter()
+        .map(|error| match location.filter(|_| error.span().is_none()) {
+            Some(location) => error.with_span(location.span(sources)),
+            None => error,
+        })
+        .collect()
 }
 
 /// 为每个被引用的静态存储求出镜像内块尺寸（`initialized` 字 + 值槽）。

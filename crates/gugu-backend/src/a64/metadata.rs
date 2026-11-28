@@ -170,9 +170,8 @@ pub(crate) fn build(
                                         && let Some(offset) =
                                             argument_offset(body, call, arguments, index)?
                                     {
-                                        set_slot(&mut map, class, offset).map_err(|e| {
-                                            Error(format!("argument outgoing: {e}"))
-                                        })?;
+                                        set_slot(&mut map, class, offset)
+                                            .map_err(|e| e.context("argument outgoing"))?;
                                     }
                                 }
                             }
@@ -183,7 +182,7 @@ pub(crate) fn build(
                                 argument_offset(body, call, arguments, *index as usize)?
                             {
                                 set_slot(&mut map, class, offset)
-                                    .map_err(|e| Error(format!("argument outgoing: {e}")))?;
+                                    .map_err(|e| e.context("argument outgoing"))?;
                             }
                         }
                         LogicalRoot::Slot { slot, offset } => {
@@ -210,7 +209,7 @@ pub(crate) fn build(
                                 });
                             } else {
                                 set_slot(&mut map, class, word * 8)
-                                    .map_err(|e| Error(format!("local root: {e}")))?;
+                                    .map_err(|e| e.context("local root"))?;
                             }
                         }
                     }
@@ -305,7 +304,7 @@ fn place_value(
             .get(slot as usize)
             .ok_or_else(|| super::error("missing root spill frame offset"))?,
     )
-    .map_err(|e| Error(format!("value spill: value {value} class {class}: {e}")))
+    .map_err(|e| e.context(format!("value spill: value {value} class {class}")))
 }
 
 fn set_slot(
@@ -323,7 +322,7 @@ fn set_slot(
                 .get(word as usize / 64)
                 .is_some_and(|bits| bits & (1 << (word % 64)) != 0)
         {
-            return Err(Error(format!(
+            return Err(Error::new(format!(
                 "root offset {offset} claimed by classes {other} and {class}"
             )));
         }

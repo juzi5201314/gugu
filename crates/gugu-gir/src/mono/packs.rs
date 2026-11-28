@@ -11,7 +11,7 @@ mod types;
 use rebase::{Map, children, descendant, dispatches, shift};
 
 fn invalid(message: &str) -> Diagnostic {
-    crate::gir::gir_error(message, None)
+    crate::gir::gir_error(message)
 }
 
 pub struct Expanded {

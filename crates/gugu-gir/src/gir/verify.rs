@@ -40,13 +40,13 @@ fn structure(
     body: &GirBody,
 ) -> Result<(), Diagnostic> {
     if body.revision != GIR_REVISION {
-        return Err(gir_error("GIR revision 与规范不一致", None));
+        return Err(gir_error("GIR revision 与规范不一致"));
     }
     if body.entry.index() >= body.blocks.len() {
-        return Err(gir_error("GIR 入口 block 越界", None));
+        return Err(gir_error("GIR 入口 block 越界"));
     }
     if body.locals.is_empty() || body.locals[0].kind != LocalKind::Return {
-        return Err(gir_error("LocalId(0) 必须是返回槽", None));
+        return Err(gir_error("LocalId(0) 必须是返回槽"));
     }
     let expected_expressions = owner
         .or_else(|| {
@@ -58,17 +58,17 @@ fn structure(
         .map(|owner| owner.expressions.len())
         .unwrap_or(body.expression_locals.len());
     if body.expression_locals.len() != expected_expressions {
-        return Err(gir_error("GIR 表达式 local 表与 HIR owner 不对齐", None));
+        return Err(gir_error("GIR 表达式 local 表与 HIR owner 不对齐"));
     }
     for (index, block) in body.blocks.iter().enumerate() {
         if (block.statements.end as usize) > body.statements.len()
             || (block.predecessors.end as usize) > body.predecessors.len()
         {
-            return Err(gir_error(&format!("block {index} 的范围越界"), None));
+            return Err(gir_error(&format!("block {index} 的范围越界")));
         }
         for successor in block.terminator.successors() {
             if successor.index() >= body.blocks.len() {
-                return Err(gir_error("终结符后继越界", None));
+                return Err(gir_error("终结符后继越界"));
             }
         }
         check_terminator(body, &block.terminator)?;
@@ -88,18 +88,18 @@ fn check_terminator(body: &GirBody, terminator: &Terminator) -> Result<(), Diagn
             ..
         } => {
             if safepoint.index() >= body.safepoints.len() {
-                return Err(gir_error("Suspend 缺少 safepoint", None));
+                return Err(gir_error("Suspend 缺少 safepoint"));
             }
             match reason {
                 SuspendReason::ChanSend { .. } if cancelled.is_none() => {
-                    Err(gir_error("ChanSend 必须有 cancelled 后继", None))
+                    Err(gir_error("ChanSend 必须有 cancelled 后继"))
                 }
                 SuspendReason::ChanRecv { .. }
                 | SuspendReason::JoinWait { .. }
                 | SuspendReason::Yield
                     if cancelled.is_some() =>
                 {
-                    Err(gir_error("非 send 的 Suspend 不能有 cancelled", None))
+                    Err(gir_error("非 send 的 Suspend 不能有 cancelled"))
                 }
                 _ => Ok(()),
             }
@@ -110,7 +110,7 @@ fn check_terminator(body: &GirBody, terminator: &Terminator) -> Result<(), Diagn
             if safepoint.index() >= body.safepoints.len()
                 || (cases.end as usize) > body.select_cases.len()
             {
-                return Err(gir_error("SelectCommit 范围越界", None));
+                return Err(gir_error("SelectCommit 范围越界"));
             }
             Ok(())
         }
@@ -122,7 +122,7 @@ fn place_in_body(body: &GirBody, place: Place) -> Result<(), Diagnostic> {
     if place.local.index() >= body.locals.len()
         || place.projections.1 as usize > body.projections.len()
     {
-        return Err(gir_error("place 引用越界", None));
+        return Err(gir_error("place 引用越界"));
     }
     Ok(())
 }
@@ -131,7 +131,7 @@ fn operand_in_body(body: &GirBody, operand: &Operand) -> Result<(), Diagnostic> 
     match operand {
         Operand::Copy(place) | Operand::MoveInternal(place) => place_in_body(body, *place),
         Operand::Constant(id) if id.index() >= body.constants.len() => {
-            Err(gir_error("常量引用越界", None))
+            Err(gir_error("常量引用越界"))
         }
         _ => Ok(()),
     }
@@ -190,7 +190,7 @@ fn rvalue_in_body(body: &GirBody, rvalue: &Rvalue) -> Result<(), Diagnostic> {
         | Rvalue::CowSnapshot(place) => place_in_body(body, *place),
         Rvalue::AllocArray { length, .. } => operand_in_body(body, length),
         Rvalue::StackSlotAddress(local) if local.index() >= body.locals.len() => {
-            Err(gir_error("StackSlotAddress 越界", None))
+            Err(gir_error("StackSlotAddress 越界"))
         }
         _ => Ok(()),
     }
@@ -206,7 +206,7 @@ fn predecessors(body: &GirBody) -> Result<(), Diagnostic> {
     for (index, expected) in computed.iter().enumerate() {
         let actual = body.predecessors_of(BlockId(index as u32));
         if actual != expected.as_slice() {
-            return Err(gir_error("前驱表与终结符后继不一致", None));
+            return Err(gir_error("前驱表与终结符后继不一致"));
         }
     }
     Ok(())
@@ -232,21 +232,18 @@ fn walk_storage(
         match &statement.kind {
             StatementKind::StorageLive(local) => {
                 if live[local.index()] {
-                    return Err(gir_error("重复 StorageLive", None));
+                    return Err(gir_error("重复 StorageLive"));
                 }
                 live[local.index()] = true;
             }
             StatementKind::StorageDead(local) => {
                 if !live[local.index()] {
-                    return Err(gir_error("未配对的 StorageDead", None));
+                    return Err(gir_error("未配对的 StorageDead"));
                 }
                 live[local.index()] = false;
             }
             StatementKind::Assign(place, _) if !live[place.local.index()] => {
-                return Err(gir_error(
-                    &format!("写入未激活 local {}", place.local.0),
-                    None,
-                ));
+                return Err(gir_error(&format!("写入未激活 local {}", place.local.0)));
             }
             _ => {}
         }
@@ -270,20 +267,17 @@ fn cleanup_sequences(
             .iter()
             .find(|candidate| candidate.definition == body.owner)
     }) else {
-        return Err(gir_error("GIR body 没有对应 HIR owner", None));
+        return Err(gir_error("GIR body 没有对应 HIR owner"));
     };
     for record in &body.exit_records {
         let Some(plan) = owner.cleanup_plans.get(record.plan as usize) else {
-            return Err(gir_error("ExitRecord 引用未知 CleanupPlan", None));
+            return Err(gir_error("ExitRecord 引用未知 CleanupPlan"));
         };
         let expected =
             &owner.cleanup_actions[plan.actions.start as usize..plan.actions.end as usize];
         let actual = reconstruct(body, record);
         if actual != expected {
-            return Err(gir_error(
-                "GIR cleanup 动作序列与 HIR CleanupPlan 不一致",
-                None,
-            ));
+            return Err(gir_error("GIR cleanup 动作序列与 HIR CleanupPlan 不一致"));
         }
     }
     Ok(())
@@ -333,10 +327,7 @@ fn suspend_cancelled(body: &GirBody) -> Result<(), Diagnostic> {
                 .iter()
                 .any(|case| matches!(case.operation, SelectOperation::Send { .. }));
             if has_send != cancelled.is_some() {
-                return Err(gir_error(
-                    "SelectCommit 的 cancelled 必须与 send case 一致",
-                    None,
-                ));
+                return Err(gir_error("SelectCommit 的 cancelled 必须与 send case 一致"));
             }
         }
     }
@@ -376,24 +367,24 @@ fn walk_views(
                         StatementKind::Assign(place, _) if place.local == source.local
                     )
                 }) {
-                    return Err(gir_error("ScopedRead 投影不能写入", None));
+                    return Err(gir_error("ScopedRead 投影不能写入"));
                 }
                 open.push(*token);
             }
             StatementKind::ScopedViewEnd { token } if open.pop() != Some(*token) => {
-                return Err(gir_error("ScopedViewEnd 与 Begin 不成对", None));
+                return Err(gir_error("ScopedViewEnd 与 Begin 不成对"));
             }
             _ => {}
         }
     }
     match &body.blocks[block.index()].terminator {
         Terminator::Suspend { .. } if !open.is_empty() => {
-            return Err(gir_error("ScopedView 内不能 suspend", None));
+            return Err(gir_error("ScopedView 内不能 suspend"));
         }
         Terminator::Return | Terminator::ResumePanic | Terminator::Abort
             if !open.is_empty() && !in_cleanup =>
         {
-            return Err(gir_error("ScopedView 在出口未闭合", None));
+            return Err(gir_error("ScopedView 在出口未闭合"));
         }
         _ => {}
     }
@@ -430,27 +421,24 @@ fn walk_regions(
     for statement in body.block_statements(block) {
         match &statement.kind {
             StatementKind::PlatformCall { .. } if !open.is_empty() => {
-                return Err(gir_error("NoSafepointRegion 内不能调用平台范围原语", None));
+                return Err(gir_error("NoSafepointRegion 内不能调用平台范围原语"));
             }
             StatementKind::RuntimeMachineCall { .. } if !open.is_empty() => {
-                return Err(gir_error(
-                    "NoSafepointRegion 内不能调用 runtime 机器原语",
-                    None,
-                ));
+                return Err(gir_error("NoSafepointRegion 内不能调用 runtime 机器原语"));
             }
             StatementKind::NoSafepointBegin(id) => {
                 if id.index() >= body.no_safepoint_regions.len() {
-                    return Err(gir_error("NoSafepointRegion 越界", None));
+                    return Err(gir_error("NoSafepointRegion 越界"));
                 }
                 open.push(*id);
             }
             StatementKind::NoSafepointEnd(id) => {
                 if open.pop() != Some(*id) {
-                    return Err(gir_error("NoSafepointEnd 与 Begin 不成对", None));
+                    return Err(gir_error("NoSafepointEnd 与 Begin 不成对"));
                 }
             }
             StatementKind::SafepointPoll(_) if !open.is_empty() => {
-                return Err(gir_error("NoSafepointRegion 内不能 poll", None));
+                return Err(gir_error("NoSafepointRegion 内不能 poll"));
             }
             _ => {}
         }
@@ -459,12 +447,12 @@ fn walk_regions(
         Terminator::Call { call_kind, .. }
             if !open.is_empty() && !matches!(call_kind, CallKind::Managed) =>
         {
-            return Err(gir_error("NoSafepointRegion 内不能外调", None));
+            return Err(gir_error("NoSafepointRegion 内不能外调"));
         }
         Terminator::Suspend { .. } | Terminator::SelectCommit { .. } | Terminator::Panic { .. }
             if !open.is_empty() =>
         {
-            return Err(gir_error("NoSafepointRegion 内不能 suspend/panic", None));
+            return Err(gir_error("NoSafepointRegion 内不能 suspend/panic"));
         }
         _ => {}
     }

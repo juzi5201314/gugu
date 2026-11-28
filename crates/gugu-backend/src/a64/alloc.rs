@@ -174,5 +174,5 @@ pub(crate) fn allocate_roots(
 }
 
 pub fn shared(error: regalloc::Error) -> Error {
-    Error(error.to_string())
+    Error::new(error.to_string())
 }

@@ -98,7 +98,7 @@ pub fn run(
         for kind in &mut plan {
             if let StatementKind::ValueAction { descriptor, .. } = kind {
                 *descriptor = type_map[descriptor.index()]
-                    .ok_or_else(|| crate::gir::gir_error("内联 descriptor 缺少类型映射", None))?;
+                    .ok_or_else(|| crate::gir::gir_error("内联 descriptor 缺少类型映射"))?;
             }
         }
         let callee = &body;
@@ -249,7 +249,7 @@ fn remap(
             descriptor: *descriptor,
         },
         _ => {
-            return Err(crate::gir::gir_error("内联候选包含未登记语句", None));
+            return Err(crate::gir::gir_error("内联候选包含未登记语句"));
         }
     })
 }
@@ -258,12 +258,12 @@ fn remap_local(local: LocalId, map: &[Option<LocalId>]) -> Result<LocalId, Diagn
     map.get(local.index())
         .copied()
         .flatten()
-        .ok_or_else(|| crate::gir::gir_error("内联局部未映射", None))
+        .ok_or_else(|| crate::gir::gir_error("内联局部未映射"))
 }
 
 fn remap_place(place: Place, map: &[Option<LocalId>]) -> Result<Place, Diagnostic> {
     if !place.is_local() {
-        return Err(crate::gir::gir_error("内联候选包含投影", None));
+        return Err(crate::gir::gir_error("内联候选包含投影"));
     }
     Ok(Place::local(remap_local(place.local, map)?))
 }
@@ -282,7 +282,7 @@ fn remap_rvalue(
                 Operand::Constant(editor.add_constant(callee.constants[id.index()].clone()))
             }
             _ => {
-                return Err(crate::gir::gir_error("内联候选包含非常量操作数", None));
+                return Err(crate::gir::gir_error("内联候选包含非常量操作数"));
             }
         })
     };
@@ -299,7 +299,7 @@ fn remap_rvalue(
         },
         Rvalue::ValueCopy(place) => Rvalue::ValueCopy(remap_place(*place, map)?),
         _ => {
-            return Err(crate::gir::gir_error("内联候选包含未登记 rvalue", None));
+            return Err(crate::gir::gir_error("内联候选包含未登记 rvalue"));
         }
     })
 }

@@ -174,6 +174,16 @@ fn strictly_growing_generic_chain_reports_mono_divergence() {
             .any(|error| { error.code() == crate::DiagnosticCode::MonoDivergence }),
         "严格增长链必须报 E0052：{errors:?}"
     );
+    let error = errors
+        .iter()
+        .find(|error| error.code() == crate::DiagnosticCode::MonoDivergence)
+        .unwrap();
+    let span = error.span().expect("单态化失败必须携带增长调用的位置");
+    assert_eq!((span.line(), span.column()), (1, 23));
+    assert_eq!(
+        &source[span.start() as usize..span.end() as usize],
+        "wrap([value])"
+    );
 }
 
 #[test]

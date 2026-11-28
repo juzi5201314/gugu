@@ -223,10 +223,10 @@ pub fn run(
     let placement = match fresh {
         Some(placement) => placement,
         None => crate::canonical::from_slice(result.payload())
-            .map_err(|_| vec![super::gir_error("placement query 缓存 schema 不合法", None)])?,
+            .map_err(|_| vec![super::gir_error("placement query 缓存 schema 不合法")])?,
     };
     if placement.schema != PLACEMENT_SCHEMA {
-        return Err(vec![super::gir_error("placement schema 不匹配", None)]);
+        return Err(vec![super::gir_error("placement schema 不匹配")]);
     }
     verify(&placement).map_err(|error| vec![error])?;
     Ok(attach(world, placement))
@@ -712,23 +712,20 @@ fn verify_regions(world: &PlacementWorldV1) -> Result<(), Diagnostic> {
             .collect();
         for (expected, plan) in plans.iter().enumerate() {
             if plan.region as usize != expected {
-                return Err(super::gir_error("region 编号必须按 body 稠密", None));
+                return Err(super::gir_error("region 编号必须按 body 稠密"));
             }
             if plan.allocations == 0 {
-                return Err(super::gir_error("region 必须至少有一个分配点", None));
+                return Err(super::gir_error("region 必须至少有一个分配点"));
             }
             if plan.exits.is_empty() {
-                return Err(super::gir_error(
-                    "region 必须有出口边界，否则无法结束 turn",
-                    None,
-                ));
+                return Err(super::gir_error("region 必须有出口边界，否则无法结束 turn"));
             }
             if plan
                 .exits
                 .windows(2)
                 .any(|pair| pair[0].block >= pair[1].block)
             {
-                return Err(super::gir_error("region 出口边界必须严格升序", None));
+                return Err(super::gir_error("region 出口边界必须严格升序"));
             }
         }
         let sites = world
@@ -740,25 +737,21 @@ fn verify_regions(world: &PlacementWorldV1) -> Result<(), Diagnostic> {
         if sites != declared {
             return Err(super::gir_error(
                 "TurnRegion 分配点数量与 region 计划不一致",
-                None,
             ));
         }
     }
     for alloc in &world.allocs {
         if alloc.kind != PlacementKind::TurnRegion {
             if alloc.region.is_some() {
-                return Err(super::gir_error("非 TurnRegion 站点不得携带 region", None));
+                return Err(super::gir_error("非 TurnRegion 站点不得携带 region"));
             }
             continue;
         }
         let Some(region) = alloc.region else {
-            return Err(super::gir_error("TurnRegion 站点必须归属 region", None));
+            return Err(super::gir_error("TurnRegion 站点必须归属 region"));
         };
         if world.region(alloc.body, region).is_none() {
-            return Err(super::gir_error(
-                "TurnRegion 站点引用了不存在的 region",
-                None,
-            ));
+            return Err(super::gir_error("TurnRegion 站点引用了不存在的 region"));
         }
     }
     Ok(())
@@ -776,7 +769,6 @@ fn check_turn(kind: PlacementKind, proof: ProofStatus, export: u8) -> Result<(),
     if proof != ProofStatus::Proved || export & forbidden != 0 {
         return Err(super::gir_error(
             "TurnRegion 只能在已证明私有、无 alias/resource/FFI 时选择",
-            None,
         ));
     }
     Ok(())

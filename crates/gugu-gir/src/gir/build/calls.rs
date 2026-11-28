@@ -534,16 +534,13 @@ impl Builder<'_> {
                 if let Some(Operand::Copy(place)) = operands.first() {
                     Rvalue::Len(*place)
                 } else {
-                    return Err(gir_error(
-                        "len 缺少可投影的操作数",
-                        Some(&self.source_of(id).location),
-                    ));
+                    return Err(self.error("len 缺少可投影的操作数", &self.source_of(id).location));
                 }
             }
             _ => {
-                return Err(gir_error(
+                return Err(self.error(
                     "该 intrinsic 没有对应的 GIR 操作",
-                    Some(&self.source_of(id).location),
+                    &self.source_of(id).location,
                 ));
             }
         };
@@ -661,15 +658,15 @@ impl Builder<'_> {
             MemoryIntrinsic::ArenaAlloc { sync } => {
                 let ty = self.expr_ty(id);
                 let hir::Type::Ref(inner) = self.module.types[ty.index()] else {
-                    return Err(gir_error(
+                    return Err(self.error(
                         "arena alloc 的结果必须是引用类型",
-                        Some(&self.source_of(id).location),
+                        &self.source_of(id).location,
                     ));
                 };
                 if self.passing().class(inner).has_resource() {
-                    return Err(gir_error(
+                    return Err(self.error(
                         "arena 不接受含 resource 字段的类型",
-                        Some(&self.source_of(id).location),
+                        &self.source_of(id).location,
                     ));
                 }
                 self.assign(

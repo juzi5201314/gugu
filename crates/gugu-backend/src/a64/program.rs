@@ -254,7 +254,7 @@ fn symbol(world: &World, name: &str) -> Result<Location, Error> {
         .symbols
         .get(name)
         .copied()
-        .ok_or_else(|| fail(&format!("undefined A64 symbol {name}")))
+        .ok_or_else(|| Error::undefined_symbol(name))
 }
 
 fn optional(world: &World, name: &str) -> Option<Location> {
@@ -263,6 +263,10 @@ fn optional(world: &World, name: &str) -> Option<Location> {
 
 /// 装配为完整可执行镜像。
 pub fn build(request: &ProgramRequest<'_>) -> Result<Program, Error> {
+    build_program(request).map_err(|error| error.locate_symbol(request.bodies, request.platform))
+}
+
+fn build_program(request: &ProgramRequest<'_>) -> Result<Program, Error> {
     let world = assemble(request)?;
     let image = match request.platform {
         Platform::Linux => linux_image(&world, request)?,

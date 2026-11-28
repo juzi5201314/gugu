@@ -9,6 +9,13 @@ pub fn compile_gir(source: &str) -> (crate::hir::Validated, GirWorldV1) {
 }
 
 fn compile_sources(sources: &[(&str, &str)]) -> (crate::hir::Validated, GirWorldV1) {
+    let (hir, gir, _) = compile_sources_with_map(sources);
+    (hir, gir)
+}
+
+pub(super) fn compile_sources_with_map(
+    sources: &[(&str, &str)],
+) -> (crate::hir::Validated, GirWorldV1, SourceMap) {
     let mut sources = SourceMap::new(
         sources
             .iter()
@@ -39,7 +46,7 @@ fn compile_sources(sources: &[(&str, &str)]) -> (crate::hir::Validated, GirWorld
         crate::testing::resources(),
     )
     .unwrap_or_else(|errors| panic!("{errors:?}"));
-    (output.hir, output.gir)
+    (output.hir, output.gir, sources)
 }
 
 /// 编译单个源文件并返回完整前端产物（含冻结 `mono.universe`）。

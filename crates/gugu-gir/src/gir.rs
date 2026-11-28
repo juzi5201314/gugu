@@ -153,8 +153,7 @@ pub(crate) fn world_fingerprint_cached(
     *hash.finalize().as_bytes()
 }
 
-pub fn gir_error(message: &str, location: Option<&hir::Location>) -> Diagnostic {
-    let _ = location;
+pub fn gir_error(message: &str) -> Diagnostic {
     Diagnostic::error(DiagnosticCode::GirInvariant, message, None)
 }
 
@@ -179,7 +178,7 @@ fn find_type(module: &hir::Module, expected: &hir::Type, name: &str) -> Result<T
         .iter()
         .position(|ty| ty == expected)
         .map(|index| TypeId(index as u32))
-        .ok_or_else(|| gir_error(&format!("HIR 类型表缺少 {name}"), None))
+        .ok_or_else(|| gir_error(&format!("HIR 类型表缺少 {name}")))
 }
 
 #[derive(Clone, Copy)]

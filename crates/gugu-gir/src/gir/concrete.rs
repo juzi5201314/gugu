@@ -243,8 +243,12 @@ pub fn build(
             .binary_search(&fragment.digest)
             .map_err(|_| vec![invalid("GIR fragment 不在闭合实例图中")])?;
         let instance = &mono.instances[instance_index];
-        let body = build_body(context, world, mono, &digests, instance, fragment.body)
-            .map_err(|error| vec![error])?;
+        let body = build_body(context, world, mono, &digests, instance, fragment.body).map_err(
+            |error| {
+                let location = &world.bodies[index(fragment.body)].source_scopes[0].location;
+                vec![error.with_span(location.span(context.sources))]
+            },
+        )?;
         bodies.push(body);
     }
     Ok(bodies)
@@ -274,7 +278,7 @@ fn build_body(
         );
         let owner = &expanded.module.owners
             [nested.owner_of[instance.definition as usize].expect("pack owner")];
-        let mut body = super::build::lower(&expanded.module, owner)?;
+        let mut body = super::build::lower(&expanded.module, owner, context.sources)?;
         for statement in &mut body.statements {
             if let super::body::StatementKind::Assign(
                 _,

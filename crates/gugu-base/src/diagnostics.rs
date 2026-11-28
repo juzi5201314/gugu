@@ -478,6 +478,14 @@ impl Diagnostic {
         self.span.as_ref()
     }
 
+    /// 错误向外传播时补充当前源码位置，保留内层已经确定的精确范围。
+    pub fn with_span(mut self, span: Span) -> Self {
+        if self.span.is_none() {
+            self.span = Some(span);
+        }
+        self
+    }
+
     /// 将诊断渲染为紧凑单行文本，供机器通道与短上下文使用。
     ///
     /// 人读的多行片段渲染见 [`Diagnostic::render_human`]。

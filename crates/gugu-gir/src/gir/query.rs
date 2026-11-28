@@ -28,10 +28,7 @@ pub fn build_world(
         .map(|prefix| Arc::clone(prefix.gir_body_fingerprints()))
         .unwrap_or_else(|| Arc::from([]));
     if bodies.len() > module.owners.len() {
-        return Err(vec![super::gir_error(
-            "物化 GIR 前缀超过当前 owner 表",
-            None,
-        )]);
+        return Err(vec![super::gir_error("物化 GIR 前缀超过当前 owner 表")]);
     }
     let mut suffix_fingerprints =
         Vec::with_capacity(module.owners.len().saturating_sub(bodies.len()));
@@ -44,7 +41,10 @@ pub fn build_world(
                 || body.owner_key != definition.key
                 || body.expression_locals.len() != owner.expressions.len()
             {
-                return Err(vec![super::gir_error("物化 GIR 与当前 owner 不一致", None)]);
+                return Err(vec![
+                    super::gir_error("物化 GIR 与当前 owner 不一致")
+                        .with_span(owner.expressions[owner.body.index()].location.span(sources)),
+                ]);
             }
             debug_assert!(std::ptr::eq(&bodies[index], body));
             continue;
@@ -113,35 +113,40 @@ fn compute_body(
         *hash.finalize().as_bytes(),
     );
     let mut fresh = None;
-    let result = queries
-        .compute(key, |context| {
-            context.record_dependency(
-                QueryKey::new(
-                    QueryKind::LowerHir,
-                    crate::semantics::LOWER_SCHEMA,
-                    module.input_fingerprint,
-                ),
-                hir.fingerprint(),
-            );
-            match build::lower(module, owner) {
-                Ok(body) => {
-                    let payload = crate::canonical::to_vec(&body).expect("GIR schema 编码");
-                    fresh = Some(body);
-                    Ok((payload, Vec::new()))
+    let result =
+        queries
+            .compute(key, |context| {
+                context.record_dependency(
+                    QueryKey::new(
+                        QueryKind::LowerHir,
+                        crate::semantics::LOWER_SCHEMA,
+                        module.input_fingerprint,
+                    ),
+                    hir.fingerprint(),
+                );
+                match build::lower(module, owner, sources) {
+                    Ok(body) => {
+                        let payload = crate::canonical::to_vec(&body).expect("GIR schema 编码");
+                        fresh = Some(body);
+                        Ok((payload, Vec::new()))
+                    }
+                    Err(error) => Err(store_errors(&[error
+                        .with_span(owner.expressions[owner.body.index()].location.span(sources))])),
                 }
-                Err(error) => Err(store_errors(&[error])),
-            }
-        })
-        .map_err(|error| restore_errors(error, sources))?;
+            })
+            .map_err(|error| restore_errors(error, sources))?;
     if let Some(body) = fresh {
         return Ok(body);
     }
+    let at_owner = |error: Diagnostic| {
+        vec![error.with_span(owner.expressions[owner.body.index()].location.span(sources))]
+    };
     let body: GirBody = crate::canonical::from_slice(result.payload())
-        .map_err(|_| vec![super::gir_error("GIR query 缓存 schema 不合法", None)])?;
+        .map_err(|_| at_owner(super::gir_error("GIR query 缓存 schema 不合法")))?;
     let definition = &module.definitions[owner.definition.index()];
     if body.owner != owner.definition || body.owner_key != definition.key {
-        return Err(vec![super::gir_error("缓存 GIR 与当前 owner 不一致", None)]);
+        return Err(at_owner(super::gir_error("缓存 GIR 与当前 owner 不一致")));
     }
-    super::verify(module, &body).map_err(|error| vec![error])?;
+    super::verify(module, &body).map_err(at_owner)?;
     Ok(body)
 }

@@ -37,7 +37,11 @@ fn select_mode(
     runtime_catalog: Option<&super::runtime::Catalog<'_>>,
     universe: Option<&crate::late::universe::TypeUniverse>,
 ) -> Result<Function, Error> {
-    validate(body, leaf, runtime).map_err(|e| Error(format!("{} entry: {e}", body.name)))?;
+    validate(body, leaf, runtime).map_err(|error| {
+        error
+            .context(format!("{} entry", body.name))
+            .with_location(super::body_location(body))
+    })?;
     let count = body.blocks.len();
     let mut function = Function {
         name: body.name.clone(),
@@ -134,19 +138,31 @@ fn select_mode(
                             },
                             &mut b,
                         )
-                        .map_err(|e| Error(format!("{}: {e}", b.context)))?;
+                        .map_err(|error| {
+                            error
+                                .context(&b.context)
+                                .with_location(Some(&instruction.source.location))
+                        })?;
                         continue;
                     }
                     _ => {}
                 }
                 if b.runtime_catalog.is_some() && lower::runtime::handles(&instruction.op) {
-                    lower::runtime::lower(body, instruction, index as u32, site, &mut b)
-                        .map_err(|e| Error(format!("{}: {e}", b.context)))?;
+                    lower::runtime::lower(body, instruction, index as u32, site, &mut b).map_err(
+                        |error| {
+                            error
+                                .context(&b.context)
+                                .with_location(Some(&instruction.source.location))
+                        },
+                    )?;
                     continue;
                 }
             }
-            lower::lower(body, instruction, &mut b)
-                .map_err(|e| Error(format!("{}: {e}", b.context)))?;
+            lower::lower(body, instruction, &mut b).map_err(|error| {
+                error
+                    .context(&b.context)
+                    .with_location(Some(&instruction.source.location))
+            })?;
         }
         for &(_, slot, bit, initialized) in crate::metadata::init_events_until(
             &events,
@@ -163,8 +179,11 @@ fn select_mode(
             "{} block {index} terminator {:?}",
             body.name, block.terminator
         );
-        let successors = terminator(body, block, index, count, &mut b)
-            .map_err(|e| Error(format!("{}: {e}", b.context)))?;
+        let successors = terminator(body, block, index, count, &mut b).map_err(|error| {
+            error
+                .context(&b.context)
+                .with_location(Some(&block.source.location))
+        })?;
         b.function.blocks[index + 1] = Block {
             items: b.items,
             successors,
@@ -435,20 +454,22 @@ fn validate(body: &Body, leaf: bool, runtime: bool) -> Result<(), Error> {
                 || matches!(instruction.op, Op::StackCheck | Op::SafepointPoll { .. })
                 || instruction.safepoint.is_some())
         {
-            return Err(Error(format!(
+            return Err(Error::new(format!(
                 "{} {:?}: requires checked entry / stack maps (4c)",
                 site_context(body, index),
                 instruction.op
-            )));
+            ))
+            .with_location(Some(&instruction.source.location)));
         }
     }
     for (index, block) in body.blocks.iter().enumerate() {
         if matches!(&block.terminator, Terminator::TailCall { call, .. } if lower::call::requires_maps(call))
         {
-            return Err(Error(format!(
+            return Err(Error::new(format!(
                 "block {index} terminator {:?}: requires checked entry / stack maps (4c)",
                 block.terminator
-            )));
+            ))
+            .with_location(Some(&block.source.location)));
         }
     }
     if body.revision != crate::lir::body::REVISION
@@ -495,7 +516,7 @@ fn validate(body: &Body, leaf: bool, runtime: bool) -> Result<(), Error> {
                 | Type::V128(_)
         ) || (!runtime && value.kind.provenance.is_some_and(|p| p.managed()))
         {
-            return Err(Error(format!(
+            return Err(Error::new(format!(
                 "unsupported leaf value type {:?}",
                 value.kind
             )));
@@ -522,7 +543,10 @@ fn validate(body: &Body, leaf: bool, runtime: bool) -> Result<(), Error> {
     }
     for (index, instruction) in body.instructions.iter().enumerate() {
         if leaf && matches!(instruction.op, Op::Call(_) | Op::ForeignCall(_)) {
-            return Err(Error(format!("site {index}: compile_leaf rejects calls")));
+            return Err(
+                Error::new(format!("site {index}: compile_leaf rejects calls"))
+                    .with_location(Some(&instruction.source.location)),
+            );
         }
         if !values(body, &instruction.arguments)
             || !result_values(body, &instruction.results)
@@ -531,27 +555,30 @@ fn validate(body: &Body, leaf: bool, runtime: bool) -> Result<(), Error> {
             })
             || (!runtime && instruction.safepoint.is_some())
         {
-            return Err(Error(format!(
+            return Err(Error::new(format!(
                 "site {index} {:?}: invalid operands/memory/safepoint",
                 instruction.op
-            )));
+            ))
+            .with_location(Some(&instruction.source.location)));
         }
         if matches!(
             instruction.op,
             Op::Load(_) | Op::Store(_) | Op::Memcpy { .. } | Op::Memmove { .. } | Op::Memset { .. }
         ) && instruction.memory.is_none()
         {
-            return Err(Error(format!(
+            return Err(Error::new(format!(
                 "site {index}: memory access lacks sequencing token"
-            )));
+            ))
+            .with_location(Some(&instruction.source.location)));
         }
         if matches!(instruction.op, Op::Call(_) | Op::ForeignCall(_))
             && instruction.memory.is_none()
         {
-            return Err(Error(format!(
+            return Err(Error::new(format!(
                 "{}: call lacks sequencing token",
                 site_context(body, index)
-            )));
+            ))
+            .with_location(Some(&instruction.source.location)));
         }
     }
     for (index, block) in body.blocks.iter().enumerate() {
@@ -561,24 +588,27 @@ fn validate(body: &Body, leaf: bool, runtime: bool) -> Result<(), Error> {
                 Terminator::TailCall { .. } | Terminator::Invoke { .. }
             )
         {
-            return Err(Error(format!(
+            return Err(Error::new(format!(
                 "block {index}: compile_leaf rejects call terminators"
-            )));
+            ))
+            .with_location(Some(&block.source.location)));
         }
         if !valid_range(&block.instructions, body.instructions.len())
             || !valid_range(&block.parameters, body.parameters.len())
             || !valid_range(&block.predecessors, body.predecessors.len())
         {
-            return Err(Error(format!("block {index}: invalid arena range")));
+            return Err(Error::new(format!("block {index}: invalid arena range"))
+                .with_location(Some(&block.source.location)));
         }
         if body
             .params(crate::lir::body::BlockId(index as u32))
             .iter()
             .any(|p| p.value.index() >= body.values.len())
         {
-            return Err(Error(format!(
-                "block {index}: parameter value out of range"
-            )));
+            return Err(
+                Error::new(format!("block {index}: parameter value out of range"))
+                    .with_location(Some(&block.source.location)),
+            );
         }
         let edge_valid = |id: crate::lir::body::EdgeId| {
             body.edges
@@ -642,10 +672,11 @@ fn validate(body: &Body, leaf: bool, runtime: bool) -> Result<(), Error> {
             _ => true,
         };
         if !valid {
-            return Err(Error(format!(
+            return Err(Error::new(format!(
                 "block {index} terminator {:?}: invalid operands/edges",
                 block.terminator
-            )));
+            ))
+            .with_location(Some(&block.source.location)));
         }
     }
     for (index, edge) in body.edges.iter().enumerate() {
@@ -657,17 +688,18 @@ fn validate(body: &Body, leaf: bool, runtime: bool) -> Result<(), Error> {
                 }))
             || !values(body, &edge.arguments)
         {
-            return Err(Error(format!(
+            return Err(Error::new(format!(
                 "edge {index}: invalid endpoints/arguments/unwind"
-            )));
+            )).with_location(body.blocks.get(edge.from.index()).map(|block| &block.source.location)));
         }
         let params = body.params(edge.to);
         if params.len() != body.args(&edge.arguments).len() {
-            return Err(Error(format!(
+            return Err(Error::new(format!(
                 "edge {index}: parameter count {} != {}",
                 params.len(),
                 body.args(&edge.arguments).len()
-            )));
+            ))
+            .with_location(Some(&body.blocks[edge.from.index()].source.location)));
         }
         if let Some((position, (p, a))) = params
             .iter()
@@ -677,11 +709,12 @@ fn validate(body: &Body, leaf: bool, runtime: bool) -> Result<(), Error> {
                 body.values[p.value.index()].kind.ty != body.values[a.index()].kind.ty
             })
         {
-            return Err(Error(format!(
+            return Err(Error::new(format!(
                 "edge {index}: parameter {position} mismatch {:?} != {:?}",
                 body.values[p.value.index()].kind,
                 body.values[a.index()].kind
-            )));
+            ))
+            .with_location(Some(&body.blocks[edge.from.index()].source.location)));
         }
     }
     let params = body

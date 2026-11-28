@@ -8,10 +8,7 @@ impl Builder<'_> {
     ) -> Result<Option<LocalId>, Diagnostic> {
         let args = expr_range(self.owner, &arguments);
         let (Some(channel), Some(value)) = (args.first().copied(), args.get(1).copied()) else {
-            return Err(gir_error(
-                "chan.send 需要通道与值",
-                Some(&self.source_of(id).location),
-            ));
+            return Err(self.error("chan.send 需要通道与值", &self.source_of(id).location));
         };
         let Some(channel) = self.emit_expr(channel)? else {
             return Ok(None);
@@ -46,10 +43,7 @@ impl Builder<'_> {
         arguments: Range<u32>,
     ) -> Result<Option<LocalId>, Diagnostic> {
         let Some(channel) = expr_range(self.owner, &arguments).into_iter().next() else {
-            return Err(gir_error(
-                "chan.recv 需要通道",
-                Some(&self.source_of(id).location),
-            ));
+            return Err(self.error("chan.recv 需要通道", &self.source_of(id).location));
         };
         let Some(channel) = self.emit_expr(channel)? else {
             return Ok(None);
@@ -77,10 +71,7 @@ impl Builder<'_> {
         arguments: Range<u32>,
     ) -> Result<Option<LocalId>, Diagnostic> {
         let Some(join) = expr_range(self.owner, &arguments).into_iter().next() else {
-            return Err(gir_error(
-                "join.wait 需要句柄",
-                Some(&self.source_of(id).location),
-            ));
+            return Err(self.error("join.wait 需要句柄", &self.source_of(id).location));
         };
         let Some(join) = self.emit_expr(join)? else {
             return Ok(None);
@@ -111,20 +102,17 @@ impl Builder<'_> {
         let try_send = matches!(operation, hir::Builtin::ChanTrySend);
         let args = expr_range(self.owner, &arguments);
         let Some(channel) = args.first().copied() else {
-            return Err(gir_error(
+            return Err(self.error(
                 if try_send {
                     "chan.try_send 需要通道与值"
                 } else {
                     "chan.try_recv 需要通道"
                 },
-                Some(&self.source_of(id).location),
+                &self.source_of(id).location,
             ));
         };
         if try_send && args.get(1).is_none() {
-            return Err(gir_error(
-                "chan.try_send 需要通道与值",
-                Some(&self.source_of(id).location),
-            ));
+            return Err(self.error("chan.try_send 需要通道与值", &self.source_of(id).location));
         }
         let Some(channel) = self.emit_expr(channel)? else {
             return Ok(None);
@@ -132,10 +120,7 @@ impl Builder<'_> {
         let mut operands = vec![copy_of(channel)];
         if try_send {
             let Some(value) = args.get(1).copied() else {
-                return Err(gir_error(
-                    "chan.try_send 需要通道与值",
-                    Some(&self.source_of(id).location),
-                ));
+                return Err(self.error("chan.try_send 需要通道与值", &self.source_of(id).location));
             };
             let Some(payload) = self.emit_expr(value)? else {
                 return Ok(None);

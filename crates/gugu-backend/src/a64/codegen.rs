@@ -163,5 +163,9 @@ fn compile(
             metadata,
         })
     };
-    compile().map_err(|error: Error| Error(format!("A64 {}: {error}", body.name)))
+    compile().map_err(|error: Error| {
+        error
+            .context(format!("A64 {}", body.name))
+            .with_location(super::body_location(body))
+    })
 }

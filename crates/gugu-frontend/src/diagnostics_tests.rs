@@ -30,6 +30,32 @@ use crate::{
 
 /// 契约行统一使用的目标：与宿主平台无关，保证 cfg 求值在 CI 与开发机上一致。
 const TARGET: TargetName = TargetName::X86_64Linux;
+
+#[test]
+fn lowering_errors_retain_the_call_span_through_the_query_cache() {
+    let source = "use std.hash.{Hasher}\nfn main() {\n    let values: [int; 2] = [1, 2]\n    let hasher = Hasher::with_seed(0)\n    values.hash(&hasher)\n}";
+    let compiler = Compiler::shared();
+    for _ in 0..2 {
+        let compilation =
+            compiler.compile_to_lir(CompileRequest::single_file("src/main.gg", source, TARGET));
+        let error = compilation
+            .diagnostics()
+            .items()
+            .iter()
+            .find(|error| error.code() == DiagnosticCode::LirInvariant)
+            .unwrap_or_else(|| panic!("{:?}", compilation.diagnostics().items()));
+        assert!(error.message().contains("Hash.hash"));
+        let span = error.span().expect("未实现的内建调用必须保留表达式位置");
+        assert_eq!((span.line(), span.column()), (5, 5));
+        assert_eq!(
+            &source[span.start() as usize..span.end() as usize],
+            "values.hash(&hasher)"
+        );
+        let rendered = error.render_human(compilation.source_map(), false);
+        assert!(rendered.contains("src/main.gg:5:5"), "{rendered}");
+        assert!(rendered.contains("values.hash(&hasher)"), "{rendered}");
+    }
+}
 /// `Input::Sources` 行的入口与源码根，与 `frontend/stage10_tests.rs` 的约定一致。
 const ENTRY: &str = "src/main.gg";
 const SOURCE_ROOT: &str = "src";
@@ -985,12 +1011,14 @@ const CASES: &[Case] = &[
         0,
         "生成文本不是合法 UTF-8",
     ),
-    error_row_detached(
+    error_row(
         DiagnosticCode::MonoDivergence,
         Input::Source {
             path: "src/main.gg",
             text: "fn wrap[T](value: T) { wrap([value]) }\nfn main() { wrap(1) }",
         },
+        (1, 23),
+        "src/main.gg",
         0,
         "严格增长",
     ),

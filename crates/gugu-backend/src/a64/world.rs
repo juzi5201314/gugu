@@ -104,6 +104,41 @@ fn fail(message: impl std::fmt::Display) -> Error {
     super::error(&message.to_string())
 }
 
+/// 只在链接失败时回查符号引用；保留触发错误的指令或终结符位置。
+pub(crate) fn symbol_location<'a>(
+    body: &'a Body,
+    name: &str,
+    platform: Platform,
+) -> Option<&'a crate::hir::Location> {
+    use crate::lir::body::{CallTarget, Terminator};
+    let external = |symbol: &str| symbol == name || platform.symbol(symbol) == name;
+    let call_matches = |target: &CallTarget| match target {
+        CallTarget::Instance(key) => super::abi::symbol(key) == name,
+        CallTarget::External { name, .. } => external(name),
+        CallTarget::Runtime(call) => {
+            mangle::mangle_runtime(mangle::runtime_call_name(*call)) == name
+        }
+        _ => false,
+    };
+    for instruction in &body.instructions {
+        let matched = match &instruction.op {
+            Op::SymbolAddr(Symbol::External { name, .. }) => external(name),
+            Op::SymbolAddr(symbol) => mangle::mangle_symbol(symbol) == name,
+            Op::Call(call) | Op::ForeignCall(call) => call_matches(&call.target),
+            _ => false,
+        };
+        if matched {
+            return Some(&instruction.source.location);
+        }
+    }
+    body.blocks.iter().find_map(|block| {
+        matches!(&block.terminator,
+            Terminator::Invoke { call, .. } | Terminator::TailCall { call, .. }
+            if call_matches(&call.target))
+        .then_some(&block.source.location)
+    })
+}
+
 pub(crate) fn coverage_symbol(index: u32) -> String {
     mangle::mangle_symbol(&Symbol::Global {
         key: crate::hash::hash_domain("gugu-a64-coverage-v1", &index.to_le_bytes()),
@@ -248,10 +283,10 @@ fn body_symbols(
             Op::SymbolAddr(symbol) => {
                 let name = match symbol {
                     Symbol::Data(index) => {
-                        let data = body
-                            .data
-                            .get(*index as usize)
-                            .ok_or_else(|| fail("A64 local data index out of bounds"))?;
+                        let data = body.data.get(*index as usize).ok_or_else(|| {
+                            fail("A64 local data index out of bounds")
+                                .with_location(Some(&instruction.source.location))
+                        })?;
                         pool[&data.bytes].0.clone()
                     }
                     Symbol::Global { bytes, .. } => {
@@ -260,22 +295,26 @@ fn body_symbols(
                             definitions,
                             zero(
                                 name.clone(),
-                                bytes
-                                    .checked_add(8)
-                                    .ok_or_else(|| fail("A64 global size overflow"))?,
+                                bytes.checked_add(8).ok_or_else(|| {
+                                    fail("A64 global size overflow")
+                                        .with_location(Some(&instruction.source.location))
+                                })?,
                             ),
                         )?;
                         name
                     }
                     Symbol::External { name, .. } => {
-                        let value = body
-                            .results(instruction)
-                            .next()
-                            .ok_or_else(|| fail("A64 symbol address result missing"))?;
+                        let value = body.results(instruction).next().ok_or_else(|| {
+                            fail("A64 symbol address result missing")
+                                .with_location(Some(&instruction.source.location))
+                        })?;
                         let code = body
                             .values
                             .get(value.index())
-                            .ok_or_else(|| fail("A64 symbol address result out of bounds"))?
+                            .ok_or_else(|| {
+                                fail("A64 symbol address result out of bounds")
+                                    .with_location(Some(&instruction.source.location))
+                            })?
                             .kind
                             .provenance
                             == Some(crate::lir::body::Provenance::Code);
@@ -288,7 +327,8 @@ fn body_symbols(
                                         NativeImportKind::Data
                                     }
                         }) {
-                            return Err(fail("A64 external symbol import kind mismatch"));
+                            return Err(fail("A64 external symbol import kind mismatch")
+                                .with_location(Some(&instruction.source.location)));
                         }
                         continue;
                     }
@@ -359,9 +399,11 @@ fn build_with_catalog(
         if super::foreign_packet::platform(body)? != request.platform {
             return Err(fail("A64 world/LIR platform mismatch"));
         }
-        let symbols = body_symbols(body, &pool, &mut definitions, request.imports)?;
+        let symbols = body_symbols(body, &pool, &mut definitions, request.imports)
+            .map_err(|error| error.with_location(super::body_location(body)))?;
         let fragment =
-            codegen::compile_image(body, request.bindings, &symbols, catalog, request.universe)?;
+            codegen::compile_image(body, request.bindings, &symbols, catalog, request.universe)
+                .map_err(|error| error.with_location(super::body_location(body)))?;
         requirements.extend(symbols);
         metadata.insert(
             fragment.symbol.clone(),
@@ -449,10 +491,9 @@ fn build_with_catalog(
             }
             _ => {}
         }
-        let at = world
-            .symbols
-            .get(&name)
-            .ok_or_else(|| fail(format!("undefined A64 symbol {name}")))?;
+        let at = world.symbols.get(&name).ok_or_else(|| {
+            Error::undefined_symbol(&name).locate_symbol(request.bodies, request.platform)
+        })?;
         let code = matches!(symbol, Symbol::Instance(_) | Symbol::FunctionAdapter { .. });
         if code != matches!(world.sections[at.section].content, SectionContent::Code(_)) {
             return Err(fail("incompatible A64 typed symbol definition"));
@@ -679,7 +720,7 @@ impl World {
             .chain(self.pointers.iter().map(|rel| &rel.target))
         {
             if !names.contains(name) {
-                return Err(fail(format!("undefined A64 symbol {name}")));
+                return Err(Error::undefined_symbol(name));
             }
         }
         for rel in &self.relocations {

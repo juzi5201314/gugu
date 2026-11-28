@@ -258,9 +258,9 @@ impl Builder<'_> {
         let start = usize::try_from(arguments.start).expect("表达式范围起点");
         let end = usize::try_from(arguments.end).expect("表达式范围终点");
         let [destination, value] = self.owner.expression_ids[start..end] else {
-            return Err(gir_error(
+            return Err(self.error(
                 "运行时 publish 原语缺少目标位置或值",
-                Some(&self.source_of(id).location),
+                &self.source_of(id).location,
             ));
         };
         let place = self.emit_place(destination)?;
@@ -349,7 +349,7 @@ impl Builder<'_> {
         let argument = expr_range(self.owner, &arguments)
             .into_iter()
             .next()
-            .ok_or_else(|| gir_error("字节原语缺少输入", None))?;
+            .ok_or_else(|| self.error("字节原语缺少输入", &self.source_of(id).location))?;
         let Some(local) = self.emit_expr(argument)? else {
             return Ok(None);
         };
@@ -357,10 +357,10 @@ impl Builder<'_> {
         let value = match kind {
             Source::AllocBytes => {
                 let hir::Type::Ref(slice) = self.module.types[ty.index()] else {
-                    return Err(gir_error("字节分配结果不是引用", None));
+                    return Err(self.error("字节分配结果不是引用", &self.source_of(id).location));
                 };
                 let hir::Type::Slice(element) = self.module.types[slice.index()] else {
-                    return Err(gir_error("字节分配结果不是切片", None));
+                    return Err(self.error("字节分配结果不是切片", &self.source_of(id).location));
                 };
                 Rvalue::AllocArray {
                     element,
@@ -376,7 +376,9 @@ impl Builder<'_> {
                 operands: vec![copy_of(local)],
                 types: vec![ty],
             },
-            _ => return Err(gir_error("非字节原语进入存储 lowering", None)),
+            _ => {
+                return Err(self.error("非字节原语进入存储 lowering", &self.source_of(id).location));
+            }
         };
         let dest = self.temp(ty);
         self.assign(Place::local(dest), value);
@@ -442,7 +444,12 @@ impl Builder<'_> {
             Source::AtomicCompareExchangeAcqRel => {
                 (AtomicOp::CompareExchange, MemoryOrdering::AcqRel)
             }
-            _ => return Err(gir_error("非原子原语进入 Atomic lowering", None)),
+            _ => {
+                return Err(self.error(
+                    "非原子原语进入 Atomic lowering",
+                    &self.source_of(id).location,
+                ));
+            }
         };
         let mut values = Vec::with_capacity(kind.value_arguments());
         for argument in expr_range(self.owner, &arguments) {

@@ -150,10 +150,10 @@ pub struct Outcome {
 }
 
 fn pack(pass: &str, error: Diagnostic) -> Diagnostic {
-    gir_error(
-        &format!("GIR pass {pass} 之后不变量被破坏：{}", error.message()),
-        None,
-    )
+    gir_error(&format!(
+        "GIR pass {pass} 之后不变量被破坏：{}",
+        error.message()
+    ))
 }
 
 /// 编辑器内的 block：显式语句列表，便于合并与删除。
@@ -344,8 +344,8 @@ impl<'body> Editor<'body> {
                 kept.push(index);
             }
         }
-        let entry = block_map[body.entry.index()]
-            .ok_or_else(|| gir_error("GIR 入口 block 被删除", None))?;
+        let entry =
+            block_map[body.entry.index()].ok_or_else(|| gir_error("GIR 入口 block 被删除"))?;
         let mut statements = Vec::new();
         let mut out_blocks = Vec::with_capacity(kept.len());
         for old in &kept {
@@ -356,10 +356,10 @@ impl<'body> Editor<'body> {
             }
             let end = crate::gir::concrete::id(statements.len());
             let terminator = remap_terminator(&block.terminator, &block_map).map_err(|error| {
-                gir_error(
-                    &format!("block {old} 的终结符引用非法：{}", error.message()),
-                    None,
-                )
+                gir_error(&format!(
+                    "block {old} 的终结符引用非法：{}",
+                    error.message()
+                ))
             })?;
             out_blocks.push(GirBlock {
                 statements: start..end,
@@ -409,7 +409,7 @@ fn remap_block(block_map: &[Option<BlockId>], block: BlockId) -> Result<BlockId,
         .get(block.index())
         .copied()
         .flatten()
-        .ok_or_else(|| gir_error(&format!("GIR 引用了已删除的 block {}", block.0), None))
+        .ok_or_else(|| gir_error(&format!("GIR 引用了已删除的 block {}", block.0)))
 }
 
 fn remap_terminator(

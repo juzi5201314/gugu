@@ -151,7 +151,7 @@ impl Function {
 }
 
 pub fn form(key: &str) -> Result<FormId, Error> {
-    table::find(key).ok_or_else(|| Error(format!("missing A64 form {key}")))
+    table::find(key).ok_or_else(|| Error::new(format!("missing A64 form {key}")))
 }
 
 pub fn inst(key: &str, operands: Vec<Operand>) -> Result<Inst, Error> {

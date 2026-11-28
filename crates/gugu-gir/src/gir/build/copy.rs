@@ -371,15 +371,17 @@ mod tests {
 
     #[test]
     fn resource_scope_release_tracks_partial_places() {
-        let (hir, _) =
-            crate::gir::tests::compile_gir(include_str!("../fixtures/resource_fields.gg"));
+        let (hir, _, sources) = crate::gir::tests::compile_sources_with_map(&[(
+            "main.gg",
+            include_str!("../fixtures/resource_fields.gg"),
+        )]);
         let module = hir.module();
         let owner = module
             .owners
             .iter()
             .find(|owner| module.definitions[owner.definition.index()].name == "clone_outer")
             .unwrap();
-        let mut builder = Builder::new(module, owner).unwrap();
+        let mut builder = Builder::new(module, owner, &sources).unwrap();
         let local = |name: &str| {
             owner
                 .locals

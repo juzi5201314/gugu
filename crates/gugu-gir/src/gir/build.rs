@@ -22,8 +22,12 @@ use copy::PlaceInit;
 use std::collections::BTreeMap;
 use std::ops::Range;
 
-pub(super) fn lower(module: &hir::Module, owner: &hir::Owner) -> Result<GirBody, Diagnostic> {
-    let mut builder = Builder::new(module, owner)?;
+pub(super) fn lower(
+    module: &hir::Module,
+    owner: &hir::Owner,
+    sources: &crate::SourceMap,
+) -> Result<GirBody, Diagnostic> {
+    let mut builder = Builder::new(module, owner, sources)?;
     builder.emit_body()?;
     let body = builder.finish()?;
     super::verify(module, &body)?;
@@ -67,6 +71,7 @@ enum SavedCleanup {
 struct Builder<'a> {
     module: &'a hir::Module,
     owner: &'a hir::Owner,
+    sources: &'a crate::SourceMap,
     primitives: Primitives,
     locals: Vec<GirLocal>,
     blocks: Vec<PendingBlock>,
@@ -106,7 +111,15 @@ struct Builder<'a> {
 }
 
 impl<'a> Builder<'a> {
-    fn new(module: &'a hir::Module, owner: &'a hir::Owner) -> Result<Self, Diagnostic> {
+    fn error(&self, message: &str, location: &hir::Location) -> Diagnostic {
+        gir_error(message).with_span(location.span(self.sources))
+    }
+
+    fn new(
+        module: &'a hir::Module,
+        owner: &'a hir::Owner,
+        sources: &'a crate::SourceMap,
+    ) -> Result<Self, Diagnostic> {
         let primitives = primitive_types(module)?;
         let source_scopes = owner
             .scopes
@@ -120,6 +133,7 @@ impl<'a> Builder<'a> {
         let mut builder = Self {
             module,
             owner,
+            sources,
             primitives,
             locals: Vec::new(),
             blocks: Vec::new(),
@@ -614,7 +628,7 @@ impl<'a> Builder<'a> {
 
     fn require_value(&mut self, id: ExprId) -> Result<LocalId, Diagnostic> {
         self.value_of(id)?
-            .ok_or_else(|| gir_error("表达式没有可复制的值", Some(&self.source_of(id).location)))
+            .ok_or_else(|| self.error("表达式没有可复制的值", &self.source_of(id).location))
     }
 
     fn project(&mut self, base: Place, projection: Projection) -> Place {
@@ -765,7 +779,7 @@ impl<'a> Builder<'a> {
         let mut incoming = vec![Vec::new(); self.blocks.len()];
         for (index, block) in self.blocks.iter().enumerate() {
             let Some(terminator) = &block.terminator else {
-                return Err(gir_error("GIR block 缺少终结符", None));
+                return Err(gir_error("GIR block 缺少终结符"));
             };
             for successor in terminator.successors() {
                 incoming[successor.index()].push(BlockId(index as u32));
