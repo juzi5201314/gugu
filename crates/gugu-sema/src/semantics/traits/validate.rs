@@ -95,6 +95,11 @@ impl Model<'_> {
         };
         let definition = &self.traits.interfaces[interface.id];
         if definition.definition.is_none() {
+            if self.forbids_float_remainder(&implementation.self_ty, interface)
+                && !implementation.negative
+            {
+                return Err(self.trait_error(def, "浮点不能实现 Rem 或 RemAssign"));
+            }
             if self.builtin_trait(&implementation.self_ty, interface)
                 && !(self.modules[def.module].builtin
                     && self.modules[def.module].path == "std.fmt"

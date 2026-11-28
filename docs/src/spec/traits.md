@@ -39,7 +39,7 @@ trait Dim {
 
 禁止重载：`&&` `||`（短路）、`.`、`=`（赋值）、`async`、`select`、channel 的 `send`/`recv`、`?`（除非该类型实现 `Try`）。一元 `&` 是取引用，不能重载。
 
-内置整数、浮点、`string` 的 `==` 与整数/浮点算术由编译器直接降成指令；溢出与 IEEE 规则见 [类型](types.md)。语言同时给出 `Add` 等 impl，以及 `impl Add[string] for string`（`Output = string`）和 `AddAssign`。`Clone` 见 [传递](passing.md)，只表示深拷贝。
+内置整数、浮点、`string` 的 `==` 与整数/浮点算术由编译器直接降成指令；溢出与 IEEE 规则见 [类型](types.md)。整数提供 `Add`、`Sub`、`Mul`、`Div`、`Rem` 及其复合赋值 trait；浮点只提供 `Add`、`Sub`、`Mul`、`Div` 及其复合赋值 trait。浮点在运行时和 comptime 中均不支持 `%` / `%=`，不满足 `Rem` / `RemAssign`，用户不能为浮点手写肯定实现，blanket impl 也不能赋予浮点这两项能力；用户结构体与枚举仍可实现它们。语言同时提供 `impl Add[string] for string`（`Output = string`）和 `AddAssign`。`Clone` 见 [传递](passing.md)，只表示深拷贝。
 
 ## 语言认识的 trait
 

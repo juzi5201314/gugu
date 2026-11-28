@@ -55,7 +55,7 @@ pub(super) fn check(
             early_dependency.key().clone(),
             early_dependency.fingerprint(),
         );
-        match checker::check(model, early, installed) {
+        match checker::check(model, early, installed, cfg.target()) {
             Ok(mut output) => {
                 output.input_fingerprint = input_fingerprint;
                 let payload = crate::canonical::to_vec(&output).expect("语义 schema 编码");

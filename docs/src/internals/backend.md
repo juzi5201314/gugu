@@ -226,7 +226,7 @@ GPR 和 XMM 独立分配。可用 GPR 池是 `rax, rcx, rdx, rbx, rsi, rdi, r8, 
 机器点位的 use/def slot 同序递增；候选掩码及跨调用查询先二分跳过 `def_slot < interval.start` 的前缀，只遍历 `use_slot <= interval.end` 的覆盖部分，区间端点语义保持不变。
 重载内存地址后，全宽 GPR 纯写输出可复用读取地址所用的临时寄存器，因为 x64 先读取源/有效地址再写目标；其他已选输出仍独占临时位置。窄写和 ReadWrite 不复用，也不能以预先重载未初始化的旧输出值占用额外 scratch。该规则使高压力下的 `lea dst,[base+index]` 即便 base 与 dst 都溢出，也能用唯一保留的 `r11` 完成，不牺牲活跃寄存器。
 指令表必须真实描述旧目标的读取：二操作数 `imul` 与 `cmovcc` 的目标是 ReadWrite，前者参与乘积，后者在条件不成立时保留原值。若错标为纯 Write，溢出重写可能用源重载槽覆盖旧目标，导致乘积变成源值平方或丢失选择的默认分支；三操作数 `imul` 才是纯写目标。
-仅寄存器目标的 ReadWrite 指令在 spill 后必须重载旧值，并在最后一次写入后把仍活跃的完整结果写回原槽；不能因为 `imul`/`cmovcc` 有读写语义就省略回写。可直接使用内存目标的指令仍在原槽上更新，不重复搬运。
+仅寄存器目标的 ReadWrite 指令在 spill 后必须重载旧值，并在最后一次写入后把仍活跃的完整结果写回原槽；不能因为 `imul`/`cmovcc` 有读写语义就省略回写。可直接使用内存目标的指令仍在原槽上更新，不重复搬运。两地址 lowering 在同一站点内先写结果、再把结果作为 ReadWrite 输入继续运算时，spill rewrite 必须在每次 scratch 写入后立刻保持 spill slot 可见值同步；不得让后续指令从中途的 spill slot 重载尚未包含前序写入的旧值。最后一次写入之后仍可按活跃性省略不再需要的结果写回，但最终结果已死不能省略此前仍供站点内读取的中间写回。
 逐根初始化查询直接检查当前块中该根的最后一条有效事件；没有对应事件时读取块入口的 must 位图，不为单个根复制全部槽状态。根为未初始化时仍保留动态位图检查，不能通过性能优化放宽精确根条件。
 块入口初始化事实按槽顺序拼接为连续根位图，槽起点由前缀和定位；零根槽不单独分配位图。前驱交集与事件应用仍使用相同根编号和 must 语义。
 
@@ -382,6 +382,8 @@ fragment relocation 封闭为：
 `staticlib` 写确定性 SysV ar archive，member timestamp/uid/gid 为 0、mode固定，成员按 symbol key排序；`cdylib` 写 ET_DYN、只导出显式 C symbol并包含自有闭世界 runtime/metadata。
 
 ### 内部 AArch64 Linux ELF64
+
+整程序入口在 A64 装配前完成 `NativeLink.with_standard_library` 的 leaf 默认导入登记。`program::assemble` 合并内建与用户导入，复用 `definitions::linux_import_definition` 为每个新增 Function 建立调用桩和有文件内容的 GOT 槽；`program::linux_image` 从同一份 `World.imports` 生成动态绑定记录，不能重新枚举内建目录而漏掉用户符号。进程内镜像测试逐项核对动态符号、GLOB_DAT 的目标槽与 DT_NEEDED，构建成功本身不代表 loader 会填写新增槽。
 
 `a64_linux_resolver_image <output> [<interpreter> <libc>]` 将可选输入直接传入 `DynamicLink` 和所有 libc 导入；缺省仍为 musl，glibc 验证使用 `/lib/ld-linux-aarch64.so.1 libc.so.6`。外部 QEMU runner 以 `AARCH64_RUNNER_LIBC=musl/glibc` 选择 initramfs 的运行库；glibc 模式装入 Debian arm64 libc6 包的 loader、libc、NSS/files/DNS 与 libresolv，并设置 `hosts: files dns`。此手工验证不改变静态 writer 默认值，也不进入默认测试套件。
 

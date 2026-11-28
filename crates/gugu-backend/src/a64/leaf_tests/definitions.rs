@@ -97,6 +97,20 @@ fn darwin_definitions_cover_shared_glue_platform_vm_and_dispatch() {
 fn linux_definitions_mirror_darwin_with_linux_dispatch() {
     let definitions = runtime_definitions(Platform::Linux);
     let names = symbols(&definitions);
+    let cursor = definitions
+        .iter()
+        .find(|definition| definition.symbol == crate::a64::fragments::LINUX_RESERVE_CURSOR)
+        .unwrap();
+    assert_eq!(cursor.segment, Segment::Data);
+    assert_eq!(cursor.align, 8);
+    assert_eq!(
+        cursor.content,
+        SectionContent::Data(
+            crate::a64::fragments::LINUX_RESERVE_START
+                .to_le_bytes()
+                .to_vec()
+        )
+    );
     for expected in shared().into_iter().chain(platform_ops()) {
         assert!(names.contains(expected.as_str()), "missing {expected}");
     }

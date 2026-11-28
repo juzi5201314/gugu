@@ -5,10 +5,10 @@
 //! Mach-O `link_entry` 或 ELF `link_entry(_dynamic)` 出完整镜像。
 
 use super::{
-    definitions::{runtime_definitions, runtime_imports},
+    definitions::{linux_import_definition, runtime_definitions, runtime_imports},
     elf::{self, DynamicLink, Import, LinuxEntry, LinuxRuntime},
     foreign::Platform,
-    fragments::{linux_import_slot_symbol, linux_import_stub, linux_import_stub_symbol},
+    fragments::{linux_import_slot_symbol, linux_import_stub_symbol},
     glue::{ForeignBindings, RuntimeBindings},
     macho::{self, DarwinEntry, DarwinRuntime},
     runtime::Catalog,
@@ -146,15 +146,7 @@ fn assemble(request: &ProgramRequest<'_>) -> Result<World, Error> {
             {
                 continue;
             }
-            definitions.push(Definition::fragment(stub, linux_import_stub(&import.name)));
-            definitions.push(Definition {
-                symbol: linux_import_slot_symbol(&import.name),
-                align: 8,
-                segment: Segment::Data,
-                content: SectionContent::Data(vec![0; 8]),
-                relocations: vec![],
-                pointers: vec![],
-            });
+            definitions.extend(linux_import_definition(&import.name));
         }
     }
     let mut world = build_runtime(
@@ -269,9 +261,15 @@ pub fn build(request: &ProgramRequest<'_>) -> Result<Program, Error> {
 
 fn linux_image(world: &World, request: &ProgramRequest<'_>) -> Result<Vec<u8>, Error> {
     let mut imports = vec![];
-    for native in runtime_imports(Platform::Linux) {
+    for native in &world.imports {
+        if native.kind != crate::NativeImportKind::Function {
+            continue;
+        }
         let slot = symbol(world, &linux_import_slot_symbol(&native.name))?;
-        imports.push(Import { native, slot });
+        imports.push(Import {
+            native: native.clone(),
+            slot,
+        });
     }
     let dynamic = DynamicLink {
         interpreter: request.interpreter.into(),

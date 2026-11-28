@@ -671,16 +671,17 @@ fn rewrite_instruction(
         let Some(store) = pending.iter().find(|store| store.value == value) else {
             continue;
         };
-        if store.last_write != point || !store.live_after {
-            continue;
+        if point < store.last_write || store.live_after {
+            let Some(Location::Slot(slot)) = emit.values[value as usize].location() else {
+                continue;
+            };
+            let offset = emit.frame.spill_offset(slot)?;
+            emit.emit_store_place(builder, scratch, offset, emit.values[value as usize].class);
+            emit.count_stores(1);
         }
-        let Some(Location::Slot(slot)) = emit.values[value as usize].location() else {
-            continue;
-        };
-        let offset = emit.frame.spill_offset(slot)?;
-        emit.emit_store_place(builder, scratch, offset, emit.values[value as usize].class);
-        emit.count_stores(1);
-        pending.retain(|store| store.value != value);
+        if store.last_write == point {
+            pending.retain(|store| store.value != value);
+        }
     }
     Ok(())
 }

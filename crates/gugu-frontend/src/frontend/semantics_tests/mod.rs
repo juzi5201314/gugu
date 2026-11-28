@@ -60,6 +60,89 @@ fn if_without_else_statement_and_value_position_contracts() {
     ));
 }
 
+#[test]
+fn float_remainder_is_rejected_before_backend_lowering() {
+    let compilation = Compiler::shared().compile_sema_for_test(CompileRequest::single_file(
+        "main.gg",
+        "fn main() { _ = 7.5 % 2.0 }",
+        TargetName::X86_64Linux,
+    ));
+    assert!(!compilation.is_success());
+    assert!(
+        compilation
+            .diagnostics()
+            .items()
+            .iter()
+            .any(|error| error.code() == crate::DiagnosticCode::InvalidExpression),
+        "{:?}",
+        compilation.diagnostics().items()
+    );
+}
+
+#[test]
+fn float_remainder_impl_cannot_bypass_the_operator_contract() {
+    reject_float_remainder_impl(
+        "impl Rem[float] for float { type Output = float\n fn rem(self, rhs: float) float = self }\nfn main() {}",
+    );
+}
+
+#[test]
+fn f32_remainder_impl_cannot_bypass_the_operator_contract() {
+    reject_float_remainder_impl(
+        "impl Rem[f32] for f32 { type Output = f32\n fn rem(self, rhs: f32) f32 = self }\nfn main() {}",
+    );
+}
+
+#[test]
+fn float_remainder_assignment_impl_cannot_bypass_the_operator_contract() {
+    reject_float_remainder_impl(
+        "impl RemAssign[float] for float { fn rem_assign(self: &Self, rhs: float) {} }\nfn main() {}",
+    );
+}
+
+#[test]
+fn f32_remainder_assignment_impl_cannot_bypass_the_operator_contract() {
+    reject_float_remainder_impl(
+        "impl RemAssign[f32] for f32 { fn rem_assign(self: &Self, rhs: f32) {} }\nfn main() {}",
+    );
+}
+
+fn reject_float_remainder_impl(source: &str) {
+    let compilation = Compiler::shared().compile_sema_for_test(CompileRequest::single_file(
+        "main.gg",
+        source,
+        TargetName::X86_64Linux,
+    ));
+    assert!(!compilation.is_success());
+    assert!(
+        compilation.diagnostics().items().iter().any(|error| {
+            error.code() == crate::DiagnosticCode::InvalidDeclaration
+                && error.message().contains("浮点不能实现")
+        }),
+        "{:?}",
+        compilation.diagnostics().items()
+    );
+}
+
+#[test]
+fn blanket_remainder_impl_does_not_enable_float_bounds() {
+    let compilation = Compiler::shared().compile_sema_for_test(CompileRequest::single_file(
+        "main.gg",
+        "impl[T] Rem[T] for T { type Output = T\n fn rem(self, rhs: T) T = self }\nfn require_rem[T: Rem[T]](value: T) {}\nfn main() { require_rem(7.5) }",
+        TargetName::X86_64Linux,
+    ));
+    assert!(!compilation.is_success());
+    assert!(
+        compilation
+            .diagnostics()
+            .items()
+            .iter()
+            .any(|error| error.message().contains("浮点不能实现")),
+        "{:?}",
+        compilation.diagnostics().items()
+    );
+}
+
 /// 逐条断言的语义用例：一条断言一次整体编译（约 1 秒），聚合会让单个测试超过 3 秒上限，
 /// 因此一行一个测试。`true` 表示该源码必须被接受，`false` 表示必须被拒绝。
 #[cfg(feature = "slow-tests")]

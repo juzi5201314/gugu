@@ -139,6 +139,7 @@ asm(
 ```
 
 - 第一个实参是 comptime `string`（或 `raw"..."`）。tier-1 目标统一使用 AT&T 表面语法，与 GNU as 常见记法兼容；同一份源码不能按实现选择切换到 Intel 语法。
+- 当前只有 x86-64 目标实现了 `asm`/`global_asm` 机器 lowering。AArch64 目标在类型检查阶段以目标不支持诊断拒绝它们；不得按 x86-64 寄存器集校验 AArch64 汇编操作数，也不得把该目标约束报成后端内部不变量。
 - `in("reg") expr`：进入时该寄存器保存 `expr` 的值。
 - `out("reg") place` / `lateout("reg") place`：退出时写进可赋值位置。
 - `clobber("reg"...)`：这些寄存器与 `memory` / `cc` 被破坏。必须声明，否则根 metadata 与寄存器分配无效。
