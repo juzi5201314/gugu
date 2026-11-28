@@ -165,6 +165,10 @@ pub struct MonoContext<'a> {
     pub definition_ref: Vec<Option<DefRef>>,
     /// DefId -> 源模块下标。
     pub definition_module: Vec<usize>,
+    /// DefId 在当前 HIR 中稠密；每个 callable 保留首次 capture 的类型参数切片。
+    pub(super) capture_parameters: Vec<Option<&'a [String]>>,
+    /// 与固定 GLUE_DEFS 登记次序一一对应；命中和缺失都只在当前不可变 world 内求值一次。
+    pub(crate) glue_definitions: Vec<std::cell::OnceCell<Option<hir::DefId>>>,
 }
 
 impl<'a> MonoContext<'a> {
@@ -184,6 +188,7 @@ impl<'a> MonoContext<'a> {
         let mut opaque_of = vec![None; module.definitions.len()];
         let mut definition_ref = vec![None; module.definitions.len()];
         let mut definition_module = vec![0usize; module.definitions.len()];
+        let mut capture_parameters = vec![None; module.definitions.len()];
         for (module_index, table) in identities.items.iter().enumerate() {
             for (item, definition) in table.iter().enumerate() {
                 if let Some(definition) = definition {
@@ -207,6 +212,13 @@ impl<'a> MonoContext<'a> {
                     });
                     definition_module[definition.index()] = module_index;
                 }
+            }
+        }
+        for capture in checked.bodies.iter().flat_map(|body| &body.captures) {
+            if let Some(callable) = capture.function {
+                let index = identities.function(callable).index();
+                debug_assert!(index < capture_parameters.len());
+                capture_parameters[index].get_or_insert(capture.type_parameters.as_slice());
             }
         }
         for (index, owner) in module.owners.iter().enumerate() {
@@ -248,6 +260,10 @@ impl<'a> MonoContext<'a> {
                 .map(|_| std::cell::OnceCell::new())
                 .collect(),
             definition_module,
+            capture_parameters,
+            glue_definitions: (0..crate::runtime::GLUE_DEFS.len())
+                .map(|_| std::cell::OnceCell::new())
+                .collect(),
         }
     }
 

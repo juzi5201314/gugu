@@ -1,5 +1,4 @@
 // 仅由 runtime-gc-probes 构建注入；探针与生产 runtime 走同一来源授权和编译管线。
-use std.runtime.{atomic_load_acquire as load, atomic_store_release as store, atomic_fetch_or_acq_rel as fetch_or, atomic_fetch_and_acq_rel as fetch_and}
 use std.runtime.native_memory as mapping
 use std.runtime.barrier.{gc_write_barrier, BARRIER_ENTRIES_OFFSET, BARRIER_FLUSHES_OFFSET, BARRIER_STAMPS_OFFSET, BARRIER_STAMP_BYTES}
 use std.runtime.gc.{gc_config_arena_bytes, gc_config_block_bytes, gc_config_card_entries, gc_config_card_bytes, gc_config_granule_bytes, gc_config_object_header_bytes, gc_config_stamp_entries, GC_REQUEST_PRESSURE, PROCESSOR_GC_REQUEST_OFFSET}
@@ -31,31 +30,31 @@ pub fn atomic_probes() uint {
     // SAFETY: 三个数组已初始化且仍存活；取址字段自然对齐，探针没有其它线程访问这些栈槽。
     unsafe {
         let p8 = std.ptr.addr_of(bytes[1])
-        if load[byte](p8) != byte(18) { return 1 }
-        if fetch_or(p8, byte(129)) != byte(18) { return 2 }
-        if load(p8) != byte(147) { return 3 }
-        if fetch_and[byte](p8, byte(131)) != byte(147) { return 4 }
-        if load(p8) != byte(131) { return 5 }
-        store(p8, byte(254))
-        if load(p8) != byte(254) || bytes[0] != byte(90) || bytes[2] != byte(165) { return 6 }
+        if std.runtime.atomic_load_acquire[byte](p8) != byte(18) { return 1 }
+        if std.runtime.atomic_fetch_or_acq_rel(p8, byte(129)) != byte(18) { return 2 }
+        if std.runtime.atomic_load_acquire(p8) != byte(147) { return 3 }
+        if std.runtime.atomic_fetch_and_acq_rel[byte](p8, byte(131)) != byte(147) { return 4 }
+        if std.runtime.atomic_load_acquire(p8) != byte(131) { return 5 }
+        std.runtime.atomic_store_release(p8, byte(254))
+        if std.runtime.atomic_load_acquire(p8) != byte(254) || bytes[0] != byte(90) || bytes[2] != byte(165) { return 6 }
 
         let p32 = std.ptr.addr_of(words[1])
-        if load(p32) != u32(2147483666) { return 7 }
-        if fetch_or[u32](p32, u32(129)) != u32(2147483666) { return 8 }
-        if load(p32) != u32(2147483795) { return 9 }
-        if fetch_and(p32, u32(2147483779)) != u32(2147483795) { return 10 }
-        if load(p32) != u32(2147483779) { return 11 }
-        store[u32](p32, u32(4294967294))
-        if load(p32) != u32(4294967294) || words[0] != u32(305419896) || words[2] != u32(2271560481) { return 12 }
+        if std.runtime.atomic_load_acquire(p32) != u32(2147483666) { return 7 }
+        if std.runtime.atomic_fetch_or_acq_rel[u32](p32, u32(129)) != u32(2147483666) { return 8 }
+        if std.runtime.atomic_load_acquire(p32) != u32(2147483795) { return 9 }
+        if std.runtime.atomic_fetch_and_acq_rel(p32, u32(2147483779)) != u32(2147483795) { return 10 }
+        if std.runtime.atomic_load_acquire(p32) != u32(2147483779) { return 11 }
+        std.runtime.atomic_store_release[u32](p32, u32(4294967294))
+        if std.runtime.atomic_load_acquire(p32) != u32(4294967294) || words[0] != u32(305419896) || words[2] != u32(2271560481) { return 12 }
 
         let p64 = std.ptr.addr_of(wide[1])
-        if load[uint](p64) != old64 { return 13 }
-        if fetch_or(p64, uint(129)) != old64 { return 14 }
-        if load(p64) != or64 { return 15 }
-        if fetch_and[uint](p64, and64) != or64 { return 16 }
-        if load(p64) != and64 { return 17 }
-        store(p64, stored64)
-        if load(p64) != stored64 || wide[0] != uint(81985529216486895) || wide[2] != neighbor64 { return 18 }
+        if std.runtime.atomic_load_acquire[uint](p64) != old64 { return 13 }
+        if std.runtime.atomic_fetch_or_acq_rel(p64, uint(129)) != old64 { return 14 }
+        if std.runtime.atomic_load_acquire(p64) != or64 { return 15 }
+        if std.runtime.atomic_fetch_and_acq_rel[uint](p64, and64) != or64 { return 16 }
+        if std.runtime.atomic_load_acquire(p64) != and64 { return 17 }
+        std.runtime.atomic_store_release(p64, stored64)
+        if std.runtime.atomic_load_acquire(p64) != stored64 || wide[0] != uint(81985529216486895) || wide[2] != neighbor64 { return 18 }
         _ = 0
     }
     0

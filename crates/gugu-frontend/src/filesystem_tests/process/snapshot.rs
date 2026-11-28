@@ -30,25 +30,33 @@ fn process_snapshots_preserve_arguments_environment_and_virtual_paths() {
         TargetName::X86_64Linux,
         include_str!("../../../../gugu-compiler/tests/fixtures/process_snapshot.gg"),
     );
-    args_copy_preserves_native_bytes_and_each_returned_vector_is_independent(&output);
-    spawn_captures_environment_and_cwd_before_stdio_and_builder_overrides_host(&output);
-    virtual_cwd_failure_and_recursive_operations_preserve_captured_paths(&output);
-    directory_entry_metadata_keeps_its_original_absolute_root(&output);
+    let mut m = vec![0; 1048576];
+    args_copy_preserves_native_bytes_and_each_returned_vector_is_independent(&output, &mut m);
+    m.fill(0);
+    spawn_captures_environment_and_cwd_before_stdio_and_builder_overrides_host(&output, &mut m);
+    m.fill(0);
+    virtual_cwd_failure_and_recursive_operations_preserve_captured_paths(&output, &mut m);
+    m.fill(0);
+    directory_entry_metadata_keeps_its_original_absolute_root(&output, &mut m);
 }
 
-fn args_copy_preserves_native_bytes_and_each_returned_vector_is_independent(output: &Protocol) {
+fn args_copy_preserves_native_bytes_and_each_returned_vector_is_independent(
+    output: &Protocol,
+    m: &mut Vec<u8>,
+) {
     let mut h = output.harness();
-    let mut m = vec![0; 1048576];
-    setup(&mut h, &mut m);
+    setup(&mut h, m);
     m[2048..2051].copy_from_slice(b"XX\0");
-    assert_eq!(h.invoke("main.gg", "args_snapshot", &[], &mut m), [1]);
-    h.invoke(CONTEXT, "shutdown", &[], &mut m);
+    assert_eq!(h.invoke("main.gg", "args_snapshot", &[], m), [1]);
+    h.invoke(CONTEXT, "shutdown", &[], m);
     assert!(h.allocations.is_empty());
 }
-fn spawn_captures_environment_and_cwd_before_stdio_and_builder_overrides_host(output: &Protocol) {
+fn spawn_captures_environment_and_cwd_before_stdio_and_builder_overrides_host(
+    output: &Protocol,
+    m: &mut Vec<u8>,
+) {
     let mut h = output.harness();
-    let mut m = vec![0; 1048576];
-    setup(&mut h, &mut m);
+    setup(&mut h, m);
     h.bridge_hook = Some(|h, args, m| {
         let packet = args[1];
         assert_eq!(word(m, packet), 200);
@@ -96,21 +104,23 @@ fn spawn_captures_environment_and_cwd_before_stdio_and_builder_overrides_host(ou
             (2, 0, 0),
             (2, 0, 0),
         ]);
-        assert_eq!(h.invoke("main.gg", "spawn_snapshot", &[], &mut m), [1]);
+        assert_eq!(h.invoke("main.gg", "spawn_snapshot", &[], m), [1]);
         assert!(h.script.is_empty());
     }
     assert_eq!(
         h.calls.iter().map(|(_, args)| args[1]).collect::<Vec<_>>(),
         [73, 72, 71, 73, 72, 71]
     );
-    h.invoke(CONTEXT, "shutdown", &[], &mut m);
+    h.invoke(CONTEXT, "shutdown", &[], m);
     assert!(h.allocations.is_empty());
 }
 
-fn virtual_cwd_failure_and_recursive_operations_preserve_captured_paths(output: &Protocol) {
+fn virtual_cwd_failure_and_recursive_operations_preserve_captured_paths(
+    output: &Protocol,
+    m: &mut Vec<u8>,
+) {
     let mut h = output.harness();
-    let mut m = vec![0; 1048576];
-    setup(&mut h, &mut m);
+    setup(&mut h, m);
     h.bridge_hook = Some(|h, args, m| {
         h.calls.push((args[0], args.to_vec()));
         match args[0] {
@@ -139,21 +149,20 @@ fn virtual_cwd_failure_and_recursive_operations_preserve_captured_paths(output: 
             other => panic!("不应调用额外平台操作 {other}"),
         }
     });
-    assert_eq!(h.invoke("main.gg", "invalid_cwd", &[], &mut m), [1]);
-    assert_eq!(h.invoke("main.gg", "symlink_snapshot", &[], &mut m), [1]);
-    assert_eq!(h.invoke("main.gg", "recursive_snapshot", &[], &mut m), [1]);
+    assert_eq!(h.invoke("main.gg", "invalid_cwd", &[], m), [1]);
+    assert_eq!(h.invoke("main.gg", "symlink_snapshot", &[], m), [1]);
+    assert_eq!(h.invoke("main.gg", "recursive_snapshot", &[], m), [1]);
     assert_eq!(
         h.calls.iter().map(|(op, _)| *op).collect::<Vec<_>>(),
         [262, 262, 88, 262, 2]
     );
-    h.invoke(CONTEXT, "shutdown", &[], &mut m);
+    h.invoke(CONTEXT, "shutdown", &[], m);
     assert!(h.allocations.is_empty());
 }
 
-fn directory_entry_metadata_keeps_its_original_absolute_root(output: &Protocol) {
+fn directory_entry_metadata_keeps_its_original_absolute_root(output: &Protocol, m: &mut Vec<u8>) {
     let mut h = output.harness();
-    let mut m = vec![0; 1048576];
-    setup(&mut h, &mut m);
+    setup(&mut h, m);
     h.bridge_hook = Some(|h, args, m| {
         h.calls.push((args[0], args.to_vec()));
         match args[0] {
@@ -180,7 +189,7 @@ fn directory_entry_metadata_keeps_its_original_absolute_root(output: &Protocol) 
             other => panic!("未登记目录 syscall {other}"),
         }
     });
-    assert_eq!(h.invoke("main.gg", "directory_snapshot", &[], &mut m), [1]);
+    assert_eq!(h.invoke("main.gg", "directory_snapshot", &[], m), [1]);
     assert_eq!(
         h.calls.iter().map(|(op, _)| *op).collect::<Vec<_>>(),
         [2, 217, 262]

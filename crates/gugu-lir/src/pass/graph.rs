@@ -3,7 +3,6 @@
 //! 这些算法由固定管线的 pass 与结构 verifier 共用；`verify.rs` 不再保留私有副本。
 use super::super::body::{BlockId, Body, id, range};
 use super::super::invalid;
-use super::super::verify::edges;
 use crate::Diagnostic;
 
 pub struct Graph {
@@ -28,9 +27,7 @@ impl Graph {
                 continue;
             }
             stack.push((block, true));
-            edges(body, &body.blocks[block.index()].terminator, |edge| {
-                stack.push((body.edges[edge.index()].to, false))
-            });
+            stack.extend(body.successors(block).map(|successor| (successor, false)));
         }
         if seen.iter().any(|seen| !seen) {
             return Err(invalid("LIR 含有未连接入口的 block"));
@@ -118,15 +115,15 @@ fn intersect(
 /// 逆后序；入口在前，后继顺序与 terminator 边顺序一致。
 pub fn reverse_postorder(body: &Body) -> Vec<BlockId> {
     reverse_postorder_from(body.blocks.len(), body.entry, |block| {
-        successors(body, block)
+        body.successors(block)
     })
 }
 
 /// 基于后继闭包的逆后序。
-pub fn reverse_postorder_from(
+pub fn reverse_postorder_from<I: IntoIterator<Item = BlockId>>(
     count: usize,
     entry: BlockId,
-    successors: impl Fn(BlockId) -> Vec<BlockId>,
+    successors: impl Fn(BlockId) -> I,
 ) -> Vec<BlockId> {
     let mut seen = vec![false; count];
     let mut postorder = Vec::with_capacity(count);
@@ -149,10 +146,10 @@ pub fn reverse_postorder_from(
 }
 
 /// 迭代式支配树；存在不可达 block 时返回 `None`。
-pub fn dominators(
+pub fn dominators<I: IntoIterator<Item = BlockId>>(
     count: usize,
     entry: BlockId,
-    successors: impl Fn(BlockId) -> Vec<BlockId>,
+    successors: impl Fn(BlockId) -> I,
     predecessors: &[Vec<BlockId>],
 ) -> Option<Vec<BlockId>> {
     debug_assert_eq!(predecessors.len(), count, "前驱表覆盖全部稠密 block ID");
@@ -203,12 +200,4 @@ pub fn dominates(dominators: &[BlockId], dominator: BlockId, mut block: BlockId)
         }
         block = parent;
     }
-}
-
-fn successors(body: &Body, block: BlockId) -> Vec<BlockId> {
-    let mut successors = Vec::new();
-    edges(body, &body.blocks[block.index()].terminator, |edge| {
-        successors.push(body.edges[edge.index()].to)
-    });
-    successors
 }

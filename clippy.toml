@@ -1,0 +1,3 @@
+[[disallowed-methods]]
+path = "gugu_frontend::Compiler::compile"
+reason = "测试通常使用 compile_to_lir，验证 runtime 契约或后端产物时使用 compile_full_for_test"

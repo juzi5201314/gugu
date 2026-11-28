@@ -80,11 +80,14 @@ fn merge_all(editor: &mut Editor) -> Result<bool, Diagnostic> {
     loop {
         let mut merged = false;
         for a in editor.live_blocks() {
-            let successors = editor.successors(a);
-            if successors.len() != 1 {
+            let mut successors = editor.successors(a);
+            let Some(b) = successors.next() else {
+                continue;
+            };
+            if successors.next().is_some() {
                 continue;
             }
-            let b = successors[0];
+            drop(successors);
             if b == a || b == editor.entry() {
                 continue;
             }

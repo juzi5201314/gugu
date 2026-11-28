@@ -195,6 +195,10 @@ fn main() {
     } else {
         TargetName::X86_64Linux
     };
+    #[expect(
+        clippy::disallowed_methods,
+        reason = "morestack bench 需要完整后端镜像"
+    )]
     let compilation =
         Compiler::with_artifacts(&EMBEDDED_ARTIFACTS).compile(CompileRequest::single_file(
             "main.gg",

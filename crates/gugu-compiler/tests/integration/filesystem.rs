@@ -19,9 +19,9 @@ fn filesystem_api_links_macos() {
 #[test]
 fn borrowed_array_slice_preserves_referent() {
     let output =
-        Compiler::with_artifacts(&EMBEDDED_ARTIFACTS).compile(CompileRequest::single_file(
+        Compiler::with_artifacts(&EMBEDDED_ARTIFACTS).compile_to_lir(CompileRequest::single_file(
             "main.gg",
-            include_str!("fixtures/array_slice.gg"),
+            include_str!("../fixtures/array_slice.gg"),
             TargetName::X86_64Linux,
         ));
     assert!(output.is_success(), "{:?}", output.diagnostics().items());
@@ -58,9 +58,9 @@ fn borrowed_array_slice_preserves_referent() {
 }
 
 fn check(target: TargetName) {
-    let source = include_str!("fixtures/fs_api.gg");
+    let source = include_str!("../fixtures/fs_api.gg");
     let output = Compiler::with_artifacts(&EMBEDDED_ARTIFACTS)
-        .compile(CompileRequest::single_file("main.gg", source, target));
+        .compile_full_for_test(CompileRequest::single_file("main.gg", source, target));
     assert!(output.is_success(), "{:?}", output.diagnostics().items());
     let plan = output.image_plan().expect("完整 API 必须形成镜像");
     let bytes = match target {
@@ -84,4 +84,34 @@ fn check(target: TargetName) {
         lir.contains("Runtime(ValueForget)"),
         "内部资源移动必须转移来源租约"
     );
+}
+
+/// x64 与 aarch64 共用同一份 mono vtable 方法表；Linux 写器必须回填方法地址。
+#[test]
+fn dyn_trait_erasure_links_x64_linux() {
+    let output = Compiler::with_artifacts(&EMBEDDED_ARTIFACTS).compile_full_for_test(
+        CompileRequest::single_file(
+            "main.gg",
+            r#"use std.io.{println}
+trait Describable {
+    fn describe(self: &Self) string
+}
+struct Dog { pub name: string }
+impl Describable for Dog {
+    fn describe(self: &Self) string { self.name }
+}
+fn show(d: dyn Describable) {
+    println(d.describe())
+}
+fn main() {
+    show(Dog { name: "rex" })
+}
+"#,
+            TargetName::X86_64Linux,
+        ),
+    );
+    assert!(output.is_success(), "{:?}", output.diagnostics().items());
+    let lir = output.dump_lir().expect("LIR");
+    assert!(lir.contains("$vtable"), "缺少 vtable shim");
+    assert!(lir.contains("SymbolAddr(Vtable"), "缺少 vtable 符号");
 }

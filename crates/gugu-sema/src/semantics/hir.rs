@@ -33,6 +33,7 @@ enum PendingParameterKind {
 #[derive(Clone, Copy)]
 struct InstalledBlock<'a> {
     fragment: Option<&'a crate::hir::Validated>,
+    type_index: Option<&'a BTreeMap<hir::Type, hir::TypeId>>,
     builtin: usize,
 }
 
@@ -82,7 +83,7 @@ impl<'m, 'a> Builder<'m, 'a> {
     fn new(
         model: &'m Model<'a>,
         identities: &'m Identities,
-        definitions: Vec<hir::Definition>,
+        definitions: gugu_base::shared_table::SharedTable<hir::Definition>,
         checked: &'m CheckedSemantics,
         sources: &'m SourceMap,
         entry: Option<CallableId>,
@@ -117,18 +118,18 @@ impl<'m, 'a> Builder<'m, 'a> {
                 .collect(),
             expansions,
             definitions,
-            types: Vec::new(),
-            aggregates: Vec::new(),
-            interfaces: Vec::new(),
-            implementations: Vec::new(),
-            opaques: Vec::new(),
+            types: Default::default(),
+            aggregates: Default::default(),
+            interfaces: Default::default(),
+            implementations: Default::default(),
+            opaques: Default::default(),
             owners: Vec::new(),
-            initialization: Vec::new(),
-            linkage: Vec::new(),
+            initialization: Default::default(),
+            linkage: Default::default(),
             entry,
             input_fingerprint: checked.input_fingerprint,
         };
-        let mut type_intern = BTreeMap::new();
+        let type_intern = BTreeMap::new();
         if let Some(installed) = installed.fragment {
             // 物化片段整段接管：类型表按原下标装回并预置驻留表，用户侧复用同一批 `TypeId`；
             // 各侧表直接沿用，只对用户定义做 lowering。
@@ -148,9 +149,6 @@ impl<'m, 'a> Builder<'m, 'a> {
             }
             output.initialization = fragment.initialization.clone();
             output.linkage = fragment.linkage.clone();
-            for (index, formed) in fragment.types.iter().enumerate() {
-                type_intern.insert(formed.clone(), hir::TypeId(checked_id(index)?));
-            }
         }
         Ok(Self {
             model,
@@ -181,10 +179,24 @@ impl<'m, 'a> Builder<'m, 'a> {
         if let Some(&id) = self.type_intern.get(&formed) {
             return Ok(id);
         }
+        if let Some(&id) = self
+            .installed
+            .type_index
+            .and_then(|index| index.get(&formed))
+        {
+            return Ok(id);
+        }
         let id = hir::TypeId(checked_id(self.output.types.len())?);
         self.type_intern.insert(formed.clone(), id);
         self.output.types.push(formed);
         Ok(id)
+    }
+
+    fn definition_mut(&mut self, definition: hir::DefId) -> &mut hir::Definition {
+        self.output
+            .definitions
+            .get_mut(definition.index())
+            .expect("只修改会话追加的 HIR 定义")
     }
 
     fn intern_primitives(&mut self) -> Result<(), Diagnostic> {
@@ -291,6 +303,7 @@ impl<'m, 'a> Builder<'m, 'a> {
         }
         self.output
             .linkage
+            .suffix_mut()
             .sort_by_key(|linkage| linkage.definition);
     }
 

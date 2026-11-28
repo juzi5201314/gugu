@@ -15,6 +15,7 @@ fn main() {
     } else {
         TargetName::X86_64Linux
     };
+    #[expect(clippy::disallowed_methods, reason = "示例要写出可执行网络镜像")]
     let output = Compiler::with_artifacts(&EMBEDDED_ARTIFACTS)
         .compile(CompileRequest::single_file("main.gg", text, target));
     assert!(output.is_success(), "{:?}", output.diagnostics().items());

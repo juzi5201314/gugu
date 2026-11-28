@@ -20,6 +20,8 @@ use crate::{Diagnostic, DiagnosticCode};
 mod arguments;
 mod array_init;
 mod generics;
+#[cfg(test)]
+mod source_tests;
 
 /// ParseSource query 的 schema 版本。
 pub const PARSE_SOURCE_SCHEMA_VERSION: u32 = 1;
@@ -1163,12 +1165,12 @@ impl Model<'_> {
         let span = self.modules[module].arena.exprs[expression.0 as usize]
             .span
             .clone();
-        self.check_capability(module, &segments, &span, state)?;
         if segments.len() == 1
             && let Some(value) = state.lookup(segments[0], &span)?
         {
             return Ok(value);
         }
+        self.check_capability(module, &segments, &span, state)?;
         if let Some(member) = self.constant_member(module, path)? {
             if let MemberKind::Const {
                 value: Some(value), ..
@@ -1201,8 +1203,12 @@ impl Model<'_> {
         span: &crate::Span,
         state: &EvalState,
     ) -> Result<(), Diagnostic> {
-        let canonical =
-            lang_item_identity(segments).or_else(|| self.external_path(module, segments));
+        let canonical = lang_item_identity(segments)
+            .or_else(|| self.external_path(module, segments))
+            .or_else(|| {
+                self.canonical_item_path(module, segments)
+                    .filter(|path| path.starts_with("std.src."))
+            });
         let Some(canonical) = canonical else {
             return Ok(());
         };
@@ -1273,6 +1279,9 @@ impl Model<'_> {
                 ConstantValue::ResultErr(payload)
             });
         }
+        if state.lookup(segments[0], &span)?.is_some() {
+            return Err(self.fail(module, expression, "comptime 局部值不是可调用函数"));
+        }
         self.check_capability(module, &segments, &span, state)?;
         if let Some(value) = self.src_builtin(module, expression, &segments, args, &span)? {
             return Ok(value);
@@ -1321,7 +1330,7 @@ impl Model<'_> {
         args: AstRange<ExprId>,
         span: &crate::Span,
     ) -> EvalResult<Option<ConstantValue>> {
-        let Some(canonical) = self.external_path(module, segments) else {
+        let Some(canonical) = self.canonical_item_path(module, segments) else {
             return Ok(None);
         };
         let kind = match canonical.as_str() {
