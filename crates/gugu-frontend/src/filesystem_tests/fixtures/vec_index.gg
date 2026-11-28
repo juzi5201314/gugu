@@ -1,0 +1,58 @@
+#[track_caller]
+fn check(value: bool) { if !value { panic("Vec 下标契约失败") } }
+fn receiver(values: &Vec[int], calls: &int) &Vec[int] {
+    *calls += 1
+    values
+}
+fn offset(calls: &int) int { *calls += 10
+    1 }
+struct Holder { prefix: int, values: &Vec[int] }
+fn vec_index_case() int {
+    let values = Vec[int]::new()
+    for value in 0..10 { values.push(value * 10) }
+    let alias = values
+    let saved = values.iter()
+    let index = 1
+    check(values[0] == 0 && values[index] == 10 && values[9] == 90)
+    alias[index] = 20
+    let calls = 0
+    (*receiver(&values, &calls))[offset(&calls)] += 3
+    check(calls == 11 && values[index] == 23)
+    let reference = &values
+    reference[9] = 91
+    reference[index] *= 2
+    check(values[9] == 91 && alias[index] == 46)
+    let holder = Holder { prefix: 999, values: &values }
+    check(holder.values[index] == 46)
+    holder.values[index] = 50
+    holder.values[index] += 2
+    check(values[index] == 52 && holder.prefix == 999)
+    for value in 0..10 { check(saved.next() == Some(value * 10)) }
+    check(saved.next() == None)
+    let pairs = Vec[(int, int)]::new()
+    pairs.push((2, 3))
+    let pair = pairs[0]
+    pair.0 = 99
+    check(pairs[0] == (2, 3))
+    pairs[0] = (4, 5)
+    check(pairs[0] == (4, 5))
+    unsafe { values[0] = 7
+        values[0] += 1
+        check(values[0] == 8) }
+    1
+}
+fn vec_index_read(index: int) int {
+    let values = Vec[int]::new()
+    values.push(10)
+    values[index]
+}
+fn vec_index_write(index: int) {
+    let values = Vec[int]::new()
+    values.push(10)
+    values[index] = 20
+}
+fn main() {
+    _ = vec_index_case()
+    _ = vec_index_read(0)
+    vec_index_write(0)
+}

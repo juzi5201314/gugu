@@ -51,14 +51,14 @@ impl Builder<'_> {
         _write: Option<u32>,
     ) -> Result<(), Diagnostic> {
         if let Some(dispatch) = read {
-            let base_place = self.emit_place(base)?;
+            let base_local = self.index_receiver(base)?;
             let Some(index_local) = self.emit_expr(index)? else {
                 return Ok(());
             };
             self.emit_check_ops(id)?;
             let parameters = self.dispatch_parameters(dispatch);
             let mut args = Vec::with_capacity(2);
-            for (position, (local, expression)) in [(base_place.local, base), (index_local, index)]
+            for (position, (local, expression)) in [(base_local, base), (index_local, index)]
                 .into_iter()
                 .enumerate()
             {
@@ -79,6 +79,19 @@ impl Builder<'_> {
         let projected = self.project(place, Projection::Index(index));
         self.set_place(id, projected);
         Ok(())
+    }
+
+    pub(super) fn index_receiver(&mut self, base: ExprId) -> Result<LocalId, Diagnostic> {
+        let place = self.emit_place(base)?;
+        if matches!(
+            self.module.types[self.expr_ty(base).index()],
+            hir::Type::Ref(_)
+        ) {
+            // 引用字段必须读取完整投影；值接收者继续借用原槽，避免额外复制。
+            self.require_value(base)
+        } else {
+            Ok(place.local)
+        }
     }
 
     pub(super) fn emit_slice(

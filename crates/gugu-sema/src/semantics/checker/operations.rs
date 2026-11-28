@@ -116,8 +116,35 @@ impl Checker<'_, '_> {
             ty
         }
     }
-    pub(super) fn user_index(&mut self, id: ExprId, ty: &Ty, write: bool, span: &Span) -> Ty {
+    pub(super) fn dispatch_index(&mut self, id: ExprId, ty: &Ty, write: bool, span: &Span) -> Ty {
         let name = if write { "index_set" } else { "index" };
+        if let Some(module) = self.model.vec_module(ty) {
+            let name = match (write, self.unsafe_depth == 0) {
+                (false, true) => "index",
+                (true, true) => "index_set",
+                (false, false) => "index_unchecked",
+                (true, false) => "index_set_unchecked",
+            };
+            // Vec 的身份已经由内建模块核验；私有固有方法只供语言下标选择。
+            match self.model.method(module, ty.strip_refs(), None, name, &[]) {
+                Ok(Some(method)) => {
+                    self.record_operation_dispatch(id, ty.strip_refs(), &method);
+                    let (parameters, result) = method.signature.signature().expect("Vec 下标签名");
+                    return if write {
+                        parameters[2].clone()
+                    } else {
+                        result.clone()
+                    };
+                }
+                Ok(None) => self.error(
+                    DiagnosticCode::InvalidType,
+                    "标准库 Vec 缺少下标实现",
+                    span.clone(),
+                ),
+                Err(error) => self.error(error.code(), error.message(), span.clone()),
+            }
+            return Ty::Error;
+        }
         let Some(method) =
             self.language_method(id, ty.strip_refs(), "Index", Vec::new(), name, span)
         else {
@@ -173,13 +200,14 @@ impl Checker<'_, '_> {
             .iter()
             .find(|dispatch| {
                 dispatch.expression == id
-                    && dispatch.interface.as_ref().is_some_and(|interface| {
-                        self.model.traits.interfaces[interface.id].name == "Index"
-                    })
+                    && (self.model.vec_module(&dispatch.self_ty).is_some()
+                        || dispatch.interface.as_ref().is_some_and(|interface| {
+                            self.model.traits.interfaces[interface.id].name == "Index"
+                        }))
             })
             .map(|dispatch| dispatch.self_ty.clone());
         if let Some(target) = target {
-            self.user_index(id, &target, true, span);
+            self.dispatch_index(id, &target, true, span);
         }
     }
 
@@ -227,6 +255,16 @@ impl Checker<'_, '_> {
                 obligation.span = span.clone();
                 (obligation, assumptions.clone())
             }));
+        self.record_operation_dispatch(id, ty, &selected);
+        Some(selected)
+    }
+
+    fn record_operation_dispatch(
+        &mut self,
+        id: ExprId,
+        ty: &Ty,
+        selected: &super::super::traits::Method,
+    ) {
         if let Some(callable) = selected.callable
             && let Some(def) = self.model.function_definition(callable)
             && !self.dependencies.contains(&def)
@@ -250,7 +288,6 @@ impl Checker<'_, '_> {
             implicit_receiver: selected.receiver,
             dynamic: selected.dynamic,
         });
-        Some(selected)
     }
     pub(super) fn try_parts(&mut self, ty: &Ty, span: &Span) -> (Ty, Ty) {
         let ty = self.resolve(ty);

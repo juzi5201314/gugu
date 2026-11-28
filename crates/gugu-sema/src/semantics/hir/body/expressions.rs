@@ -281,8 +281,8 @@ impl BodyBuilder<'_, '_, '_, '_> {
                     ast::IndexKind::Expr(index) => hir::ExprKind::Index {
                         base,
                         index: self.expression(index)?,
-                        read: self.selected_dispatch(source, Some("Index"), Some("index"))?,
-                        write: self.selected_dispatch(source, Some("Index"), Some("index_set"))?,
+                        read: self.index_dispatch(source, false)?,
+                        write: self.index_dispatch(source, true)?,
                     },
                     ast::IndexKind::Range { start, end } => hir::ExprKind::Slice {
                         base,

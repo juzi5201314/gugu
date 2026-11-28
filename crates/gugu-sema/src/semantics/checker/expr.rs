@@ -765,7 +765,7 @@ impl Checker<'_, '_> {
                         }
                         (**element).clone()
                     }
-                    _ => self.user_index(expression, ty, write, span),
+                    _ => self.dispatch_index(expression, ty, write, span),
                 }
             }
         }
@@ -889,7 +889,7 @@ impl Checker<'_, '_> {
                         }
                         (**t).clone()
                     }
-                    _ => self.user_index(id, ty, write, span),
+                    _ => self.dispatch_index(id, ty, write, span),
                 }
             }
             IndexKind::Range { start, end } => {

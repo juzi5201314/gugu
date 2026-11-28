@@ -115,7 +115,7 @@ impl Builder<'_> {
         first_write: bool,
     ) -> Result<(), Diagnostic> {
         if let Some((write, base, index)) = self.index_write(place) {
-            let base_place = self.emit_place(base)?;
+            let base_local = self.index_receiver(base)?;
             let Some(index_local) = self.emit_expr(index)? else {
                 return Ok(());
             };
@@ -126,10 +126,9 @@ impl Builder<'_> {
                 };
                 let parameters = self.dispatch_parameters(read);
                 let mut args = Vec::with_capacity(2);
-                for (position, (local, expression)) in
-                    [(base_place.local, base), (index_local, index)]
-                        .into_iter()
-                        .enumerate()
+                for (position, (local, expression)) in [(base_local, base), (index_local, index)]
+                    .into_iter()
+                    .enumerate()
                 {
                     args.push(match parameters.get(position).copied() {
                         Some(parameter) => {
@@ -157,16 +156,17 @@ impl Builder<'_> {
                 } else if let Some(dispatch) = dispatch {
                     let receiver = self.dispatch_receiver(dispatch, current, None);
                     self.call_dispatch(place, dispatch, vec![receiver, copy_of(src)])?;
+                } else {
+                    self.emit_check_ops(place)?;
+                    let result = compound_assign(operation, copy_of(current), copy_of(src));
+                    self.assign(Place::local(current), result);
                 }
                 let parameters = self.dispatch_parameters(write);
                 let mut args = Vec::with_capacity(3);
-                for (position, (local, expression)) in [
-                    (base_place.local, base),
-                    (index_local, index),
-                    (current, value),
-                ]
-                .into_iter()
-                .enumerate()
+                for (position, (local, expression)) in
+                    [(base_local, base), (index_local, index), (current, value)]
+                        .into_iter()
+                        .enumerate()
                 {
                     args.push(match parameters.get(position).copied() {
                         Some(parameter) => {
@@ -184,7 +184,7 @@ impl Builder<'_> {
             let parameters = self.dispatch_parameters(write);
             let mut args = Vec::with_capacity(3);
             for (position, (local, expression)) in
-                [(base_place.local, base), (index_local, index), (src, value)]
+                [(base_local, base), (index_local, index), (src, value)]
                     .into_iter()
                     .enumerate()
             {

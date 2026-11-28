@@ -177,7 +177,7 @@ terminator 固定为：
 - `Suspend { reason, resume, cancelled, safepoint }`；
 - `SelectCommit { cases, ready, suspend, safepoint }`。
 
-`Panic.location` 固定为原始 panic 表达式位置，包括编译器生成的检查失败与 channel send 取消；它不从 block source 推断。LIR lowering 使用 `SourceMap` 将该位置转为只读常量路径、1-based 行号和列号，通过 `RuntimeCall::Panic` 的显式 ABI lanes 传入镜像 runtime；常量内不含指针，因此复用普通 `Symbol::Data` relocation。`BuildGenericGir` 当前 schema 为 21、GIR revision 为 11，包含实际 callback 调用的 `scoped_callback` 标记；LIR build schema 为 29。
+`Panic.location` 固定为原始 panic 表达式位置，包括编译器生成的检查失败与 channel send 取消；它不从 block source 推断。LIR lowering 使用 `SourceMap` 将该位置转为只读常量路径、1-based 行号和列号，通过 `RuntimeCall::Panic` 的显式 ABI lanes 传入镜像 runtime；常量内不含指针，因此复用普通 `Symbol::Data` relocation。`BuildGenericGir` 当前 schema 为 22、GIR revision 为 11，包含实际 callback 调用的 `scoped_callback` 标记；LIR build schema 为 29。
 
 编译器生成的 panic payload 固定为 `string`，即使源码 owner 没有显式引用该类型。HIR primitive type table 必须包含 `string`，具体 GIR 在该 owner 中为消息字面量物化对应类型和布局；不能把缺失的 owner-local 引用降为 `unit`，因为那会使 `RuntimeCall::Panic` 缺少消息 ABI lanes，并破坏 runtime glue 签名校验。冻结类型宇宙对含 panic 检查、panic 效果或 suspend 操作的 owner 登记相同类型键。
 
@@ -199,7 +199,7 @@ HIR同样提供保持源码臂优先级的 pattern matrix。GIR把它编译成�
 
 ### generic GIR 构造
 
-`BuildGenericGir`（query 11，当前 schema 12，输入域 `gugu-build-generic-gir-v2`）在冻结 HIR 上为每个 owner 构造一份 generic body；键是 owner 的单元依赖指纹——owner 带类型表（表达式类型、局部、模式、分派、调整、检查、可变参数调用、借用约束）按 `hir::Type` 展开的传递闭包，加上闭包内定义的稳定键与签名，不再折叠世界 HIR 指纹，因此改动某个用户模块不会让其它模块的 body 失效，经结构/前驱/`StorageLive`/`StorageDead`/cleanup 序列/cancelled/scoped view/`NoSafepoint` verifier 后写入 `GirWorldV1`。`FrontendOutput`、`BuildIr`、`ImagePlan` 与 `ActionInputs` 消费该 world；`-Zdump-gir` 打印稳定文本 dump（见[工具链 CLI](../spec/toolchain-cli.md#development-interface)）。差异诊断为 `E0055`。
+`BuildGenericGir`（query 11，当前 schema 22，输入域 `gugu-build-generic-gir-v2`）在冻结 HIR 上为每个 owner 构造一份 generic body；键是 owner 的单元依赖指纹——owner 带类型表（表达式类型、局部、模式、分派、调整、检查、可变参数调用、借用约束）按 `hir::Type` 展开的传递闭包，加上闭包内定义的稳定键与签名，不再折叠世界 HIR 指纹，因此改动某个用户模块不会让其它模块的 body 失效，经结构/前驱/`StorageLive`/`StorageDead`/cleanup 序列/cancelled/scoped view/`NoSafepoint` verifier 后写入 `GirWorldV1`。`FrontendOutput`、`BuildIr`、`ImagePlan` 与 `ActionInputs` 消费该 world；`-Zdump-gir` 打印稳定文本 dump（见[工具链 CLI](../spec/toolchain-cli.md#development-interface)）。差异诊断为 `E0055`。
 
 构造器把 HIR `CleanupPlan` intern 成共享 cleanup block：相同 `(chain, action 序列, destination)` 复用入口，终点不同的链不能共用。每个出口重新降低 defer body，表达式缓存不跨清理出口复用。`break` / `continue` 按循环表达式自身的 scope 查找控制流帧，不能使用嵌套块的 scope；目标丢失时报 invariant。`defer ret` 的 `Flag` 出口以 `Assign`+`SwitchInt` 守卫，`Chain` 出口以 `DeferChainPush`/`Pop`/`Action`/`Env` 消费。隐式返回走 `Owner.return_plan` 再 `Return`。`LocalId(0)` 是返回槽，参数按 HIR 绑定顺序，其余为用户 local 与临时值。
 

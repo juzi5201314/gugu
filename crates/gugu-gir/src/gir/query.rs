@@ -12,7 +12,7 @@ use crate::semantics::query::{restore_errors, store_errors};
 use crate::{Diagnostic, SourceMap};
 use std::sync::Arc;
 
-pub const BUILD_SCHEMA: u32 = 21;
+pub const BUILD_SCHEMA: u32 = 22;
 
 pub fn build_world(
     hir: &Validated,

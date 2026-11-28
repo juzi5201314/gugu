@@ -25,6 +25,21 @@ impl[T] Vec[T] {
     }
     pub fn len(self: &Self) int = self.state.length
     pub fn is_empty(self: &Self) bool = self.state.length == 0
+    fn index(self: &Self, index: int) T {
+        match self.get(index) { Some(value) => value, None => panic("Vec 下标越界") }
+    }
+    fn index_set(self: &Self, index: int, value: T) {
+        if !self.set(index, value) { panic("Vec 下标越界") }
+    }
+    unsafe fn index_unchecked(self: &Self, index: int) T {
+        match lookup(self.state.root, self.state.level, uint(index)) {
+            Some(value) => value,
+            None => unsafe { std.hint.unreachable() },
+        }
+    }
+    unsafe fn index_set_unchecked(self: &Self, index: int, value: T) {
+        self.state.root = put(self.state.root, self.state.level, uint(index), value)
+    }
     pub fn get(self: &Self, index: int) Option[T] {
         if index < 0 || index >= self.state.length { return None }
         lookup(self.state.root, self.state.level, uint(index))

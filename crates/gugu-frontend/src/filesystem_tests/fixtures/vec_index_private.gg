@@ -1,0 +1,6 @@
+fn main() {
+    let values = Vec[int]::new()
+    values.push(1)
+    _ = values.index(0)
+    values.index_set(0, 2)
+}

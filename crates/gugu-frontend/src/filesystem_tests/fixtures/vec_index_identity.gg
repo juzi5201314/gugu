@@ -1,0 +1,5 @@
+struct Vec[T] { value: T }
+fn main() {
+    let values = Vec[int] { value: 1 }
+    _ = values[0]
+}

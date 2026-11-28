@@ -255,8 +255,8 @@ impl BodyBuilder<'_, '_, '_, '_> {
                 StepKind::Index(subscript) => hir::ExprKind::Index {
                     base: ids[index - 1],
                     index: self.expression(subscript)?,
-                    read: self.selected_dispatch(source, Some("Index"), Some("index"))?,
-                    write: self.selected_dispatch(source, Some("Index"), Some("index_set"))?,
+                    read: self.index_dispatch(source, false)?,
+                    write: self.index_dispatch(source, true)?,
                 },
                 StepKind::Slice(start, end) => hir::ExprKind::Slice {
                     base: ids[index - 1],

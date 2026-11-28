@@ -360,12 +360,15 @@ HIR 保留对诊断有价值的 `if`、`match`、循环、`try`、`async`、`sel
 | 复合赋值 | 单次求值 place、封闭运算符及已选择派发，保留写回目标 |
 | 方法调用 | 已固定目标与接收者调整的 `Call` |
 | 用户类型下标 | 带已选择 `Index::index` / `index_set` 派发的 `Index` |
+| 标准库 Vec 下标 | 按内建模块与名义定义身份选择 Vec 私有固有读写方法的 `Index`；不要求 `Index` trait |
 | `for pattern in value` | 保留单次迭代源、模式和 body 的 `For`，携带 `into_iter` / `next` 派发 |
 | `expr?` | `HirTryExit { operand, branch_slot, from_error_slot, target }`；槽位与结果规则只引用 [`Try` 规范](../spec/traits.md#try)。内建 `Option` 的失败出口构造 `None`，不投影空变体；内建 `Result` 的失败出口构造 `Err`。 |
 | 字符串插值 | 按源码顺序保存解码文本、类型化值和结构化 FormatSpec；动态计数是 int 读取节点 |
 | `if let`、`while let`、let 链 | 共享被匹配临时槽的条件/模式节点 |
 | 参数位置 `impl Trait` | 独立隐式类型参数 |
 | 返回位置 `impl Trait` | owner 下的独立 opaque 定义 |
+
+Vec 的下标选择只接受来自内建 `std.vec` 模块的 `Vec` 定义；用户同名类型仍走自己的 `Index` 契约。安全下标选择有越界检查的私有固有方法，unsafe 下标选择省略边界检查的方法；这些方法不作为用户可调用的标准库 API。二者都复用现有 Vec 索引页与更新路径，保持共享身份和迭代快照；GIR 统一消费已选择的读写派发，不暴露底层页地址。复合赋值在同一接收者、下标上读取一次，再执行运算和写回。
 
 `async`、`select` 和 `defer` 在 HIR中保留专用节点，并各自携带由[表达式规范](../spec/expressions.md)生成的一次求值、出口和提交/cleanup计划；GIR只能消费该计划，不能按节点名重新解释随机、公平、取消或展开语义。
 

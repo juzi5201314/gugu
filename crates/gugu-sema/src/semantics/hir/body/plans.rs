@@ -2,6 +2,40 @@ use super::*;
 use crate::semantics::output;
 
 impl BodyBuilder<'_, '_, '_, '_> {
+    pub(super) fn index_dispatch(
+        &mut self,
+        source: ast::ExprId,
+        write: bool,
+    ) -> Result<Option<u32>, Diagnostic> {
+        let member = if write { "index_set" } else { "index" };
+        let unchecked = if write {
+            "index_set_unchecked"
+        } else {
+            "index_unchecked"
+        };
+        let model = self.compiler.model;
+        let index = self
+            .dispatch_indices(source)
+            .iter()
+            .copied()
+            .find(|&index| {
+                let dispatch = &self.facts.body.dispatches[index];
+                model.vec_module(&dispatch.self_ty).is_some()
+                    && dispatch.callable.is_some_and(|callable| {
+                        model.modules[callable.module].arena.fns[callable.function as usize]
+                            .name
+                            .is_some_and(|name| {
+                                let name = model.name(callable.module, name);
+                                name == member || name == unchecked
+                            })
+                    })
+            });
+        match index {
+            Some(index) => self.lower_dispatch(index).map(Some),
+            None => self.selected_dispatch(source, Some("Index"), Some(member)),
+        }
+    }
+
     fn dispatch_indices(&self, source: ast::ExprId) -> &[usize] {
         let order = &self.facts.dispatch_order;
         let start = order

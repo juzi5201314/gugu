@@ -42,6 +42,16 @@ pub struct Model<'a> {
     function_items: Vec<Vec<Option<ItemId>>>,
 }
 impl<'a> Model<'a> {
+    pub(super) fn vec_module(&self, ty: &Ty) -> Option<usize> {
+        let Ty::Named(id, _) = ty.strip_refs() else {
+            return None;
+        };
+        let nominal = &self.nominal[*id];
+        let module = &self.modules[nominal.definition.module];
+        (nominal.name == "Vec" && module.builtin && module.path == "std.vec")
+            .then_some(nominal.definition.module)
+    }
+
     pub(super) fn hasher_type(&self) -> Ty {
         self.nominal
             .iter()

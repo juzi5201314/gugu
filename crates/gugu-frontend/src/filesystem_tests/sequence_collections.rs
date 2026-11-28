@@ -4,6 +4,70 @@ use super::{
 };
 
 #[test]
+fn vec_builtin_index_requires_standard_identity_and_keeps_helpers_private() {
+    for (source, code, message) in [
+        (
+            include_str!("fixtures/vec_index_private.gg"),
+            crate::DiagnosticCode::InvalidType,
+            "不能访问私有固有方法",
+        ),
+        (
+            include_str!("fixtures/vec_index_identity.gg"),
+            crate::DiagnosticCode::ReservedName,
+            "声明名 `Vec` 是保留的预导入名称",
+        ),
+    ] {
+        let compiled = Compiler::shared().compile_sema_for_test(CompileRequest::single_file(
+            "main.gg",
+            source,
+            TargetName::X86_64Linux,
+        ));
+        assert!(!compiled.is_success());
+        assert!(
+            compiled
+                .diagnostics()
+                .items()
+                .iter()
+                .any(|diagnostic| diagnostic.code() == code
+                    && diagnostic.message().contains(message)),
+            "{:?}",
+            compiled.diagnostics().items()
+        );
+    }
+}
+
+#[test]
+fn vec_builtin_index_reads_writes_and_checks_bounds() {
+    let compiled = Compiler::shared().compile_to_lir(CompileRequest::single_file(
+        "main.gg",
+        include_str!("fixtures/vec_index.gg"),
+        TargetName::X86_64Linux,
+    ));
+    assert!(
+        compiled.is_success(),
+        "{:?}",
+        compiled.diagnostics().items()
+    );
+    let mut harness = Harness::new(&compiled);
+    let mut memory = vec![0; 65536];
+    assert_eq!(
+        harness.invoke("main.gg", "vec_index_case", &[], &mut memory),
+        [1]
+    );
+    for entry in ["vec_index_read", "vec_index_write"] {
+        for index in [-1_i64, 1] {
+            harness.reset_for_next_call(&mut memory);
+            let error = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+                harness.invoke("main.gg", entry, &[index as u64], &mut memory);
+            }))
+            .expect_err("负数与越界的 Vec 下标必须 panic");
+            let message = error.downcast_ref::<String>().expect("解释器 panic 消息");
+            assert!(message.contains("Vec 下标越界"), "{entry}: {message}");
+        }
+    }
+}
+
+#[test]
 fn nominal_const_trait_impls_match_and_reject_crossing_patterns() {
     for (accepted, source) in [
         (
