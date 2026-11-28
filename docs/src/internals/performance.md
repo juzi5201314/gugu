@@ -168,11 +168,20 @@ Rust 重新编译，也不将插桩耗时混进正常延迟。
 
 ### CI 执行与缓存
 
-`.github/workflows/ci.yml` 保留 `Rust checks`、`Rust lint`、mdBook 与 Linux
-可执行程序验收。`Rust checks` 直接由 nextest 构建并运行测试，不再先执行一次
+`.github/workflows/ci.yml` 保留 `Rust checks`、`Rust lint`、mdBook 与
+`Gugu executables`。`Rust checks` 与可执行程序验收均使用四平台原生矩阵：
+Linux x86_64（`ubuntu-latest`）、Windows x86_64（`windows-2025`）、
+Linux aarch64（`ubuntu-24.04-arm`）与 macOS aarch64（`macos-15`）。
+矩阵不因某个平台失败而取消其它平台。`Rust checks` 直接由 nextest 构建并运行测试，不再先执行一次
 `cargo build --workspace`；普通 CLI 镜像仍由可执行程序验收独立构建。
 格式检查、常规 target 的严格 Clippy 检查和全特性测试的编译入口检查在 `Rust lint` 中执行，
-与测试并行。
+与测试并行；`Rust lint` 和 mdBook 只在 Linux x86_64 执行。
+
+`ci/e2e/run.py` 通过 Python 标准库调用编译器和生成程序，显式传入矩阵目标，
+处理 Windows 的 `.exe` 后缀及 Unix 执行权限。四平台复用全部既有 fixtures，
+标准输出按原始字节比较，预期输出文件固定以 LF 检出；Unicode 规范化数据仍按
+分片启动独立进程并合并输出。单次编译限时 180 秒，单次执行限时 30 秒，
+临时镜像和缓存随验收结束清理。执行器自身的判定测试使用进程替身，不运行真实子进程。
 
 变更分流只把 `docs/` 和 `book.toml` 视为纯文档输入。PR 按整个 PR 相对目标分支的
 差异判断，`master` push 按本次 push 前后的差异判断；混合变更、工作流、Cargo
