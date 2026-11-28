@@ -110,7 +110,7 @@ impl Model<'_> {
             return Err(self.error(0, "trait 约束形成循环证明"));
         }
         stack.push((ty.clone(), interface.clone()));
-        let selected = self.select_impl_inner(ty, interface, assumptions, stack);
+        let selected = self.select_impl_inner(ty, interface, assumptions, stack, false);
         let name = self.traits.interfaces[interface.id].name.as_str();
         let elements = match (name, ty) {
             ("Hash" | "Print" | "Debug", Ty::Tuple(elements)) => Some(elements.as_slice()),
@@ -148,7 +148,7 @@ impl Model<'_> {
         interface: &TraitRef,
         assumptions: &[Obligation],
     ) -> Result<SelectedImpl, Diagnostic> {
-        self.select_impl_inner(ty, interface, assumptions, &mut Vec::new())
+        self.select_impl_inner(ty, interface, assumptions, &mut Vec::new(), false)
     }
     fn select_impl_inner(
         &self,
@@ -156,6 +156,7 @@ impl Model<'_> {
         interface: &TraitRef,
         assumptions: &[Obligation],
         stack: &mut Vec<(Ty, TraitRef)>,
+        defer_inference: bool,
     ) -> Result<SelectedImpl, Diagnostic> {
         let mut selected: SelectedImpl = None;
         for (id, implementation) in self.traits.implementations.iter().enumerate() {
@@ -172,13 +173,16 @@ impl Model<'_> {
                 continue;
             }
             if implementation.obligations.iter().any(|bound| {
-                self.require_trait_inner(
-                    &substitute(&bound.ty, &bindings),
-                    &bound.interface.substitute(&bindings),
-                    assumptions,
-                    stack,
-                )
-                .is_err()
+                let ty = substitute(&bound.ty, &bindings);
+                let interface = bound.interface.substitute(&bindings);
+                if defer_inference
+                    && (ty.contains_inference()
+                        || interface.arguments.iter().any(Ty::contains_inference))
+                {
+                    return false;
+                }
+                self.require_trait_inner(&ty, &interface, assumptions, stack)
+                    .is_err()
             }) {
                 continue;
             }
@@ -488,24 +492,29 @@ impl Model<'_> {
                 }
                 let mut bindings = BTreeMap::new();
                 if matches(&implementation.self_ty, ty, &mut bindings) {
+                    let mut obligations = Vec::new();
                     if implementation.obligations.iter().any(|bound| {
-                        self.require_trait(
-                            &substitute(&bound.ty, &bindings),
-                            &bound.interface.substitute(&bindings),
-                            assumptions,
-                        )
-                        .is_err()
+                        let ty = substitute(&bound.ty, &bindings);
+                        let interface = bound.interface.substitute(&bindings);
+                        if ty.contains_inference()
+                            || interface.arguments.iter().any(Ty::contains_inference)
+                        {
+                            obligations.push(Obligation {
+                                ty,
+                                interface,
+                                span: bound.span.clone(),
+                            });
+                            return false;
+                        }
+                        self.require_trait(&ty, &interface, assumptions).is_err()
                     }) {
                         continue;
                     }
                     if let Some(member) = implementation.members.get(name) {
-                        inherent.push(self.resolved_method(
-                            module,
-                            member,
-                            &bindings,
-                            assumptions,
-                            false,
-                        )?);
+                        let mut method =
+                            self.resolved_method(module, member, &bindings, assumptions, false)?;
+                        method.obligations = obligations;
+                        inherent.push(method);
                     }
                 }
             }
@@ -577,27 +586,34 @@ impl Model<'_> {
                 .zip(interface.arguments.iter().cloned())
                 .collect();
             bindings.insert("Self".into(), ty.clone());
-            match self.select_impl(ty, &interface, assumptions) {
+            match self.select_impl_inner(ty, &interface, assumptions, &mut Vec::new(), true) {
                 Ok(Some((id, matched))) => {
-                    if let Some(member) = self.traits.implementations[id].members.get(name) {
-                        methods.push(self.resolved_method(
-                            module,
-                            member,
-                            &matched,
-                            assumptions,
-                            true,
-                        )?);
-                    } else {
-                        methods.push(self.resolved_method(
-                            module,
-                            member,
-                            &bindings,
-                            assumptions,
-                            true,
-                        )?);
-                    }
-                    methods.last_mut().expect("刚刚插入方法").implementation =
-                        Some(self.traits.implementations[id].definition);
+                    let implementation = &self.traits.implementations[id];
+                    let obligations: Vec<_> = implementation
+                        .obligations
+                        .iter()
+                        .map(|bound| Obligation {
+                            ty: substitute(&bound.ty, &matched),
+                            interface: bound.interface.substitute(&matched),
+                            span: bound.span.clone(),
+                        })
+                        .filter(|bound| {
+                            bound.ty.contains_inference()
+                                || bound.interface.arguments.iter().any(Ty::contains_inference)
+                        })
+                        .collect();
+                    // 关联类型可借助待验证约束形成签名；调用方必须在推断完成后验证这些约束。
+                    let mut available = assumptions.to_vec();
+                    available.extend(obligations.iter().cloned());
+                    let (member, bindings) = implementation
+                        .members
+                        .get(name)
+                        .map_or((member, &bindings), |member| (member, &matched));
+                    let mut method =
+                        self.resolved_method(module, member, bindings, &available, true)?;
+                    method.implementation = Some(implementation.definition);
+                    method.obligations = obligations;
+                    methods.push(method);
                 }
                 Ok(None)
                     if assumptions
@@ -711,6 +727,7 @@ impl Model<'_> {
             member: None,
             dynamic: false,
             unsafety: self.member_is_unsafe(member),
+            obligations: Vec::new(),
         })
     }
 }

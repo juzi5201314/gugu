@@ -205,10 +205,11 @@ impl Checker<'_, '_> {
         let selected = self.assumptions(span).and_then(|assumptions| {
             self.model
                 .method(self.module, ty, Some(&interface), method, &assumptions)
+                .map(|method| (method, assumptions))
         });
-        let selected = match selected {
-            Ok(Some(method)) => method,
-            Ok(None) => {
+        let (selected, assumptions) = match selected {
+            Ok((Some(method), assumptions)) => (method, assumptions),
+            Ok((None, _)) => {
                 self.error(
                     DiagnosticCode::InvalidType,
                     format!("没有适用的 {name} 实现"),
@@ -221,6 +222,11 @@ impl Checker<'_, '_> {
                 return None;
             }
         };
+        self.trait_constraints
+            .extend(selected.obligations.iter().cloned().map(|mut obligation| {
+                obligation.span = span.clone();
+                (obligation, assumptions.clone())
+            }));
         if let Some(callable) = selected.callable
             && let Some(def) = self.model.function_definition(callable)
             && !self.dependencies.contains(&def)

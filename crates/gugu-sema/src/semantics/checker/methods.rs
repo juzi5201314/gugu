@@ -356,6 +356,12 @@ impl Checker<'_, '_> {
         receiver: bool,
         expected: Option<&Ty>,
     ) -> Ty {
+        if self.resolve(&self_ty) == Ty::Error {
+            for &argument in args {
+                self.expression(argument, None);
+            }
+            return Ty::Error;
+        }
         if interface.is_none() && receiver {
             if let Some(result) =
                 self.concurrency_method(callee, &self.resolve(&self_ty), name, args)
@@ -466,6 +472,11 @@ impl Checker<'_, '_> {
                 span.clone(),
             );
         }
+        self.trait_constraints
+            .extend(method.obligations.into_iter().map(|mut obligation| {
+                obligation.span = span.clone();
+                (obligation, assumptions.clone())
+            }));
         let callable = match method.callable {
             Some(id) => self.instantiate_callable(
                 Ty::Callable(id, method.arguments, Box::new(method.signature)),
@@ -598,6 +609,11 @@ impl Checker<'_, '_> {
                 return Ty::Error;
             }
         };
+        self.trait_constraints
+            .extend(selected.obligations.iter().cloned().map(|mut obligation| {
+                obligation.span = span.clone();
+                (obligation, assumptions.clone())
+            }));
         let (params, ret) = selected.signature.signature().expect("操作符方法签名");
         for (actual, expected) in [left, &right].into_iter().zip(params) {
             let actual = if matches!(expected, Ty::Ref(_)) {

@@ -121,6 +121,7 @@ impl Model<'_> {
             selected = Some(Method {
                 callable: None,
                 arguments: Vec::new(),
+                obligations: Vec::new(),
                 implementation: None,
                 dynamic: true,
                 unsafety: self.member_is_unsafe(member),

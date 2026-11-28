@@ -301,11 +301,13 @@ impl Checker<'_, '_> {
             for &arg in &args {
                 self.expression(arg, None);
             }
-            self.error(
-                DiagnosticCode::InvalidExpression,
-                format!("调用目标不是函数：{}", self.model.describe(&ty)),
-                expr.span.clone(),
-            );
+            if ty != Ty::Error {
+                self.error(
+                    DiagnosticCode::InvalidExpression,
+                    format!("调用目标不是函数：{}", self.model.describe(&ty)),
+                    expr.span.clone(),
+                );
+            }
             Ty::Error
         }
     }

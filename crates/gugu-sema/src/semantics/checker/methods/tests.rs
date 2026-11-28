@@ -81,3 +81,52 @@ fn explicit_constructor_rejects_missing_or_extra_generic_arguments() {
         );
     }
 }
+
+#[test]
+fn inferred_inherent_impl_bounds_are_checked_after_receiver_inference() {
+    let declaration = "trait Key {}\nimpl Key for int {}\n\
+        struct Map[K, V] {}\nimpl[K: Key, V] Map[K, V] {\n\
+        fn new() Self = Map[K, V] {}\nfn insert(self: &Self, key: K, value: V) {}\n}";
+    for body in [
+        "let m = Map::new()\n m.insert(1, true)",
+        "let m: Map[int, bool] = Map::new()\n _ = m",
+    ] {
+        let errors = check(&format!("{declaration}\nfn main() {{ {body} }}"));
+        assert!(errors.is_empty(), "{errors:?}");
+    }
+    let errors = check(&format!(
+        "{declaration}\nfn main() {{ let m = Map::new()\n m.insert(true, 1) }}"
+    ));
+    assert!(!errors.is_empty());
+}
+
+#[test]
+fn inferred_operator_impl_bounds_are_verified_after_numeric_inference() {
+    let declaration = "struct Cell[T] {}\n\
+        impl[T] Cell[T] { fn new() Self = Cell[T] {}\n\
+        fn set(self: &Self, value: T) {} }\n\
+        impl[T: Ord] Add[Cell[T]] for Cell[T] {\n\
+        type Output = Cell[T]\n fn add(self: Self, rhs: Self) Self = self\n}";
+    let errors = check(&format!(
+        "{declaration}\nfn main() {{ let value = Cell::new()\n\
+         _ = value + value\n let typed: Cell[u64] = value\n _ = typed }}"
+    ));
+    assert!(errors.is_empty(), "{errors:?}");
+    let errors = check(&format!(
+        "{declaration}\nfn main() {{ let value = Cell::new()\n\
+         _ = value + value\n value.set(1.5) }}"
+    ));
+    assert!(
+        errors
+            .iter()
+            .any(|error| error.message().contains("不满足 trait Ord")),
+        "{errors:?}"
+    );
+}
+
+#[test]
+fn erroneous_receivers_do_not_report_cascading_missing_methods() {
+    let errors = check("fn main() { let m = missing()\n m.insert(1, 2) }");
+    assert_eq!(errors.len(), 1, "{errors:?}");
+    assert!(errors[0].message().contains("missing"));
+}

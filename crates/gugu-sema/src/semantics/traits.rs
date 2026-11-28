@@ -110,6 +110,7 @@ pub struct Method {
     pub implementation: Option<DefRef>,
     pub interface: Option<TraitRef>,
     pub member: Option<u32>,
+    pub(super) obligations: Vec<Obligation>,
 }
 
 impl Model<'_> {

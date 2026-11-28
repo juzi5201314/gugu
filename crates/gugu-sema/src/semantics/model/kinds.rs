@@ -70,6 +70,34 @@ impl Ty {
             _ => None,
         }
     }
+    pub(in super::super) fn contains_inference(&self) -> bool {
+        match self {
+            Self::Var(_) => true,
+            Self::Ref(ty)
+            | Self::Ptr(ty)
+            | Self::Slice(ty)
+            | Self::Array(ty, _)
+            | Self::Option(ty)
+            | Self::Chan(ty)
+            | Self::Join(ty)
+            | Self::MaybeUninit(ty) => ty.contains_inference(),
+            Self::Tuple(types) | Self::Named(_, types) | Self::Opaque(_, types) => {
+                types.iter().any(Self::contains_inference)
+            }
+            Self::Function(params, result) | Self::Callable(_, params, result) => {
+                params.iter().any(Self::contains_inference) || result.contains_inference()
+            }
+            Self::Result(ok, error) => ok.contains_inference() || error.contains_inference(),
+            Self::Projection(ty, interface, _) => {
+                ty.contains_inference() || interface.arguments.iter().any(Self::contains_inference)
+            }
+            Self::Dyn(interfaces) => interfaces
+                .iter()
+                .flat_map(|interface| &interface.arguments)
+                .any(Self::contains_inference),
+            _ => false,
+        }
+    }
     pub fn primitive(name: &str) -> Option<Self> {
         Some(match name {
             "bool" => Self::Bool,

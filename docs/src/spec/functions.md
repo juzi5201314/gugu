@@ -129,6 +129,8 @@ fn demo(xs: &[int]) {
 
 `p.len()` 查找 `len` 对 `p` 的类型：固有 `impl` 优先，然后 trait。与 `Point::len(p)` 等价。没有虚槽、不能在值上改方法。`dyn Trait` 才是虚调用。`dyn Any` 的 `is` / `downcast` / `downcast_copy` 是挂在 `dyn Any` 上的固有方法，显式类型实参写 `a.downcast::[T]()`。无 `self` 的关联函数只能 `Type::name(...)`，不能 `value.name()`。
 
+泛型类型的关联函数允许省略能由上下文唯一推断的类型实参。`let m = HashMap::new()` 可由后续 `m.insert("a", 1)` 推断为 `HashMap[string, int]`，也可由绑定的显式类型约束；`HashSet`、`BTreeMap`、`BTreeSet` 遵守相同规则。固有方法与 trait 方法的 `impl` 约束在类型实参收敛后仍须成立，不能因推断而绕过键类型约束。`for` 的 `IntoIter` 派发同样保留尚未确定的数值键类型，循环体的类型上下文可以继续约束它，不会提前强制默认为 `int`。显式类型实参写在类型名后，例如 `HashMap[string, int]::new()`；`HashMap::[string, int].new()` 不是关联函数调用语法。接收者或调用目标已经是错误类型时，不再额外报告缺少方法或不是函数的级联错误。
+
 ## `async` 与闭包
 
 `async { ... }` / `async f(x)`：闭包按上面的捕获规则延命，然后在新协程上跑。禁止因为捕获栈变量而悬空——必须升到堆或拷贝。
